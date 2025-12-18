@@ -11,17 +11,14 @@ interface AuthContextValue extends AuthState {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
-const TIDECLOAK_URL = import.meta.env.VITE_TIDECLOAK_URL || "";
-const TIDECLOAK_REALM = import.meta.env.VITE_TIDECLOAK_REALM || "";
-const TIDECLOAK_CLIENT_ID = import.meta.env.VITE_TIDECLOAK_CLIENT_ID || "";
-
 const tidecloakConfig = {
-  realm: TIDECLOAK_REALM,
-  "auth-server-url": TIDECLOAK_URL,
+  realm: import.meta.env.VITE_TIDECLOAK_REALM || "",
+  "auth-server-url": import.meta.env.VITE_TIDECLOAK_URL || "",
   "ssl-required": "external",
-  resource: TIDECLOAK_CLIENT_ID,
+  resource: import.meta.env.VITE_TIDECLOAK_CLIENT_ID || "",
   "public-client": true,
   "confidential-port": 0,
+  redirectUri: `${window.location.origin}/auth/redirect`,
 };
 
 function TideCloakAuthBridge({ children }: { children: ReactNode }) {
@@ -106,3 +103,5 @@ export function useAuth() {
   }
   return context;
 }
+
+export { useTideCloak };

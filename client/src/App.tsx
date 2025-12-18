@@ -7,6 +7,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { AuthProvider, useAuth } from "@/contexts/AuthContext";
 import { AppLayout } from "@/components/layout/AppLayout";
 import Login from "@/pages/Login";
+import AuthRedirect from "@/pages/AuthRedirect";
 import Dashboard from "@/pages/Dashboard";
 import Console from "@/pages/Console";
 import AdminDashboard from "@/pages/AdminDashboard";
@@ -110,7 +111,7 @@ function Router() {
       </Route>
       
       <Route path="/login" component={Login} />
-      <Route path="/callback" component={Login} />
+      <Route path="/auth/redirect" component={AuthRedirect} />
       
       <Route path="/app">
         <ProtectedRoute>

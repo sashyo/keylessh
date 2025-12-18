@@ -2,12 +2,21 @@ import { useAuth } from "@/contexts/AuthContext";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Terminal, Shield, Server, Key, ArrowRight } from "lucide-react";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useLocation } from "wouter";
 
 export default function Login() {
   const { login, isAuthenticated, isLoading } = useAuth();
   const [, setLocation] = useLocation();
+  const [sessionExpired, setSessionExpired] = useState(false);
+
+  useEffect(() => {
+    const expired = sessionStorage.getItem("tokenExpired");
+    if (expired === "true") {
+      setSessionExpired(true);
+      sessionStorage.removeItem("tokenExpired");
+    }
+  }, []);
 
   useEffect(() => {
     if (isAuthenticated && !isLoading) {
@@ -98,6 +107,11 @@ export default function Login() {
               <CardDescription>
                 Authenticate with your organization's identity provider
               </CardDescription>
+              {sessionExpired && (
+                <p className="text-sm text-destructive mt-2">
+                  Your session has expired. Please sign in again.
+                </p>
+              )}
             </CardHeader>
             <CardContent className="space-y-4">
               <Button

@@ -5,7 +5,7 @@ A multi-user Web SSH console application with OIDC authentication via Tidecloak.
 ## Project Overview
 
 KeyleSSH provides:
-- **OIDC Authentication**: Secure login via TideCloak using @tidecloak/react SDK
+- **OIDC Authentication**: Secure login via TideCloak using @tidecloak/react SDK with silent SSO, auto token refresh, and session management
 - **Multi-Server Access**: Connect to multiple SSH servers with role-based permissions
 - **Terminal Console**: Full xterm.js terminal with copy/paste, resize handling, and connection management
 - **Admin Dashboard**: Server management, user permissions, and session monitoring
@@ -74,6 +74,7 @@ npm run dev
 ## Routes
 
 - `/login` - Authentication page
+- `/auth/redirect` - TideCloak OAuth redirect handler
 - `/app` - User dashboard (protected)
 - `/app/console/:serverId` - SSH terminal (protected)
 - `/admin` - Admin dashboard (admin only)
