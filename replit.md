@@ -5,7 +5,7 @@ A multi-user Web SSH console application with OIDC authentication via Tidecloak.
 ## Project Overview
 
 KeyleSSH provides:
-- **OIDC Authentication**: Secure login via Tidecloak identity provider using Authorization Code + PKCE flow
+- **OIDC Authentication**: Secure login via TideCloak using @tidecloak/react SDK
 - **Multi-Server Access**: Connect to multiple SSH servers with role-based permissions
 - **Terminal Console**: Full xterm.js terminal with copy/paste, resize handling, and connection management
 - **Admin Dashboard**: Server management, user permissions, and session monitoring
@@ -29,15 +29,13 @@ Configure these in `.env` or Replit Secrets:
 VITE_API_BASE_URL=           # Backend API base URL (leave empty for same-origin)
 VITE_WS_BASE_URL=            # WebSocket base URL (leave empty for same-origin)
 
-# OIDC/Tidecloak Configuration
-VITE_OIDC_ISSUER=            # Tidecloak issuer URL (e.g., https://auth.example.com/realms/myrealm)
-VITE_OIDC_CLIENT_ID=         # OIDC client ID
-VITE_OIDC_REDIRECT_URI=      # OAuth callback URL (defaults to {origin}/callback)
-VITE_OIDC_LOGOUT_REDIRECT_URI= # Post-logout redirect (defaults to origin)
-VITE_OIDC_SCOPE=             # OIDC scopes (defaults to "openid profile email")
+# TideCloak Configuration (using @tidecloak/react SDK)
+VITE_TIDECLOAK_URL=          # TideCloak server URL (e.g., https://auth.example.com)
+VITE_TIDECLOAK_REALM=        # TideCloak realm name
+VITE_TIDECLOAK_CLIENT_ID=    # TideCloak client ID (public client)
 
 # Mock Mode
-VITE_USE_MOCK=true           # Set to "true" for demo/development mode
+VITE_USE_MOCK=true           # Set to "true" for demo/development mode (auto-enabled when TIDECLOAK_URL is not set)
 ```
 
 ## Running the Application
