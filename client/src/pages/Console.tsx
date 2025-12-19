@@ -83,6 +83,9 @@ export default function Console() {
       }, []),
     });
 
+  const prevStatusRef = useRef<SSHConnectionStatus>("disconnected");
+  const disconnectedWithReason = status === "disconnected" && !!error;
+
   // Handle connection with private key
   const handleConnect = useCallback(
     async (privateKey: string, passphrase?: string) => {
@@ -206,7 +209,13 @@ export default function Console() {
   // Show key dialog when server data is loaded and we're disconnected
   // Only auto-show if user hasn't manually dismissed it
   useEffect(() => {
-    if (server && status === "disconnected" && !showKeyDialog && !userDismissedDialog) {
+    if (
+      server &&
+      status === "disconnected" &&
+      !error &&
+      !showKeyDialog &&
+      !userDismissedDialog
+    ) {
       setShowKeyDialog(true);
     }
     // Auto-close dialog when connected
@@ -215,7 +224,7 @@ export default function Console() {
       setUserDismissedDialog(false); // Reset so it can auto-show on next disconnect
       xtermRef.current?.focus();
     }
-  }, [server, status, showKeyDialog, userDismissedDialog]);
+  }, [server, status, error, showKeyDialog, userDismissedDialog]);
 
   // Handle dialog close (user manually closing)
   const handleDialogOpenChange = useCallback((open: boolean) => {
@@ -235,6 +244,22 @@ export default function Console() {
       });
     }
   }, [error, status, toast]);
+
+  // Show a clearer message when an established session is disconnected (e.g. admin termination)
+  useEffect(() => {
+    const prev = prevStatusRef.current;
+    prevStatusRef.current = status;
+
+    if (prev !== "disconnected" && status === "disconnected" && error) {
+      toast({
+        title: "Disconnected",
+        description: error,
+        variant: "destructive",
+      });
+      setUserDismissedDialog(true);
+      setShowKeyDialog(false);
+    }
+  }, [status, error, toast]);
 
   const StatusIcon = statusConfig[status].icon;
 
@@ -353,6 +378,22 @@ export default function Console() {
           data-testid="terminal-container"
         />
 
+        {disconnectedWithReason && !showKeyDialog && (
+          <div className="absolute inset-0 flex items-center justify-center bg-background/80">
+            <div className="text-center space-y-4 max-w-md px-4">
+              <WifiOff className="h-12 w-12 text-destructive mx-auto" />
+              <div>
+                <h3 className="font-medium">Session Disconnected</h3>
+                <p className="text-sm text-muted-foreground mt-1">{error}</p>
+              </div>
+              <Button onClick={handleReconnect} data-testid="reconnect-after-disconnect-button">
+                <RefreshCw className="h-4 w-4 mr-2" />
+                Reconnect
+              </Button>
+            </div>
+          </div>
+        )}
+
         {status === "error" && !showKeyDialog && (
           <div className="absolute inset-0 flex items-center justify-center bg-background/80">
             <div className="text-center space-y-4">
@@ -380,7 +421,7 @@ export default function Console() {
         serverName={server?.name || ""}
         username={sshUser}
         isConnecting={status === "connecting" || status === "authenticating"}
-        error={status === "error" ? error : null}
+        error={status === "error" || disconnectedWithReason ? error : null}
       />
     </div>
   );

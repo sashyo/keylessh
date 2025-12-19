@@ -19,11 +19,14 @@ export const servers = sqliteTable("servers", {
   tags: text("tags", { mode: "json" }).$type<string[]>().notNull().default([]),
   enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
   sshUsers: text("ssh_users", { mode: "json" }).$type<string[]>().notNull().default([]),
+  healthCheckUrl: text("health_check_url"),  // Optional health API endpoint
 });
 
 export const sessions = sqliteTable("sessions", {
   id: text("id").primaryKey(),
   userId: text("user_id").notNull(),
+  userUsername: text("user_username"),
+  userEmail: text("user_email"),
   serverId: text("server_id").notNull(),
   sshUser: text("ssh_user").notNull(),
   status: text("status").notNull().default("active"),
@@ -60,8 +63,11 @@ export interface AuthState {
   isLoading: boolean;
 }
 
+export type ServerStatus = "online" | "offline" | "unknown";
+
 export interface ServerWithAccess extends Server {
   allowedSshUsers: string[];
+  status: ServerStatus;  // Actual health status from health check
 }
 
 export interface ActiveSession extends Session {

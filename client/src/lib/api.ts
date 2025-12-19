@@ -111,6 +111,11 @@ export const api = {
     },
     sessions: {
       list: () => apiRequest<ActiveSession[]>("/api/admin/sessions"),
+      terminate: (id: string) =>
+        apiRequest<{ success: boolean; terminated: boolean }>(
+          `/api/admin/sessions/${id}/terminate`,
+          { method: "POST" }
+        ),
     },
     approvals: {
       list: () => apiRequest<PendingApproval[]>("/api/admin/approvals"),
@@ -144,7 +149,7 @@ export const api = {
     },
     logs: {
       access: (limit?: number, offset?: number) =>
-        apiRequest<AccessChangeLog[]>(
+        apiRequest<TidecloakEvent[]>(
           `/api/admin/logs/access?limit=${limit || 100}&offset=${offset || 0}`
         ),
     },
@@ -197,14 +202,14 @@ export interface PendingApproval {
   deniedBy?: string[];
 }
 
-export interface AccessChangeLog {
-  id: number;
-  timestamp: number;
+export interface TidecloakEvent {
+  id: string;
+  time: number;
   type: string;
-  approvalId: string;
-  userEmail: string;
-  targetUser?: string;
-  details?: string;
+  clientId?: string;
+  userId?: string;
+  ipAddress?: string;
+  details?: Record<string, any>;
 }
 
 // TideCloak Change Set Types

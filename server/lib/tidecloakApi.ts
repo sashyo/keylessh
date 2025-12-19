@@ -17,6 +17,44 @@ const getTcUrl = () => `${getKeycloakAuthServer()}/admin/realms/${getRealm_()}`;
 
 const REALM_MGMT = "realm-management";
 
+export interface KeycloakEvent {
+  id: string;
+  time: number;
+  type: string;
+  clientId?: string;
+  userId?: string;
+  ipAddress?: string;
+  details?: Record<string, any>;
+}
+
+export const GetClientEvents = async (
+  token: string,
+  first: number = 0,
+  max: number = 100
+): Promise<KeycloakEvent[]> => {
+  const clientId = getClient();
+  const params = new URLSearchParams({
+    first: String(first),
+    max: String(max),
+    client: clientId,
+  });
+
+  const response = await fetch(`${getTcUrl()}/events?${params.toString()}`, {
+    method: "GET",
+    headers: {
+      accept: "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.text();
+    throw new Error(`Error fetching events: ${response.status} ${errorBody}`);
+  }
+
+  return response.json();
+};
+
 export const getUserByVuid = async (
   vuid: string,
   token: string

@@ -72,12 +72,15 @@ sqlite.exec(`
     environment TEXT NOT NULL DEFAULT 'production',
     tags TEXT NOT NULL DEFAULT '[]',
     enabled INTEGER NOT NULL DEFAULT 1,
-    ssh_users TEXT NOT NULL DEFAULT '[]'
+    ssh_users TEXT NOT NULL DEFAULT '[]',
+    health_check_url TEXT
   );
 
   CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
+    user_username TEXT,
+    user_email TEXT,
     server_id TEXT NOT NULL,
     ssh_user TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'active',
@@ -121,6 +124,35 @@ sqlite.exec(`
   CREATE INDEX IF NOT EXISTS idx_access_change_logs_timestamp ON access_change_logs(timestamp DESC);
   CREATE INDEX IF NOT EXISTS idx_access_change_logs_approval_id ON access_change_logs(approval_id);
 `);
+
+// Lightweight migrations for existing DBs (CREATE TABLE IF NOT EXISTS doesn't alter).
+try {
+  const serverColumns = sqlite
+    .prepare(`PRAGMA table_info(servers)`)
+    .all() as Array<{ name: string }>;
+  const hasHealthCheckUrl = serverColumns.some((c) => c.name === "health_check_url");
+  if (!hasHealthCheckUrl) {
+    sqlite.prepare(`ALTER TABLE servers ADD COLUMN health_check_url TEXT`).run();
+  }
+} catch {
+  // Ignore migration errors; queries will surface issues.
+}
+
+try {
+  const sessionColumns = sqlite
+    .prepare(`PRAGMA table_info(sessions)`)
+    .all() as Array<{ name: string }>;
+  const hasUserUsername = sessionColumns.some((c) => c.name === "user_username");
+  const hasUserEmail = sessionColumns.some((c) => c.name === "user_email");
+  if (!hasUserUsername) {
+    sqlite.prepare(`ALTER TABLE sessions ADD COLUMN user_username TEXT`).run();
+  }
+  if (!hasUserEmail) {
+    sqlite.prepare(`ALTER TABLE sessions ADD COLUMN user_email TEXT`).run();
+  }
+} catch {
+  // Ignore migration errors; queries will surface issues.
+}
 
 export class SQLiteStorage implements IStorage {
   async getUser(id: string): Promise<User | undefined> {
@@ -184,6 +216,7 @@ export class SQLiteStorage implements IStorage {
       tags: (insertServer.tags ?? []) as string[],
       enabled: insertServer.enabled ?? true,
       sshUsers: (insertServer.sshUsers ?? []) as string[],
+      healthCheckUrl: insertServer.healthCheckUrl ?? null,
     };
     db.insert(servers).values(server).run();
     return server;
@@ -226,6 +259,8 @@ export class SQLiteStorage implements IStorage {
     const session: Session = {
       id,
       userId: insertSession.userId,
+      userUsername: insertSession.userUsername ?? null,
+      userEmail: insertSession.userEmail ?? null,
       serverId: insertSession.serverId,
       sshUser: insertSession.sshUser,
       status: insertSession.status ?? "active",

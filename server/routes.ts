@@ -1,8 +1,44 @@
 import type { Express } from "express";
 import type { Server } from "http";
 import { storage, approvalStorage, type ApprovalType } from "./storage";
-import { log } from "./index";
-import type { ServerWithAccess, ActiveSession } from "@shared/schema";
+import { log } from "./logger";
+import { terminateSession } from "./wsBridge";
+import type { ServerWithAccess, ActiveSession, ServerStatus, Server as ServerType } from "@shared/schema";
+
+// Check server health by calling its health check URL
+async function checkServerHealth(server: ServerType): Promise<ServerStatus> {
+  if (!server.healthCheckUrl) {
+    return "unknown";
+  }
+
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
+
+    const response = await fetch(server.healthCheckUrl, {
+      method: "GET",
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+    return response.ok ? "online" : "offline";
+  } catch (error) {
+    return "offline";
+  }
+}
+
+// Check health for multiple servers in parallel
+async function checkServersHealth(servers: ServerType[]): Promise<Map<string, ServerStatus>> {
+  const healthChecks = servers.map(async (server) => {
+    const status = await checkServerHealth(server);
+    return { id: server.id, status };
+  });
+
+  const results = await Promise.all(healthChecks);
+  const statusMap = new Map<string, ServerStatus>();
+  results.forEach(({ id, status }) => statusMap.set(id, status));
+  return statusMap;
+}
 import {
   authenticate,
   requireAdmin,
@@ -17,6 +53,7 @@ import {
   CancelChangeRequest,
   GetRawChangeSetRequest,
   AddApprovalWithSignedRequest,
+  GetClientEvents,
 } from "./lib/tidecloakApi";
 import type { ChangeSetRequest, AccessApproval } from "./lib/auth/keycloakTypes";
 
@@ -40,12 +77,18 @@ export async function registerRoutes(
       if (user.role === "admin") {
         servers = await storage.getServers();
       } else {
-        servers = await storage.getServersByIds(user.allowedServers || []);
+        // Non-admin users can view all configured servers (connect access is still gated
+        // by server existence/enabled and WS/session validation).
+        servers = (await storage.getServers()).filter((s) => s.enabled);
       }
+
+      // Check health status for all servers in parallel
+      const healthStatusMap = await checkServersHealth(servers);
 
       const serversWithAccess: ServerWithAccess[] = servers.map((server) => ({
         ...server,
         allowedSshUsers: server.sshUsers || [],
+        status: healthStatusMap.get(server.id) || "unknown",
       }));
 
       res.json(serversWithAccess);
@@ -64,15 +107,18 @@ export async function registerRoutes(
         return;
       }
 
-      // Check if user has access to this server (admins have access to all)
-      if (user.role !== "admin" && !user.allowedServers.includes(server.id)) {
-        res.status(403).json({ message: "Access denied to this server" });
+      if (user.role !== "admin" && !server.enabled) {
+        res.status(404).json({ message: "Server not found" });
         return;
       }
+
+      // Check health status
+      const status = await checkServerHealth(server);
 
       const serverWithAccess: ServerWithAccess = {
         ...server,
         allowedSshUsers: server.sshUsers || [],
+        status,
       };
 
       res.json(serverWithAccess);
@@ -113,14 +159,15 @@ export async function registerRoutes(
         return;
       }
 
-      // Check if user has access to this server
-      if (user.role !== "admin" && !user.allowedServers.includes(serverId)) {
-        res.status(403).json({ message: "Access denied to this server" });
+      if (user.role !== "admin" && !server.enabled) {
+        res.status(404).json({ message: "Server not found" });
         return;
       }
 
       const session = await storage.createSession({
         userId: user.id,
+        userUsername: user.username,
+        userEmail: user.email,
         serverId,
         sshUser,
         status: "active",
@@ -175,9 +222,8 @@ export async function registerRoutes(
           return;
         }
 
-        // Check if user has access to this server (admins have access to all)
-        if (user.role !== "admin" && !user.allowedServers.includes(server.id)) {
-          res.status(403).json({ message: "Access denied to this server" });
+        if (user.role !== "admin" && !server.enabled) {
+          res.status(404).json({ message: "Server not found" });
           return;
         }
 
@@ -563,6 +609,27 @@ export async function registerRoutes(
     }
   );
 
+  app.post(
+    "/api/admin/sessions/:id/terminate",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const sessionId = req.params.id;
+
+        const terminated = terminateSession(sessionId);
+        await storage.endSession(sessionId);
+
+        res.json({
+          success: true,
+          terminated,
+        });
+      } catch (error) {
+        res.status(500).json({ message: "Failed to terminate session" });
+      }
+    }
+  );
+
   // ============================================
   // Admin Approvals Routes (ideed-swarm pattern)
   // ============================================
@@ -914,7 +981,7 @@ export async function registerRoutes(
     }
   );
 
-  // GET /api/admin/logs/access - Get access change logs
+  // GET /api/admin/logs/access - Get TideCloak client user events
   app.get(
     "/api/admin/logs/access",
     authenticate,
@@ -923,12 +990,12 @@ export async function registerRoutes(
       try {
         const limit = parseInt(req.query.limit as string) || 100;
         const offset = parseInt(req.query.offset as string) || 0;
-
-        const logs = await approvalStorage.getAccessChangeLogs(limit, offset);
-        res.json(logs);
+        const token = req.accessToken!;
+        const events = await GetClientEvents(token, offset, limit);
+        res.json(events);
       } catch (error) {
         log(`Failed to fetch access logs: ${error}`);
-        res.status(500).json({ error: "Failed to fetch access logs" });
+        res.status(500).json({ message: "Failed to fetch access logs" });
       }
     }
   );

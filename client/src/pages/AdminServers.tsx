@@ -44,6 +44,7 @@ interface ServerFormData {
   tags: string;
   sshUsers: string;
   enabled: boolean;
+  healthCheckUrl: string;
 }
 
 const defaultFormData: ServerFormData = {
@@ -54,6 +55,7 @@ const defaultFormData: ServerFormData = {
   tags: "",
   sshUsers: "root",
   enabled: true,
+  healthCheckUrl: "",
 };
 
 function ServerForm({
@@ -153,6 +155,20 @@ function ServerForm({
         />
       </div>
 
+      <div className="space-y-2">
+        <Label htmlFor="healthCheckUrl">Health Check URL (optional)</Label>
+        <Input
+          id="healthCheckUrl"
+          value={formData.healthCheckUrl}
+          onChange={(e) => setFormData({ ...formData, healthCheckUrl: e.target.value })}
+          placeholder="http://192.168.1.100:8080/health"
+          data-testid="input-server-health-check"
+        />
+        <p className="text-xs text-muted-foreground">
+          API endpoint to check if server is online. If not set, status will show as unknown.
+        </p>
+      </div>
+
       <div className="flex items-center justify-between">
         <Label htmlFor="enabled">Enabled</Label>
         <Switch
@@ -195,6 +211,7 @@ export default function AdminServers() {
         tags: data.tags.split(",").map((t) => t.trim()).filter(Boolean),
         sshUsers: data.sshUsers.split(",").map((u) => u.trim()).filter(Boolean),
         enabled: data.enabled,
+        healthCheckUrl: data.healthCheckUrl || null,
       };
       return apiRequest("POST", "/api/admin/servers", serverData);
     },
@@ -218,6 +235,7 @@ export default function AdminServers() {
         tags: data.tags.split(",").map((t) => t.trim()).filter(Boolean),
         sshUsers: data.sshUsers.split(",").map((u) => u.trim()).filter(Boolean),
         enabled: data.enabled,
+        healthCheckUrl: data.healthCheckUrl || null,
       };
       return apiRequest("PATCH", `/api/admin/servers/${id}`, serverData);
     },
@@ -307,6 +325,7 @@ export default function AdminServers() {
                       tags: editingServer.tags?.join(", ") || "",
                       sshUsers: editingServer.sshUsers?.join(", ") || "",
                       enabled: editingServer.enabled,
+                      healthCheckUrl: editingServer.healthCheckUrl || "",
                     }
                   : undefined
               }

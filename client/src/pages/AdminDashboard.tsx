@@ -3,9 +3,10 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Server, Users, Activity, Shield, TrendingUp, AlertTriangle } from "lucide-react";
-import type { Server as ServerType, User, ActiveSession } from "@shared/schema";
+import type { Server as ServerType, AdminUser, ActiveSession } from "@shared/schema";
 import { Link } from "wouter";
 import { Button } from "@/components/ui/button";
+import { ADMIN_ROLE_SET } from "@shared/config/roles";
 
 function StatCard({
   title,
@@ -60,7 +61,7 @@ export default function AdminDashboard() {
     queryKey: ["/api/admin/servers"],
   });
 
-  const { data: users, isLoading: usersLoading } = useQuery<User[]>({
+  const { data: users, isLoading: usersLoading } = useQuery<AdminUser[]>({
     queryKey: ["/api/admin/users"],
   });
 
@@ -72,7 +73,9 @@ export default function AdminDashboard() {
 
   const activeSessions = sessions?.filter((s) => s.status === "active") || [];
   const enabledServers = servers?.filter((s) => s.enabled) || [];
-  const adminUsers = users?.filter((u) => u.role === "admin") || [];
+  // AdminUser.role is an array of role names - match only known admin roles
+  const adminUsers =
+    users?.filter((u) => u.role?.some((r) => ADMIN_ROLE_SET.has(r))) || [];
 
   return (
     <div className="p-6 space-y-8">

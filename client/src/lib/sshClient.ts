@@ -7,6 +7,7 @@ import {
   SshDataWriter,
 } from "@microsoft/dev-tunnels-ssh";
 import { importKey } from "@microsoft/dev-tunnels-ssh-keys";
+import type { Session } from "@shared/schema";
 
 // Dynamic import of the actual message classes from CommonJS module
 // This ensures we use the exact same prototype chain as the library
@@ -109,6 +110,9 @@ export class BrowserSSHClient {
   private options: SSHClientOptions;
   private cols: number = 80;
   private rows: number = 24;
+  private sessionId: string | null = null;
+  private sessionEnded = false;
+  private isCleaningUp = false;
 
   constructor(options: SSHClientOptions) {
     this.options = options;
@@ -131,6 +135,10 @@ export class BrowserSSHClient {
 
       this.options.onStatusChange("connecting");
 
+      // Create session record first so the WS bridge can be associated with a session.
+      this.sessionId = await this.createSessionRecord();
+      this.sessionEnded = false;
+
       // Import the private key
       const keyPair = await importKey(privateKeyPem, passphrase);
 
@@ -143,6 +151,16 @@ export class BrowserSSHClient {
 
       // Wait for WebSocket to connect
       await this.waitForWebSocketOpen();
+
+      // Handle socket closure (e.g. admin termination, network drop)
+      this.websocket.addEventListener("close", (event) => {
+        if (this.isCleaningUp) return;
+        if (event.reason) {
+          this.options.onError(event.reason);
+        }
+        this.options.onClose();
+        this.cleanup();
+      });
 
       // Wait for TCP bridge to confirm connection
       await this.waitForTcpConnection();
@@ -186,6 +204,7 @@ export class BrowserSSHClient {
       this.options.onStatusChange("error");
       const message = error instanceof Error ? error.message : String(error);
       this.options.onError(message);
+      await this.endSessionRecordOnce();
       this.cleanup();
       throw error;
     }
@@ -201,9 +220,56 @@ export class BrowserSSHClient {
       port: this.options.port.toString(),
       serverId: this.options.serverId,
       token,
+      sessionId: this.sessionId || "",
     });
 
     return `${protocol}//${host}/ws/tcp?${params.toString()}`;
+  }
+
+  private async createSessionRecord(): Promise<string> {
+    const token = localStorage.getItem("access_token");
+    if (!token) {
+      throw new Error("Not authenticated");
+    }
+
+    const res = await fetch("/api/sessions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        serverId: this.options.serverId,
+        sshUser: this.options.username,
+      }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ message: "Failed to create session" }));
+      throw new Error(err.message || `HTTP ${res.status}`);
+    }
+
+    const session = (await res.json()) as Session;
+    return session.id;
+  }
+
+  private async endSessionRecordOnce(): Promise<void> {
+    if (!this.sessionId || this.sessionEnded) return;
+    this.sessionEnded = true;
+
+    const token = localStorage.getItem("access_token");
+    if (!token) return;
+
+    try {
+      await fetch(`/api/sessions/${this.sessionId}`, {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+    } catch {
+      // ignore
+    }
   }
 
   private waitForWebSocketOpen(): Promise<void> {
@@ -388,6 +454,11 @@ export class BrowserSSHClient {
   }
 
   private cleanup(): void {
+    if (this.isCleaningUp) return;
+    this.isCleaningUp = true;
+
+    void this.endSessionRecordOnce();
+
     if (this.channel) {
       try {
         this.channel.dispose();
@@ -414,5 +485,7 @@ export class BrowserSSHClient {
       }
       this.websocket = null;
     }
+
+    this.isCleaningUp = false;
   }
 }

@@ -41,8 +41,8 @@ const adminNavItems = [
   { title: "Manage Users", url: "/admin/users", icon: Users },
   { title: "Manage Roles", url: "/admin/roles", icon: KeyRound },
   { title: "Approvals", url: "/admin/approvals", icon: CheckSquare },
-  { title: "All Sessions", url: "/admin/sessions", icon: Activity },
-  { title: "Access Logs", url: "/admin/logs", icon: ScrollText },
+  { title: "Manage Sessions", url: "/admin/sessions", icon: Activity },
+  { title: "Logs", url: "/admin/logs", icon: ScrollText },
 ];
 
 export function AppLayout({ children }: AppLayoutProps) {

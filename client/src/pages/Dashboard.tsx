@@ -6,7 +6,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Server, Terminal, Clock, Activity, ArrowRight, Wifi, WifiOff } from "lucide-react";
+import { Server, Terminal, Clock, Activity, ArrowRight, Wifi, WifiOff, HelpCircle } from "lucide-react";
 import { useState } from "react";
 import type { ServerWithAccess, ActiveSession } from "@shared/schema";
 
@@ -29,15 +29,20 @@ function ServerCard({ server }: { server: ServerWithAccess }) {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            {server.enabled ? (
-              <Badge variant="outline" className="gap-1.5">
+            {server.status === "online" ? (
+              <Badge variant="outline" className="gap-1.5 bg-green-50 text-green-700 border-green-200">
                 <Wifi className="h-3 w-3" />
                 Online
               </Badge>
-            ) : (
-              <Badge variant="secondary" className="gap-1.5">
+            ) : server.status === "offline" ? (
+              <Badge variant="secondary" className="gap-1.5 bg-red-50 text-red-700 border-red-200">
                 <WifiOff className="h-3 w-3" />
                 Offline
+              </Badge>
+            ) : (
+              <Badge variant="secondary" className="gap-1.5">
+                <HelpCircle className="h-3 w-3" />
+                Unknown
               </Badge>
             )}
           </div>
@@ -76,7 +81,7 @@ function ServerCard({ server }: { server: ServerWithAccess }) {
         <Link href={`/app/console/${server.id}?user=${selectedUser}`}>
           <Button
             className="w-full gap-2"
-            disabled={!server.enabled || !selectedUser}
+            disabled={!server.enabled || server.status === "offline" || !selectedUser}
             data-testid={`connect-button-${server.id}`}
           >
             <Terminal className="h-4 w-4" />
@@ -140,7 +145,7 @@ function SessionItem({ session }: { session: ActiveSession }) {
             Active
           </Badge>
         </div>
-        <Link href={`/app/console/${session.serverId}?session=${session.id}`}>
+        <Link href={`/app/console/${session.serverId}?user=${encodeURIComponent(session.sshUser)}`}>
           <Button size="sm" variant="ghost" data-testid={`reconnect-session-${session.id}`}>
             Reconnect
           </Button>
@@ -249,8 +254,15 @@ export default function Dashboard() {
                       </p>
                     </div>
                   </div>
-                  <div className="text-xs text-muted-foreground">
-                    {session.endedAt ? new Date(session.endedAt).toLocaleDateString() : ""}
+                  <div className="flex items-center gap-3">
+                    <div className="text-xs text-muted-foreground">
+                      {session.endedAt ? new Date(session.endedAt).toLocaleDateString() : ""}
+                    </div>
+                    <Link href={`/app/console/${session.serverId}?user=${encodeURIComponent(session.sshUser)}`}>
+                      <Button size="sm" variant="ghost" data-testid={`reconnect-recent-session-${session.id}`}>
+                        Reconnect
+                      </Button>
+                    </Link>
                   </div>
                 </div>
               ))}
