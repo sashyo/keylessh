@@ -84,6 +84,42 @@ sqlite.exec(`
     started_at INTEGER NOT NULL,
     ended_at INTEGER
   );
+
+  -- Approval tables (matching ideed-swarm structure)
+  CREATE TABLE IF NOT EXISTS pending_approvals (
+    id TEXT PRIMARY KEY,
+    type TEXT NOT NULL CHECK(type IN ('user_create', 'user_update', 'user_delete', 'role_assign', 'role_remove')),
+    requested_by TEXT NOT NULL,
+    target_user_id TEXT,
+    target_user_email TEXT,
+    data TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'denied', 'committed', 'cancelled')),
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+    updated_at INTEGER
+  );
+
+  CREATE TABLE IF NOT EXISTS approval_decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    approval_id TEXT NOT NULL,
+    user_vuid TEXT NOT NULL,
+    user_email TEXT NOT NULL,
+    decision INTEGER NOT NULL CHECK(decision IN (0, 1)),
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+    FOREIGN KEY (approval_id) REFERENCES pending_approvals(id) ON DELETE CASCADE,
+    UNIQUE(approval_id, user_vuid)
+  );
+
+  CREATE TABLE IF NOT EXISTS access_change_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+    type TEXT NOT NULL CHECK(type IN ('created', 'approved', 'denied', 'deleted', 'committed', 'cancelled')),
+    approval_id TEXT NOT NULL,
+    user_email TEXT NOT NULL,
+    target_user TEXT,
+    details TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_access_change_logs_timestamp ON access_change_logs(timestamp DESC);
+  CREATE INDEX IF NOT EXISTS idx_access_change_logs_approval_id ON access_change_logs(approval_id);
 `);
 
 export class SQLiteStorage implements IStorage {
@@ -219,4 +255,242 @@ export class SQLiteStorage implements IStorage {
   }
 }
 
+// Approval types
+export type ApprovalType = 'user_create' | 'user_update' | 'user_delete' | 'role_assign' | 'role_remove';
+export type ApprovalStatus = 'pending' | 'approved' | 'denied' | 'committed' | 'cancelled';
+
+export interface PendingApproval {
+  id: string;
+  type: ApprovalType;
+  requestedBy: string;
+  targetUserId?: string;
+  targetUserEmail?: string;
+  data: string;
+  status: ApprovalStatus;
+  createdAt: number;
+  updatedAt?: number;
+  approvedBy?: string[];
+  deniedBy?: string[];
+}
+
+export interface ApprovalDecision {
+  id: number;
+  approvalId: string;
+  userVuid: string;
+  userEmail: string;
+  decision: number; // 0 = denied, 1 = approved
+  createdAt: number;
+}
+
+export interface AccessChangeLog {
+  id: number;
+  timestamp: number;
+  type: string;
+  approvalId: string;
+  userEmail: string;
+  targetUser?: string;
+  details?: string;
+}
+
+// Approval storage class
+export class ApprovalStorage {
+  // Get all pending approvals with their decisions
+  async getPendingApprovals(): Promise<PendingApproval[]> {
+    const rows = sqlite.prepare(`
+      SELECT * FROM pending_approvals WHERE status = 'pending' ORDER BY created_at DESC
+    `).all() as any[];
+
+    return Promise.all(rows.map(async (row) => {
+      const approvers = sqlite.prepare(`
+        SELECT user_vuid FROM approval_decisions WHERE approval_id = ? AND decision = 1
+      `).all(row.id) as { user_vuid: string }[];
+
+      const deniers = sqlite.prepare(`
+        SELECT user_vuid FROM approval_decisions WHERE approval_id = ? AND decision = 0
+      `).all(row.id) as { user_vuid: string }[];
+
+      return {
+        id: row.id,
+        type: row.type as ApprovalType,
+        requestedBy: row.requested_by,
+        targetUserId: row.target_user_id,
+        targetUserEmail: row.target_user_email,
+        data: row.data,
+        status: row.status as ApprovalStatus,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+        approvedBy: approvers.map(a => a.user_vuid),
+        deniedBy: deniers.map(d => d.user_vuid),
+      };
+    }));
+  }
+
+  // Create a new approval request
+  async createApproval(
+    type: ApprovalType,
+    requestedBy: string,
+    data: any,
+    targetUserId?: string,
+    targetUserEmail?: string
+  ): Promise<string> {
+    const id = randomUUID();
+    sqlite.prepare(`
+      INSERT INTO pending_approvals (id, type, requested_by, target_user_id, target_user_email, data, status)
+      VALUES (?, ?, ?, ?, ?, ?, 'pending')
+    `).run(id, type, requestedBy, targetUserId, targetUserEmail, JSON.stringify(data));
+
+    // Log the creation
+    await this.addAccessChangeLog('created', id, requestedBy, targetUserEmail, JSON.stringify(data));
+
+    return id;
+  }
+
+  // Add a decision (approval or denial) to an approval request
+  async addDecision(
+    approvalId: string,
+    userVuid: string,
+    userEmail: string,
+    approved: boolean
+  ): Promise<boolean> {
+    try {
+      sqlite.prepare(`
+        INSERT INTO approval_decisions (approval_id, user_vuid, user_email, decision)
+        VALUES (?, ?, ?, ?)
+      `).run(approvalId, userVuid, userEmail, approved ? 1 : 0);
+
+      // Log the decision
+      await this.addAccessChangeLog(
+        approved ? 'approved' : 'denied',
+        approvalId,
+        userEmail,
+        undefined,
+        undefined
+      );
+
+      return true;
+    } catch (error) {
+      // Unique constraint violation means user already voted
+      console.error('Error adding decision:', error);
+      return false;
+    }
+  }
+
+  // Remove a decision (for changing vote)
+  async removeDecision(approvalId: string, userVuid: string): Promise<boolean> {
+    const result = sqlite.prepare(`
+      DELETE FROM approval_decisions WHERE approval_id = ? AND user_vuid = ?
+    `).run(approvalId, userVuid);
+    return result.changes > 0;
+  }
+
+  // Commit an approval (mark as committed)
+  async commitApproval(id: string, userEmail: string): Promise<boolean> {
+    const result = sqlite.prepare(`
+      UPDATE pending_approvals SET status = 'committed', updated_at = strftime('%s', 'now')
+      WHERE id = ? AND status = 'pending'
+    `).run(id);
+
+    if (result.changes > 0) {
+      await this.addAccessChangeLog('committed', id, userEmail);
+    }
+
+    return result.changes > 0;
+  }
+
+  // Cancel an approval request
+  async cancelApproval(id: string, userEmail: string): Promise<boolean> {
+    const result = sqlite.prepare(`
+      UPDATE pending_approvals SET status = 'cancelled', updated_at = strftime('%s', 'now')
+      WHERE id = ? AND status = 'pending'
+    `).run(id);
+
+    if (result.changes > 0) {
+      await this.addAccessChangeLog('cancelled', id, userEmail);
+    }
+
+    return result.changes > 0;
+  }
+
+  // Delete an approval request
+  async deleteApproval(id: string, userEmail: string): Promise<boolean> {
+    // First get the approval to log target user
+    const approval = sqlite.prepare(`
+      SELECT target_user_email FROM pending_approvals WHERE id = ?
+    `).get(id) as { target_user_email?: string } | undefined;
+
+    const result = sqlite.prepare(`
+      DELETE FROM pending_approvals WHERE id = ?
+    `).run(id);
+
+    if (result.changes > 0) {
+      await this.addAccessChangeLog('deleted', id, userEmail, approval?.target_user_email);
+    }
+
+    return result.changes > 0;
+  }
+
+  // Get approval by ID
+  async getApproval(id: string): Promise<PendingApproval | undefined> {
+    const row = sqlite.prepare(`
+      SELECT * FROM pending_approvals WHERE id = ?
+    `).get(id) as any | undefined;
+
+    if (!row) return undefined;
+
+    const approvers = sqlite.prepare(`
+      SELECT user_vuid FROM approval_decisions WHERE approval_id = ? AND decision = 1
+    `).all(id) as { user_vuid: string }[];
+
+    const deniers = sqlite.prepare(`
+      SELECT user_vuid FROM approval_decisions WHERE approval_id = ? AND decision = 0
+    `).all(id) as { user_vuid: string }[];
+
+    return {
+      id: row.id,
+      type: row.type as ApprovalType,
+      requestedBy: row.requested_by,
+      targetUserId: row.target_user_id,
+      targetUserEmail: row.target_user_email,
+      data: row.data,
+      status: row.status as ApprovalStatus,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      approvedBy: approvers.map(a => a.user_vuid),
+      deniedBy: deniers.map(d => d.user_vuid),
+    };
+  }
+
+  // Add access change log entry
+  async addAccessChangeLog(
+    type: string,
+    approvalId: string,
+    userEmail: string,
+    targetUser?: string,
+    details?: string
+  ): Promise<void> {
+    sqlite.prepare(`
+      INSERT INTO access_change_logs (type, approval_id, user_email, target_user, details)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(type, approvalId, userEmail, targetUser, details);
+  }
+
+  // Get access change logs
+  async getAccessChangeLogs(limit: number = 100, offset: number = 0): Promise<AccessChangeLog[]> {
+    const rows = sqlite.prepare(`
+      SELECT * FROM access_change_logs ORDER BY timestamp DESC LIMIT ? OFFSET ?
+    `).all(limit, offset) as any[];
+
+    return rows.map(row => ({
+      id: row.id,
+      timestamp: row.timestamp,
+      type: row.type,
+      approvalId: row.approval_id,
+      userEmail: row.user_email,
+      targetUser: row.target_user,
+      details: row.details,
+    }));
+  }
+}
+
 export const storage = new SQLiteStorage();
+export const approvalStorage = new ApprovalStorage();

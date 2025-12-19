@@ -70,3 +70,29 @@ export interface ActiveSession extends Session {
 }
 
 export type ConnectionStatus = "connecting" | "connected" | "disconnected" | "error";
+
+// Admin User type (matching ideed-swarm structure)
+export interface AdminUser {
+  id: string;
+  firstName: string;
+  lastName: string;
+  email: string;
+  username?: string;
+  role: string[];  // Array of role names
+  linked: boolean; // Tide account link status
+}
+
+// Admin User Update type
+export interface AdminUserUpdate extends AdminUser {
+  rolesToAdd?: string[];
+  rolesToRemove?: string[];
+}
+
+// Admin Role type (matching ideed-swarm structure)
+export interface AdminRole {
+  id: string;
+  name: string;
+  description?: string;
+  clientRole?: boolean;
+  clientId?: string;
+}

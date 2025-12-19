@@ -13,7 +13,10 @@ import Console from "@/pages/Console";
 import AdminDashboard from "@/pages/AdminDashboard";
 import AdminServers from "@/pages/AdminServers";
 import AdminUsers from "@/pages/AdminUsers";
+import AdminRoles from "@/pages/AdminRoles";
+import AdminApprovals from "@/pages/AdminApprovals";
 import AdminSessions from "@/pages/AdminSessions";
+import AdminLogs from "@/pages/AdminLogs";
 import NotFound from "@/pages/not-found";
 import { Loader2, Terminal } from "lucide-react";
 import type { ReactNode } from "react";
@@ -140,13 +143,31 @@ function Router() {
           <AdminUsers />
         </AdminRoute>
       </Route>
-      
+
+      <Route path="/admin/roles">
+        <AdminRoute>
+          <AdminRoles />
+        </AdminRoute>
+      </Route>
+
+      <Route path="/admin/approvals">
+        <AdminRoute>
+          <AdminApprovals />
+        </AdminRoute>
+      </Route>
+
       <Route path="/admin/sessions">
         <AdminRoute>
           <AdminSessions />
         </AdminRoute>
       </Route>
-      
+
+      <Route path="/admin/logs">
+        <AdminRoute>
+          <AdminLogs />
+        </AdminRoute>
+      </Route>
+
       <Route component={NotFound} />
     </Switch>
   );

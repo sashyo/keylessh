@@ -24,7 +24,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Terminal, Server, Users, Activity, Settings, LogOut, Shield, ChevronDown, Layers } from "lucide-react";
+import { Terminal, Server, Users, Activity, LogOut, Shield, ChevronDown, Layers, ScrollText, KeyRound, CheckSquare } from "lucide-react";
 import type { ReactNode } from "react";
 
 interface AppLayoutProps {
@@ -39,7 +39,10 @@ const adminNavItems = [
   { title: "Admin Dashboard", url: "/admin", icon: Shield },
   { title: "Manage Servers", url: "/admin/servers", icon: Server },
   { title: "Manage Users", url: "/admin/users", icon: Users },
+  { title: "Manage Roles", url: "/admin/roles", icon: KeyRound },
+  { title: "Approvals", url: "/admin/approvals", icon: CheckSquare },
   { title: "All Sessions", url: "/admin/sessions", icon: Activity },
+  { title: "Access Logs", url: "/admin/logs", icon: ScrollText },
 ];
 
 export function AppLayout({ children }: AppLayoutProps) {
