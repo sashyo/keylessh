@@ -13,9 +13,9 @@
 
 ## Documentation
 
-- Architecture: `docs/ARCHITECTURE.md`
-- Deployment (incl. Azure Container Apps for `tcp-bridge/`): `docs/DEPLOYMENT.md`
-- Developer guide / contributing: `docs/DEVELOPERS.md`
+- Architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- Deployment (incl. Azure Container Apps for `tcp-bridge/`): [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
+- Developer guide / contributing: [docs/DEVELOPERS.md](docs/DEVELOPERS.md)
 
 ## Quickstart (Local Dev)
 
@@ -64,7 +64,7 @@ DATABASE_URL=./data/keylessh.db
 
 ## Contributing
 
-See `docs/DEVELOPERS.md`.
+See [docs/DEVELOPERS.md](docs/DEVELOPERS.md).
 
 ## License
 

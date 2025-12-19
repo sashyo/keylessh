@@ -123,4 +123,4 @@ BRIDGE_URL=ws://localhost:8080 BRIDGE_SECRET=test-secret npm run dev
 
 ## Deployment
 
-See `docs/DEPLOYMENT.md`.
+See [docs/DEPLOYMENT.md](DEPLOYMENT.md).

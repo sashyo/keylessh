@@ -110,3 +110,7 @@ SSH username access is token-based (applies to everyone, including admins).
 - Verify the server’s configured `sshUsers` includes that username.
 - The backend filters `allowedSshUsers` returned to the UI, so if it’s missing, check the token first.
 
+## Related Docs
+
+- Architecture: [docs/ARCHITECTURE.md](ARCHITECTURE.md)
+- Deployment: [docs/DEPLOYMENT.md](DEPLOYMENT.md)
