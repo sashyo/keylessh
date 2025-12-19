@@ -230,10 +230,23 @@ export function setupWSBridge(httpServer: Server): WebSocketServer {
           log(`Connected to external bridge for ${host}:${port}`);
         });
 
-        remoteWs.on("message", (data: Buffer | string) => {
-          if (ws.readyState === WebSocket.OPEN) {
+        remoteWs.on("message", (data, isBinary) => {
+          if (ws.readyState !== WebSocket.OPEN) return;
+
+          // Preserve text frames as text for the browser. If we forward a Buffer that
+          // represents a text frame, the browser receives it as binary and won't
+          // parse our JSON control messages (e.g. {type:"connected"}).
+          if (isBinary) {
             ws.send(data);
+            return;
           }
+
+          if (typeof data === "string") {
+            ws.send(data);
+            return;
+          }
+
+          ws.send(data.toString("utf-8"));
         });
 
         remoteWs.on("error", (err: Error) => {

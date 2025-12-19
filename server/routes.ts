@@ -312,7 +312,7 @@ export async function registerRoutes(
   );
 
   // ============================================
-  // Admin User Routes (ideed-swarm pattern)
+  // Admin User Routes
   // ============================================
 
   // GET /api/admin/users - List all users with roles
@@ -468,7 +468,7 @@ export async function registerRoutes(
   );
 
   // ============================================
-  // Admin Role Routes (ideed-swarm pattern)
+  // Admin Role Routes
   // ============================================
 
   // GET /api/admin/roles - List client roles
@@ -631,7 +631,7 @@ export async function registerRoutes(
   );
 
   // ============================================
-  // Admin Approvals Routes (ideed-swarm pattern)
+  // Admin Approvals Routes
   // ============================================
 
   // GET /api/admin/approvals - List all pending approvals
