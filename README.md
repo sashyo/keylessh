@@ -1,21 +1,41 @@
 <div align="center">
   <img src="client/public/favicon.svg" width="96" height="96" alt="KeyleSSH logo" />
   <h1>KeyleSSH</h1>
-  <p>Secure web SSH console with OIDC authentication. SSH encryption happens entirely in the browser; private keys never leave the client.</p>
+  <p><strong>Truly keyless SSH.</strong></p>
+  <p>The world's first web SSH client where private keys don't exist - not on servers, not in browsers, not even in memory. Powered by Tide's decentralised threshold cryptography.</p>
 </div>
+
+## What Makes KeyleSSH Different
+
+Traditional web SSH clients have a fundamental problem: private keys. Whether stored on a server, uploaded by users, or generated in the browser, private keys are always a liability - they can be stolen, leaked, or compromised.
+
+**KeyleSSH eliminates private keys entirely.**
+
+Instead of managing keys, KeyleSSH uses [Tide Protocol](https://tide.org) and TideCloak for cryptographic operations. SSH signing happens across a **decentralised network of independent nodes called ORKs** (Orchestrated Recluded Keys) - no single point holds a complete key. This isn't just distributed (copies everywhere), it's truly decentralised (the key never exists as a whole).
+
+### How It Works
+
+1. **No key import, no key storage** - Users authenticate via TideCloak (OIDC), receiving a "doken" (delegated token)
+2. **Policy-based authorization** - Admins define who can SSH as which user via Forseti contracts (C# policies executed in sandboxed ORKs)
+3. **Decentralised signing** - When SSH needs a signature, ORKs validate the policy and collaboratively sign the challenge
+4. **Threshold cryptography** - The signing key is mathematically split across multiple independent ORKs; no single node can sign alone
+
+The result: enterprise-grade SSH access control without any private keys to manage, rotate, or protect.
 
 ## Features
 
 - Browser-side SSH via `@microsoft/dev-tunnels-ssh` + `xterm.js`
-- OIDC login with TideCloak (JWT-validated API + WS bridge) — https://tide.org
-- Admin UX: servers, users, roles, approvals, sessions, logs
+- OIDC login with TideCloak - no passwords, no keys — https://tide.org
+- **Policy:1 authorization** with Forseti contracts for SSH signing
+- Role-based SSH access (e.g., only `ssh:root` role holders can SSH as root)
+- Admin UX: servers, users, roles, policy templates, approvals, sessions, logs
 - Optional external `tcp-bridge/` for scalable WS↔TCP forwarding
 
 ## Documentation
 
 - Architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
-- Deployment (incl. Azure Container Apps for `tcp-bridge/`): [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
-- Developer guide / contributing: [docs/DEVELOPERS.md](docs/DEVELOPERS.md)
+- Deployment: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
+- Developer guide: [docs/DEVELOPERS.md](docs/DEVELOPERS.md)
 
 ## Quickstart (Local Dev)
 
@@ -56,11 +76,24 @@ DATABASE_URL=./data/keylessh.db
 ## Key Dependencies
 
 - Authentication: `@tidecloak/react` (wraps/uses `@tidecloak/js`)
+- Tide Protocol: `heimdall-tide` (Policy, PolicySignRequest, TideMemory for signing)
 - Terminal: `@xterm/xterm`
 - Browser SSH: `@microsoft/dev-tunnels-ssh` and `@microsoft/dev-tunnels-ssh-keys`
 - API state: `@tanstack/react-query`
 - Server: `express`, `ws`
 - Storage: `better-sqlite3`, `drizzle-orm`
+
+## Policy:1 Authorization
+
+SSH signing uses the Tide Protocol's Policy:1 auth flow with Forseti contracts:
+
+1. Admin creates SSH policies via policy templates (defines role, resource, approval type)
+2. Policies are signed and committed to the ORK network
+3. When a user connects via SSH, their doken is validated against the policy
+4. ORKs execute the Forseti contract (C# code in sandbox) to authorize
+5. If authorized, ORKs collaboratively produce a signature for the SSH challenge
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full flow diagram.
 
 ## Contributing
 

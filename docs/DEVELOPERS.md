@@ -27,7 +27,32 @@ App: `http://localhost:3000`
 - `server/lib/auth/tideJWT.ts`
   - JWT verification (`verifyTideCloakToken`) using local JWKS from config.
 - `shared/config/roles.ts`
-  - Admin role names (e.g. `tide-realm-admin`, `realm-admin`) treated as “admin” in the app.
+  - Admin role names (e.g. `tide-realm-admin`, `realm-admin`) treated as "admin" in the app.
+
+### SSH Policy Management (Policy:1 + Forseti)
+
+SSH signing uses Tide Protocol's Policy:1 auth flow with Forseti contracts.
+
+- `client/src/lib/sshPolicy.ts`
+  - `SSH_FORSETI_CONTRACT`: The C# Forseti contract source code for SSH authorization
+  - `SSH_MODEL_IDS`: Supported model patterns (Basic, Dynamic, DynamicApproved)
+  - `createSshPolicyRequest()`: Creates a PolicySignRequest with contract compilation
+  - `compileForsetiContract()`: Compiles C# to get contractId via Ork
+- `client/src/lib/tideSsh.ts`
+  - `createTideSshSigner()`: Creates SSH signer using BasicCustomRequest pattern
+  - `createDynamicTideSshSigner()`: Creates SSH signer using DynamicCustomRequest pattern
+  - Both use `Policy:1` auth flow with doken validation
+- `client/src/pages/AdminPolicyTemplates.tsx`
+  - UI for creating/managing SSH policy templates
+- `client/src/pages/AdminApprovals.tsx`
+  - UI for reviewing and approving pending policies
+- `server/routes.ts`
+  - `POST /api/admin/ssh-policies/pending`: Creates pending policy from template
+  - `POST /api/admin/ssh-policies/pending/:id/approve`: Approves and commits to Ork
+  - `GET /api/ssh-policies/for-user/:sshUser`: Fetches committed policy for signing
+- `server/storage.ts`
+  - `sshPolicies`: Stores pending and committed policies
+  - `policyTemplates`: Stores reusable policy templates
 
 ### SSH Username Authorization
 
@@ -78,7 +103,8 @@ SSH username access is token-based (applies to everyone, including admins).
 - `client/src/pages/AdminRoles.tsx` (create roles, includes SSH role helper/auto-prefix)
 - `client/src/pages/AdminSessions.tsx` (active sessions; terminate)
 - `client/src/pages/AdminLogs.tsx` (Access + Sessions logs)
-- `client/src/pages/AdminApprovals.tsx` (approvals; auto-refresh)
+- `client/src/pages/AdminPolicyTemplates.tsx` (create/manage SSH policy templates)
+- `client/src/pages/AdminApprovals.tsx` (review pending policies, approve/reject, auto-refresh)
 
 ## Contributing Workflow
 
@@ -104,11 +130,37 @@ SSH username access is token-based (applies to everyone, including admins).
 
 - Prefer `queryClient.invalidateQueries(...)` + `queryClient.refetchQueries(...)` after success so the UI updates immediately.
 
-### Debug “can’t SSH as user X”
+### Debug "can't SSH as user X"
 
 - Verify the JWT contains a role like `ssh:X` (or one of the supported claim names).
-- Verify the server’s configured `sshUsers` includes that username.
-- The backend filters `allowedSshUsers` returned to the UI, so if it’s missing, check the token first.
+- Verify the server's configured `sshUsers` includes that username.
+- The backend filters `allowedSshUsers` returned to the UI, so if it's missing, check the token first.
+
+### Work with SSH Policies
+
+SSH policies require a Policy:1 flow through the ORK network:
+
+1. **Create a template** - Admin creates a policy template in `AdminPolicyTemplates.tsx`
+2. **Create pending policy** - Template generates a `PolicySignRequest` with contract code
+3. **Approve policy** - Admin reviews and approves in `AdminApprovals.tsx`
+4. **Commit to ORKs** - Approval commits the signed policy to the ORK network
+5. **Sign requests** - When user SSHs, `tideSsh.ts` fetches the policy and sends to ORKs
+
+Key debugging steps:
+- Check browser console for `[TideSsh]` logs during signing
+- Verify policy exists: `GET /api/ssh-policies/for-user/:sshUser`
+- Check ORK logs for contract validation errors
+- Ensure doken contains the required role for the policy's resource
+
+### Modify the Forseti Contract
+
+The SSH contract is in `client/src/lib/sshPolicy.ts` as `SSH_FORSETI_CONTRACT`.
+
+To modify:
+1. Edit the C# code in `SSH_FORSETI_CONTRACT`
+2. The contract is compiled via `POST /api/forseti/compile` on policy creation
+3. Ork IL-vets the contract (blocks forbidden namespaces)
+4. Test with a new policy template to get the new contractId
 
 ## Related Docs
 

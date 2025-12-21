@@ -7,7 +7,6 @@ import {
   SshDataWriter,
   PublicKeyAlgorithm,
 } from "@microsoft/dev-tunnels-ssh";
-import { importKey } from "@microsoft/dev-tunnels-ssh-keys";
 import type { Session } from "@shared/schema";
 import type { KeyPair } from "@microsoft/dev-tunnels-ssh";
 import type { Signer } from "@microsoft/dev-tunnels-ssh";
@@ -286,9 +285,7 @@ export type SSHConnectionStatus =
   | "connected"
   | "error";
 
-export type SSHAuth =
-  | { type: "pem"; privateKeyPem: string; passphrase?: string }
-  | { type: "keypair"; keyPair: KeyPair };
+export type SSHAuth = { type: "keypair"; keyPair: KeyPair };
 
 export interface SSHClientOptions {
   host: string;
@@ -314,7 +311,7 @@ export interface SSHClientOptions {
 /**
  * Browser-based SSH client using Microsoft's dev-tunnels-ssh library.
  * Connects through a WebSocket-TCP bridge to reach SSH servers.
- * Private key never leaves the browser - all crypto happens client-side.
+ * SSH signing is delegated to Tide's distributed enclave network via Policy:1 authorization.
  */
 export class BrowserSSHClient {
   private session: SshClientSession | null = null;
@@ -347,8 +344,7 @@ export class BrowserSSHClient {
       this.sessionId = await this.createSessionRecord();
       this.sessionEnded = false;
 
-      const keyPair =
-        auth.type === "pem" ? await importKey(auth.privateKeyPem, auth.passphrase) : auth.keyPair;
+      const keyPair = auth.keyPair;
 
       // Get the WebSocket URL for the TCP bridge
       const wsUrl = this.buildWebSocketUrl();

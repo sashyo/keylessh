@@ -33,7 +33,7 @@ import {
 } from "lucide-react";
 import { Link } from "wouter";
 import type { ServerWithAccess } from "@shared/schema";
-import type { SSHAuth, SSHConnectionStatus } from "@/lib/sshClient";
+import type { SSHConnectionStatus } from "@/lib/sshClient";
 
 const statusConfig: Record<
   SSHConnectionStatus,
@@ -109,52 +109,44 @@ export default function Console() {
     }
   }, [sshUser]);
 
-  const handleConnect = useCallback(
-    async (args: { mode: "pem"; privateKey: string; passphrase?: string } | { mode: "tide" }) => {
-      try {
-        // Clear terminal and pending output for fresh connection
-        if (xtermRef.current) {
-          xtermRef.current.clear();
-          xtermRef.current.reset();
-        }
-        pendingOutputRef.current = [];
-
-        // Set initial terminal dimensions before connecting (persisted in hook)
-        const dims = fitAddonRef.current?.proposeDimensions();
-        if (dims?.cols && dims?.rows) {
-          setDimensions(dims.cols, dims.rows);
-        } else {
-          setDimensions(80, 24);
-        }
-
-        if (args.mode === "pem") {
-          const auth: SSHAuth = { type: "pem", privateKeyPem: args.privateKey, passphrase: args.passphrase };
-          await connect(auth, undefined);
-        } else {
-          const jwkX = adapter?.jwk?.keys?.[0]?.x;
-          if (typeof jwkX !== "string") {
-            throw new Error("Missing JWKS Ed25519 public key (adapter.jwk.keys[0].x)");
-          }
-          const rawPublicKey = base64UrlToBytes(jwkX);
-          const keyPair = await createEd25519KeyPairFromRawPublicKey(rawPublicKey);
-
-          const auth: SSHAuth = { type: "keypair", keyPair };
-          await connect(auth, createTideSshSigner());
-        }
-        setShowKeyDialog(false);
-
-        // Re-fit and focus terminal after connection
-        if (fitAddonRef.current) {
-          fitAddonRef.current.fit();
-        }
-        xtermRef.current?.focus();
-      } catch (err) {
-        // Error is handled by the hook and displayed in the dialog
-        console.error("Connection failed:", err);
+  const handleConnect = useCallback(async () => {
+    try {
+      // Clear terminal and pending output for fresh connection
+      if (xtermRef.current) {
+        xtermRef.current.clear();
+        xtermRef.current.reset();
       }
-    },
-    [connect, setDimensions]
-  );
+      pendingOutputRef.current = [];
+
+      // Set initial terminal dimensions before connecting (persisted in hook)
+      const dims = fitAddonRef.current?.proposeDimensions();
+      if (dims?.cols && dims?.rows) {
+        setDimensions(dims.cols, dims.rows);
+      } else {
+        setDimensions(80, 24);
+      }
+
+      // Use Tide for SSH signing
+      const jwkX = adapter?.jwk?.keys?.[0]?.x;
+      if (typeof jwkX !== "string") {
+        throw new Error("Missing JWKS Ed25519 public key (adapter.jwk.keys[0].x)");
+      }
+      const rawPublicKey = base64UrlToBytes(jwkX);
+      const keyPair = await createEd25519KeyPairFromRawPublicKey(rawPublicKey);
+
+      await connect({ type: "keypair", keyPair }, createTideSshSigner());
+      setShowKeyDialog(false);
+
+      // Re-fit and focus terminal after connection
+      if (fitAddonRef.current) {
+        fitAddonRef.current.fit();
+      }
+      xtermRef.current?.focus();
+    } catch (err) {
+      // Error is handled by the hook and displayed in the dialog
+      console.error("Connection failed:", err);
+    }
+  }, [connect, setDimensions]);
 
   const handleReconnect = useCallback(() => {
     setUserDismissedDialog(false);
