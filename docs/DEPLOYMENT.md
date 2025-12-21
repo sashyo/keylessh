@@ -1,11 +1,12 @@
 # Deployment (Production)
 
-This app has two deployable services:
+This app has two deployable services and requires connectivity to the ORK network:
 
 1. **Main server** (required): serves the React app + REST API + `/ws/tcp` WebSocket bridge.
 2. **TCP bridge** (optional): `tcp-bridge/` as a separate, auto-scaling WS↔TCP forwarder (recommended for high concurrency).
+3. **ORK network** (required): Tide's decentralised node network for Policy:1 authorization and SSH signing.
 
-For most deployments you run **one main server** with a persistent `data/` volume, and optionally an external `tcp-bridge/`.
+For most deployments you run **one main server** with a persistent `data/` volume, connectivity to the ORK network, and optionally an external `tcp-bridge/`.
 
 ## Main Server (Required)
 
@@ -48,6 +49,10 @@ DATABASE_URL=./data/keylessh.db
 # Optional external TCP bridge
 BRIDGE_URL=wss://<your-bridge-fqdn>
 BRIDGE_SECRET=<shared-secret>
+
+# Ork connectivity (for Policy:1 authorization)
+# The browser connects to Ork via TideCloak's enclave proxy
+# Ensure TideCloak is configured with Ork endpoints
 ```
 
 ### Reverse proxy / TLS
@@ -101,7 +106,32 @@ Tune these for your workload.
 
 ## Production Notes / Caveats
 
-- The current storage is SQLite. If you run multiple main server instances, you’ll need shared storage and coordination (not currently supported out of the box).
+- The current storage is SQLite. If you run multiple main server instances, you'll need shared storage and coordination (not currently supported out of the box).
 - The external bridge does **not** validate JWTs; it only validates the HMAC token from the main server.
 - Ensure `/ws/tcp` is reachable from browsers; if you change ports/origins, update your proxy rules accordingly.
+
+## ORK Network / Policy:1 Requirements
+
+SSH signing requires the ORK network (Tide's decentralised nodes) for Policy:1 authorization:
+
+### Prerequisites
+
+- **TideCloak** must be configured with ORK endpoints (enclave proxy)
+- **ORKs** must be accessible from the browser (via TideCloak's enclave proxy)
+- **Forseti contracts** are compiled and validated by each ORK (requires Ork.Forseti.VmHost)
+
+### Policy Lifecycle
+
+1. Admin creates SSH policy templates in the UI
+2. Policies are compiled (C# → DLL) and committed to the ORK network
+3. Committed policies are stored in SQLite (`sshPolicies` table)
+4. During SSH, the browser fetches the policy and sends to ORKs for signing
+5. ORKs validate the doken and run the Forseti contract before collaboratively signing
+
+### Troubleshooting
+
+- **"No policy found"**: Ensure a policy exists for the SSH role (`ssh:<username>`)
+- **"Contract validation failed"**: Check ORK logs for IL vetting errors
+- **"Doken validation failed"**: Ensure the user's doken contains the required role
+- **Connection timeouts**: Verify ORK endpoints are reachable from the browser
 
