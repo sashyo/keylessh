@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from "react";
-import { BrowserSSHClient, SSHConnectionStatus } from "@/lib/sshClient";
+import { BrowserSSHClient, SSHConnectionStatus, type SSHSigner, type SSHAuth } from "@/lib/sshClient";
 
 interface UseSSHSessionOptions {
   host: string;
@@ -7,10 +7,11 @@ interface UseSSHSessionOptions {
   serverId: string;
   username: string;
   onData: (data: Uint8Array) => void;
+  signer?: SSHSigner;
 }
 
 interface UseSSHSessionReturn {
-  connect: (privateKey: string, passphrase?: string) => Promise<void>;
+  connect: (auth: SSHAuth, signerOverride?: SSHSigner) => Promise<void>;
   disconnect: () => void;
   send: (data: string) => void;
   resize: (cols: number, rows: number) => void;
@@ -25,6 +26,7 @@ export function useSSHSession({
   serverId,
   username,
   onData,
+  signer,
 }: UseSSHSessionOptions): UseSSHSessionReturn {
   const [status, setStatus] = useState<SSHConnectionStatus>("disconnected");
   const [error, setError] = useState<string | null>(null);
@@ -38,6 +40,7 @@ export function useSSHSession({
   const serverIdRef = useRef(serverId);
   const usernameRef = useRef(username);
   const onDataRef = useRef(onData);
+  const signerRef = useRef(signer);
 
   // Keep refs in sync with props
   useEffect(() => {
@@ -46,7 +49,8 @@ export function useSSHSession({
     serverIdRef.current = serverId;
     usernameRef.current = username;
     onDataRef.current = onData;
-  }, [host, port, serverId, username, onData]);
+    signerRef.current = signer;
+  }, [host, port, serverId, username, onData, signer]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -59,7 +63,7 @@ export function useSSHSession({
   }, []);
 
   const connect = useCallback(
-    async (privateKey: string, passphrase?: string) => {
+    async (auth: SSHAuth, signerOverride?: SSHSigner) => {
       // Cleanup any existing connection
       if (clientRef.current) {
         clientRef.current.disconnect();
@@ -74,6 +78,7 @@ export function useSSHSession({
       const currentServerId = serverIdRef.current;
       const currentUsername = usernameRef.current;
       const currentOnData = onDataRef.current;
+      const currentSigner = signerOverride ?? signerRef.current;
 
       // Create new client with current values
       const client = new BrowserSSHClient({
@@ -82,6 +87,7 @@ export function useSSHSession({
         serverId: currentServerId,
         username: currentUsername,
         onData: currentOnData,
+        signer: currentSigner,
         onStatusChange: (newStatus) => {
           setStatus(newStatus);
         },
@@ -97,7 +103,7 @@ export function useSSHSession({
       client.setDimensions(initialColsRef.current, initialRowsRef.current);
 
       // Connect
-      await client.connect(privateKey, passphrase);
+      await client.connect(auth);
     },
     [] // No deps needed since we use refs
   );

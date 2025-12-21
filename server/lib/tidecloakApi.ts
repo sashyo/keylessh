@@ -14,8 +14,19 @@ const getRealm_ = () => getRealm();
 const getClient = () => getResource();
 
 const getTcUrl = () => `${getKeycloakAuthServer()}/admin/realms/${getRealm_()}`;
+const getNonAdminTcUrl = () => `${getKeycloakAuthServer()}/realms/${getRealm_()}`;
 
 const REALM_MGMT = "realm-management";
+
+// Fetch the admin policy from TideCloak (used to authorize policy commits)
+export const getAdminPolicy = async (): Promise<string> => {
+  const response = await fetch(`${getNonAdminTcUrl()}/tide-policy-resources/admin-policy`);
+  if (!response.ok) {
+    throw new Error(`Error fetching admin policy: ${await response.text()}`);
+  }
+  // Returns base64-encoded policy bytes
+  return await response.text();
+};
 
 export interface KeycloakEvent {
   id: string;

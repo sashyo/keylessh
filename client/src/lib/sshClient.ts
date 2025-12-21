@@ -5,9 +5,208 @@ import {
   WebSocketStream,
   SshAuthenticatingEventArgs,
   SshDataWriter,
+  PublicKeyAlgorithm,
 } from "@microsoft/dev-tunnels-ssh";
 import { importKey } from "@microsoft/dev-tunnels-ssh-keys";
 import type { Session } from "@shared/schema";
+import type { KeyPair } from "@microsoft/dev-tunnels-ssh";
+import type { Signer } from "@microsoft/dev-tunnels-ssh";
+import type { Verifier } from "@microsoft/dev-tunnels-ssh";
+
+function sshWriteString(value: Buffer): Buffer {
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(value.length, 0);
+  return Buffer.concat([len, value]);
+}
+
+export function base64UrlToBytes(value: string): Uint8Array {
+  let normalized = value.trim().replace(/-/g, "+").replace(/_/g, "/");
+  while (normalized.length % 4) normalized += "=";
+  const bin = atob(normalized);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+
+export function sshEd25519PublicKeyBytes(rawPublicKey: Uint8Array): Buffer {
+  if (rawPublicKey.length !== 32) {
+    throw new Error(`Ed25519 public key must be 32 bytes, got ${rawPublicKey.length}`);
+  }
+  const alg = Buffer.from("ssh-ed25519", "ascii");
+  const key = Buffer.from(rawPublicKey);
+  return Buffer.concat([sshWriteString(alg), sshWriteString(key)]);
+}
+
+export function formatOpenSshEd25519PublicKey(rawPublicKey: Uint8Array, comment?: string): string {
+  const blob = sshEd25519PublicKeyBytes(rawPublicKey);
+  return `ssh-ed25519 ${blob.toString("base64")}${comment ? ` ${comment}` : ""}`;
+}
+
+export function parseTideUserKeyHex(hex: string): Uint8Array {
+  const normalized = hex.trim().toLowerCase().replace(/^0x/, "");
+  if (!/^[0-9a-f]+$/.test(normalized) || normalized.length % 2 !== 0) {
+    throw new Error("Invalid tideuserkey hex string");
+  }
+
+  const bytes = Buffer.from(normalized, "hex");
+
+  // Observed format: 3-byte prefix `0x20 0x00 0x00` + 32-byte public key.
+  if (bytes.length === 35 && bytes[0] === 0x20 && bytes[1] === 0x00 && bytes[2] === 0x00) {
+    return new Uint8Array(bytes.subarray(3));
+  }
+
+  if (bytes.length === 32) {
+    return new Uint8Array(bytes);
+  }
+
+  throw new Error(`Unexpected tideuserkey length: ${bytes.length} bytes`);
+}
+
+export async function createEd25519KeyPairFromRawPublicKey(rawPublicKey: Uint8Array): Promise<KeyPair> {
+  const kp = new Ed25519KeyPair();
+  await kp.setPublicKeyBytes(sshEd25519PublicKeyBytes(rawPublicKey));
+  return kp;
+}
+
+class Ed25519KeyPair implements KeyPair {
+  public readonly keyAlgorithmName = "ssh-ed25519";
+  public comment: string | null = null;
+  private publicKeyBytes: Buffer | null = null;
+
+  get hasPublicKey(): boolean {
+    return !!this.publicKeyBytes;
+  }
+
+  // We "have" a private key as long as the signing is delegated externally (e.g. Tide enclave).
+  // This prevents dev-tunnels-ssh from requiring a privateKeyProvider.
+  get hasPrivateKey(): boolean {
+    return true;
+  }
+
+  async setPublicKeyBytes(keyBytes: Buffer): Promise<void> {
+    this.publicKeyBytes = Buffer.from(keyBytes);
+  }
+
+  async getPublicKeyBytes(_algorithmName?: string): Promise<Buffer | null> {
+    return this.publicKeyBytes;
+  }
+
+  async generate(): Promise<void> {
+    throw new Error("Ed25519 key generation is not supported in-browser for this client.");
+  }
+
+  async importParameters(_parameters: any): Promise<void> {
+    throw new Error("Ed25519 parameter import is not supported by this client.");
+  }
+
+  async exportParameters(): Promise<any> {
+    throw new Error("Ed25519 parameter export is not supported by this client.");
+  }
+
+  dispose(): void {
+    // no-op
+  }
+}
+
+class Ed25519PublicKeyAlgorithm extends PublicKeyAlgorithm {
+  constructor() {
+    super("ssh-ed25519", "ssh-ed25519", "none");
+  }
+
+  createKeyPair(): KeyPair {
+    return new Ed25519KeyPair();
+  }
+
+  async generateKeyPair(_keySizeInBits?: number): Promise<KeyPair> {
+    const kp = new Ed25519KeyPair();
+    await kp.generate();
+    return kp;
+  }
+
+  createSigner(_keyPair: KeyPair): Signer {
+    throw new Error(
+      "Ed25519 signing must be delegated via BrowserSSHClient options.signer (no local private key available).",
+    );
+  }
+
+  createVerifier(_keyPair: KeyPair): Verifier {
+    throw new Error("Ed25519 verification is not implemented by this client.");
+  }
+}
+
+export type SSHSignatureRequest = {
+  /**
+   * SSH signature algorithm name used in the auth request (example: `rsa-sha2-256`).
+   */
+  algorithmName: string;
+  /**
+   * Key algorithm for the key being used (example: `ssh-rsa`).
+   */
+  keyAlgorithmName: string;
+  /**
+   * Raw payload to sign for SSH publickey authentication.
+   */
+  data: Uint8Array;
+  /**
+   * Public key bytes included in the SSH auth request.
+   */
+  publicKey?: Uint8Array;
+  username: string;
+  serverId: string;
+};
+
+export type SSHSigner = (req: SSHSignatureRequest) => Promise<Uint8Array>;
+
+class CallbackSigner implements Signer {
+  public readonly digestLength = 0;
+  private disposed = false;
+
+  constructor(private readonly signFn: (data: Buffer) => Promise<Buffer>) {}
+
+  async sign(data: Buffer): Promise<Buffer> {
+    if (this.disposed) {
+      throw new Error("Signer disposed");
+    }
+    return await this.signFn(data);
+  }
+
+  dispose(): void {
+    this.disposed = true;
+  }
+}
+
+class DelegatingPublicKeyAlgorithm extends PublicKeyAlgorithm {
+  constructor(
+    private readonly inner: PublicKeyAlgorithm,
+    private readonly signerFactory: (keyPair: KeyPair, algorithm: PublicKeyAlgorithm) => Signer,
+  ) {
+    super(inner.name, inner.keyAlgorithmName, inner.hashAlgorithmName);
+  }
+
+  createKeyPair(): KeyPair {
+    return this.inner.createKeyPair();
+  }
+
+  generateKeyPair(keySizeInBits?: number): Promise<KeyPair> {
+    return this.inner.generateKeyPair(keySizeInBits);
+  }
+
+  createSigner(keyPair: KeyPair): Signer {
+    return this.signerFactory(keyPair, this.inner);
+  }
+
+  createVerifier(keyPair: KeyPair) {
+    return this.inner.createVerifier(keyPair);
+  }
+
+  readSignatureData(signatureData: Buffer): Buffer {
+    return this.inner.readSignatureData(signatureData);
+  }
+
+  createSignatureData(signature: Buffer): Buffer {
+    return this.inner.createSignatureData(signature);
+  }
+}
 
 // Dynamic import of the actual message classes from CommonJS module
 // This ensures we use the exact same prototype chain as the library
@@ -87,6 +286,10 @@ export type SSHConnectionStatus =
   | "connected"
   | "error";
 
+export type SSHAuth =
+  | { type: "pem"; privateKeyPem: string; passphrase?: string }
+  | { type: "keypair"; keyPair: KeyPair };
+
 export interface SSHClientOptions {
   host: string;
   port: number;
@@ -96,6 +299,16 @@ export interface SSHClientOptions {
   onStatusChange: (status: SSHConnectionStatus) => void;
   onError: (error: string) => void;
   onClose: () => void;
+  /**
+   * Optional hook to override SSH public-key signing.
+   *
+   * If provided, KeyleSSH will still use the library for protocol framing,
+   * but will call this callback whenever an SSH auth signature is needed.
+   *
+   * The callback must return the raw signature bytes for the requested SSH
+   * signature algorithm (the library will wrap it in SSH "signature data").
+   */
+  signer?: SSHSigner;
 }
 
 /**
@@ -118,12 +331,7 @@ export class BrowserSSHClient {
     this.options = options;
   }
 
-  /**
-   * Connect to the SSH server using the provided private key.
-   * @param privateKeyPem PEM-encoded private key
-   * @param passphrase Optional passphrase for encrypted keys
-   */
-  async connect(privateKeyPem: string, passphrase?: string): Promise<void> {
+  async connect(auth: SSHAuth): Promise<void> {
     try {
       // Validate required parameters
       if (!this.options.host) {
@@ -139,8 +347,8 @@ export class BrowserSSHClient {
       this.sessionId = await this.createSessionRecord();
       this.sessionEnded = false;
 
-      // Import the private key
-      const keyPair = await importKey(privateKeyPem, passphrase);
+      const keyPair =
+        auth.type === "pem" ? await importKey(auth.privateKeyPem, auth.passphrase) : auth.keyPair;
 
       // Get the WebSocket URL for the TCP bridge
       const wsUrl = this.buildWebSocketUrl();
@@ -167,6 +375,45 @@ export class BrowserSSHClient {
 
       // Create SSH session configuration
       const config = new SshSessionConfiguration(true);
+      // dev-tunnels-ssh v3.12.x doesn't include ssh-ed25519 in SshAlgorithms.publicKey,
+      // but we can register it so a caller-provided KeyPair with keyAlgorithmName `ssh-ed25519`
+      // can be used (signing is delegated via options.signer).
+      if (!config.publicKeyAlgorithms.some((a) => a?.keyAlgorithmName === "ssh-ed25519")) {
+        // Important: This list is also used for *server host key* algorithm negotiation during key exchange.
+        // Put ed25519 at the end so we don't select it for server host key verification unless it's the only option.
+        // (We currently delegate ed25519 signing, but we don't implement host-key verification for ed25519 here.)
+        config.publicKeyAlgorithms.push(new Ed25519PublicKeyAlgorithm());
+      }
+
+      // Optional: intercept/override the SSH public-key auth signature step.
+      // dev-tunnels-ssh calls `algorithm.createSigner(keyPair).sign(payload)` internally.
+      if (this.options.signer) {
+        const signerCallback = this.options.signer;
+        for (let i = 0; i < config.publicKeyAlgorithms.length; i++) {
+          const alg = config.publicKeyAlgorithms[i];
+          if (!alg) continue;
+
+          config.publicKeyAlgorithms[i] = new DelegatingPublicKeyAlgorithm(
+            alg,
+            (keyPair, algorithm) =>
+              new CallbackSigner(async (payload) => {
+                const publicKey =
+                  keyPair.keyAlgorithmName === "ssh-ed25519"
+                    ? await keyPair.getPublicKeyBytes()
+                    : await keyPair.getPublicKeyBytes(algorithm.name);
+                const sig = await signerCallback({
+                  algorithmName: algorithm.name,
+                  keyAlgorithmName: keyPair.keyAlgorithmName,
+                  data: new Uint8Array(payload),
+                  publicKey: publicKey ? new Uint8Array(publicKey) : undefined,
+                  username: this.options.username,
+                  serverId: this.options.serverId,
+                });
+                return Buffer.from(sig);
+              }),
+          );
+        }
+      }
 
       // Create client session
       this.session = new SshClientSession(config);

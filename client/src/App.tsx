@@ -14,6 +14,7 @@ import AdminDashboard from "@/pages/AdminDashboard";
 import AdminServers from "@/pages/AdminServers";
 import AdminUsers from "@/pages/AdminUsers";
 import AdminRoles from "@/pages/AdminRoles";
+import AdminPolicyTemplates from "@/pages/AdminPolicyTemplates";
 import AdminApprovals from "@/pages/AdminApprovals";
 import AdminSessions from "@/pages/AdminSessions";
 import AdminLogs from "@/pages/AdminLogs";
@@ -147,6 +148,12 @@ function Router() {
       <Route path="/admin/roles">
         <AdminRoute>
           <AdminRoles />
+        </AdminRoute>
+      </Route>
+
+      <Route path="/admin/policy-templates">
+        <AdminRoute>
+          <AdminPolicyTemplates />
         </AdminRoute>
       </Route>
 

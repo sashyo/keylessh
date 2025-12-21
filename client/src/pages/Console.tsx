@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useParams, useSearch } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import { Terminal as XTerm } from "@xterm/xterm";
@@ -13,6 +13,13 @@ import { useToast } from "@/hooks/use-toast";
 import { PrivateKeyInput } from "@/components/PrivateKeyInput";
 import { useSSHSession } from "@/hooks/useSSHSession";
 import {
+  base64UrlToBytes,
+  createEd25519KeyPairFromRawPublicKey,
+  formatOpenSshEd25519PublicKey,
+} from "@/lib/sshClient";
+import { createTideSshSigner } from "@/lib/tideSsh";
+import adapter from "../tidecloakAdapter.json";
+import {
   ArrowLeft,
   RefreshCw,
   Power,
@@ -26,7 +33,7 @@ import {
 } from "lucide-react";
 import { Link } from "wouter";
 import type { ServerWithAccess } from "@shared/schema";
-import type { SSHConnectionStatus } from "@/lib/sshClient";
+import type { SSHAuth, SSHConnectionStatus } from "@/lib/sshClient";
 
 const statusConfig: Record<
   SSHConnectionStatus,
@@ -91,9 +98,19 @@ export default function Console() {
   const prevStatusRef = useRef<SSHConnectionStatus>("disconnected");
   const disconnectedWithReason = status === "disconnected" && !!error;
 
-  // Handle connection with private key
+  const tideSshPublicKey = useMemo(() => {
+    try {
+      const jwkX = adapter?.jwk?.keys?.[0]?.x;
+      if (typeof jwkX !== "string") return null;
+      const rawPublicKey = base64UrlToBytes(jwkX);
+      return formatOpenSshEd25519PublicKey(rawPublicKey, `${sshUser}@keylessh`);
+    } catch {
+      return null;
+    }
+  }, [sshUser]);
+
   const handleConnect = useCallback(
-    async (privateKey: string, passphrase?: string) => {
+    async (args: { mode: "pem"; privateKey: string; passphrase?: string } | { mode: "tide" }) => {
       try {
         // Clear terminal and pending output for fresh connection
         if (xtermRef.current) {
@@ -110,7 +127,20 @@ export default function Console() {
           setDimensions(80, 24);
         }
 
-        await connect(privateKey, passphrase);
+        if (args.mode === "pem") {
+          const auth: SSHAuth = { type: "pem", privateKeyPem: args.privateKey, passphrase: args.passphrase };
+          await connect(auth, undefined);
+        } else {
+          const jwkX = adapter?.jwk?.keys?.[0]?.x;
+          if (typeof jwkX !== "string") {
+            throw new Error("Missing JWKS Ed25519 public key (adapter.jwk.keys[0].x)");
+          }
+          const rawPublicKey = base64UrlToBytes(jwkX);
+          const keyPair = await createEd25519KeyPairFromRawPublicKey(rawPublicKey);
+
+          const auth: SSHAuth = { type: "keypair", keyPair };
+          await connect(auth, createTideSshSigner());
+        }
         setShowKeyDialog(false);
 
         // Re-fit and focus terminal after connection
@@ -477,6 +507,7 @@ export default function Console() {
         onSubmit={handleConnect}
         serverName={server?.name || ""}
         username={sshUser}
+        tidePublicKey={tideSshPublicKey}
         isConnecting={status === "connecting" || status === "authenticating"}
         error={status === "error" || disconnectedWithReason ? error : null}
       />
