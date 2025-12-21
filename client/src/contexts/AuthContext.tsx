@@ -30,8 +30,11 @@ interface AuthContextValue extends AuthState {
   refreshToken: () => Promise<boolean>;
   getToken: () => string | null;
   hasRole: (role: UserRole) => boolean;
+  canManageTemplates: () => boolean;
   vuid: string;
   approveTideRequests: (requests: TideApprovalRequest[]) => Promise<TideApprovalResponse[]>;
+  initializeTideRequest: <T extends { encode: () => Uint8Array }>(request: T) => Promise<T>;
+  executeTideRequest: (request: Uint8Array) => Promise<Uint8Array[]>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -139,6 +142,55 @@ function TideCloakAuthBridge({ children }: { children: ReactNode }) {
     [tidecloak, state.isAuthenticated]
   );
 
+  // Check if user can manage policy templates
+  // Requires: tide-realm-admin, realm-admin, or policy-creator role
+  const canManageTemplates = useCallback(() => {
+    // Check realm-management client roles
+    if (tidecloak.hasClientRole("tide-realm-admin", "realm-management")) {
+      return true;
+    }
+    if (tidecloak.hasClientRole("realm-admin", "realm-management")) {
+      return true;
+    }
+    // Check realm roles
+    if (tidecloak.hasRealmRole("tide-realm-admin")) {
+      return true;
+    }
+    if (tidecloak.hasRealmRole("realm-admin")) {
+      return true;
+    }
+    // Check for policy-creator role on the current client
+    if (tidecloak.hasRealmRole("policy-creator")) {
+      return true;
+    }
+    return false;
+  }, [tidecloak]);
+
+  // Initialize a Tide request with the user's credentials
+  // This signs the request so it can be submitted for processing
+  const initializeTideRequest = useCallback(
+    async <T extends { encode: () => Uint8Array }>(request: T): Promise<T> => {
+      const tc = (IAMService as any)._tc;
+
+      if (!tc?.createTideRequest) {
+        throw new Error("TideCloak createTideRequest not available");
+      }
+
+      const encodedRequest = request.encode();
+      const initializedBytes = await tc.createTideRequest(encodedRequest);
+
+      // The request type should have a static decode method
+      const RequestClass = (request as any).constructor;
+      if (typeof RequestClass.decode === "function") {
+        return RequestClass.decode(initializedBytes) as T;
+      }
+
+      // If no decode method, return original with initialized bytes attached
+      return request;
+    },
+    []
+  );
+
   // Tide enclave approval function - opens popup for cryptographic signing
   // Uses IAMService._tc from @tidecloak/js
   const approveTideRequests = useCallback(
@@ -188,8 +240,23 @@ function TideCloakAuthBridge({ children }: { children: ReactNode }) {
     []
   );
 
+  // Execute a Tide request to get the final signature
+  // This is called after the request has been approved
+  const executeTideRequest = useCallback(
+    async (request: Uint8Array): Promise<Uint8Array[]> => {
+      const tc = (IAMService as any)._tc;
+
+      if (!tc?.executeSignRequest) {
+        throw new Error("TideCloak executeSignRequest not available");
+      }
+
+      return await tc.executeSignRequest(request);
+    },
+    []
+  );
+
   return (
-    <AuthContext.Provider value={{ ...state, login, logout, refreshToken, getToken, hasRole, vuid, approveTideRequests }}>
+    <AuthContext.Provider value={{ ...state, login, logout, refreshToken, getToken, hasRole, canManageTemplates, vuid, approveTideRequests, initializeTideRequest, executeTideRequest }}>
       {children}
     </AuthContext.Provider>
   );

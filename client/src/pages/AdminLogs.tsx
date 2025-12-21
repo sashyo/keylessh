@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { RefObject } from "react";
 import { useIsFetching, useQuery } from "@tanstack/react-query";
 import { useLocation, useSearch } from "wouter";
+import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -15,13 +16,13 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { ScrollText, Activity } from "lucide-react";
-import { api, type TidecloakEvent } from "@/lib/api";
+import { ScrollText, Activity, Shield } from "lucide-react";
+import { api, type TidecloakEvent, type SshPolicyLog } from "@/lib/api";
 import { AdminSessionHistoryContent } from "@/pages/AdminSessions";
 import { queryClient } from "@/lib/queryClient";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 
-type LogsTab = "access" | "sessions";
+type LogsTab = "access" | "sessions" | "policies";
 
 type PageSizeMode = "auto" | "manual";
 
@@ -184,7 +185,9 @@ export default function AdminLogs() {
   const tabFromUrl = useMemo<LogsTab>(() => {
     const params = new URLSearchParams(search);
     const tab = params.get("tab");
-    return tab === "sessions" ? "sessions" : "access";
+    if (tab === "sessions") return "sessions";
+    if (tab === "policies") return "policies";
+    return "access";
   }, [search]);
 
   const { data: accessEvents, isLoading: accessEventsLoading, refetch: refetchAccess } = useQuery({
@@ -192,15 +195,27 @@ export default function AdminLogs() {
     queryFn: () => api.admin.logs.access(pageSize, page * pageSize),
     enabled: tabFromUrl === "access",
   });
+
+  const { data: policyLogsData, isLoading: policyLogsLoading, refetch: refetchPolicies } = useQuery({
+    queryKey: ["/api/admin/ssh-policies/logs"],
+    queryFn: () => api.admin.sshPolicies.getLogs(100, 0),
+    enabled: tabFromUrl === "policies",
+  });
+
   const isFetchingAccess = useIsFetching({ queryKey: ["/api/admin/logs/access"] }) > 0;
   const isFetchingSessions = useIsFetching({ queryKey: ["/api/admin/sessions"] }) > 0;
-  const isFetching = tabFromUrl === "access" ? isFetchingAccess : isFetchingSessions;
+  const isFetchingPolicies = useIsFetching({ queryKey: ["/api/admin/ssh-policies/logs"] }) > 0;
+  const isFetching = tabFromUrl === "access" ? isFetchingAccess : tabFromUrl === "sessions" ? isFetchingSessions : isFetchingPolicies;
 
   const { secondsRemaining, refreshNow } = useAutoRefresh({
     intervalSeconds: 15,
     refresh: async () => {
       if (tabFromUrl === "access") {
         await refetchAccess();
+        return;
+      }
+      if (tabFromUrl === "policies") {
+        await refetchPolicies();
         return;
       }
       await queryClient.refetchQueries({ queryKey: ["/api/admin/sessions"] });
@@ -227,9 +242,16 @@ export default function AdminLogs() {
   }, [pageSizeMode, tabFromUrl, accessEventsLoading]);
 
   const handleTabChange = (value: string) => {
-    const tab = value === "sessions" ? "sessions" : "access";
-    setLocation(`/admin/logs?tab=${tab}`);
+    if (value === "sessions") {
+      setLocation("/admin/logs?tab=sessions");
+    } else if (value === "policies") {
+      setLocation("/admin/logs?tab=policies");
+    } else {
+      setLocation("/admin/logs?tab=access");
+    }
   };
+
+  const policyLogs = policyLogsData?.logs || [];
 
   return (
     <div className="p-6 space-y-6">
@@ -261,6 +283,10 @@ export default function AdminLogs() {
             <Activity className="h-4 w-4" />
             Sessions
           </TabsTrigger>
+          <TabsTrigger value="policies" className="gap-2">
+            <Shield className="h-4 w-4" />
+            Policies
+          </TabsTrigger>
         </TabsList>
 
         <TabsContent value="access">
@@ -285,6 +311,71 @@ export default function AdminLogs() {
 
         <TabsContent value="sessions">
           <AdminSessionHistoryContent embedded />
+        </TabsContent>
+
+        <TabsContent value="policies">
+          <Card>
+            <CardContent className="p-0">
+              {policyLogsLoading ? (
+                <div className="p-4 space-y-3">
+                  {[1, 2, 3, 4, 5].map((i) => (
+                    <div key={i} className="flex items-center gap-4">
+                      <Skeleton className="h-4 w-40" />
+                      <Skeleton className="h-4 w-28" />
+                      <Skeleton className="h-4 w-40" />
+                    </div>
+                  ))}
+                </div>
+              ) : policyLogs.length > 0 ? (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="min-w-[190px]">Timestamp</TableHead>
+                      <TableHead className="min-w-[100px]">Action</TableHead>
+                      <TableHead className="min-w-[180px]">Role</TableHead>
+                      <TableHead className="min-w-[200px]">User</TableHead>
+                      <TableHead className="min-w-[200px]">Details</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {policyLogs.map((log) => (
+                      <TableRow key={log.id}>
+                        <TableCell className="text-sm whitespace-nowrap">
+                          {formatEventTimestamp(log.createdAt * 1000)}
+                        </TableCell>
+                        <TableCell>
+                          <Badge
+                            variant="outline"
+                            className={
+                              log.action === "created" ? "bg-blue-50 text-blue-700 border-blue-200" :
+                              log.action === "approved" ? "bg-green-50 text-green-700 border-green-200" :
+                              log.action === "rejected" ? "bg-red-50 text-red-700 border-red-200" :
+                              log.action === "committed" ? "bg-purple-50 text-purple-700 border-purple-200" :
+                              log.action === "cancelled" ? "bg-gray-50 text-gray-700 border-gray-200" :
+                              ""
+                            }
+                          >
+                            {log.action}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="text-sm font-mono">{log.roleId || "-"}</TableCell>
+                        <TableCell className="text-sm">{log.performedByEmail || log.performedBy}</TableCell>
+                        <TableCell className="text-sm text-muted-foreground">{log.details || "-"}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              ) : (
+                <div className="flex flex-col items-center justify-center py-12 text-center">
+                  <Shield className="h-12 w-12 text-muted-foreground mb-4" />
+                  <h3 className="font-medium">No policy logs found</h3>
+                  <p className="text-sm text-muted-foreground mt-1">
+                    SSH policy activity will appear here
+                  </p>
+                </div>
+              )}
+            </CardContent>
+          </Card>
         </TabsContent>
       </Tabs>
     </div>

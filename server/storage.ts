@@ -14,7 +14,26 @@ import {
   type InsertServer,
   type Session,
   type InsertSession,
+  type PolicyTemplate,
+  type InsertPolicyTemplate,
+  type TemplateParameter,
 } from "@shared/schema";
+import { getAdminPolicy } from "./lib/tidecloakApi";
+import { createRequire } from "module";
+import { fileURLToPath } from "url";
+
+// Use createRequire for heimdall-tide (CJS module with broken ESM exports)
+const require = createRequire(import.meta.url || fileURLToPath(new URL(".", import.meta.url)));
+const { PolicySignRequest } = require("heimdall-tide");
+
+// Base64 conversion helpers for Tide request handling
+function base64ToBytes(base64: string): Uint8Array {
+  return new Uint8Array(Buffer.from(base64, "base64"));
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  return Buffer.from(bytes).toString("base64");
+}
 
 export interface IStorage {
   getUser(id: string): Promise<User | undefined>;
@@ -123,6 +142,66 @@ sqlite.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_access_change_logs_timestamp ON access_change_logs(timestamp DESC);
   CREATE INDEX IF NOT EXISTS idx_access_change_logs_approval_id ON access_change_logs(approval_id);
+
+  -- SSH signing policies for roles (committed policies)
+  CREATE TABLE IF NOT EXISTS ssh_policies (
+    role_id TEXT PRIMARY KEY,
+    contract_type TEXT NOT NULL,
+    approval_type TEXT NOT NULL CHECK(approval_type IN ('implicit', 'explicit')),
+    execution_type TEXT NOT NULL CHECK(execution_type IN ('public', 'private')),
+    threshold INTEGER NOT NULL DEFAULT 1,
+    policy_data TEXT,
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+    updated_at INTEGER
+  );
+
+  -- Pending SSH policy requests (awaiting approval)
+  CREATE TABLE IF NOT EXISTS pending_ssh_policies (
+    id TEXT PRIMARY KEY,
+    role_id TEXT NOT NULL,
+    requested_by TEXT NOT NULL,
+    requested_by_email TEXT,
+    policy_request_data TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'committed', 'cancelled')),
+    threshold INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+    updated_at INTEGER
+  );
+
+  -- SSH policy approval decisions
+  CREATE TABLE IF NOT EXISTS ssh_policy_decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    policy_request_id TEXT NOT NULL,
+    user_vuid TEXT NOT NULL,
+    user_email TEXT NOT NULL,
+    decision INTEGER NOT NULL CHECK(decision IN (0, 1)),
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+    UNIQUE(policy_request_id, user_vuid)
+  );
+
+  -- SSH policy change logs
+  CREATE TABLE IF NOT EXISTS ssh_policy_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+    type TEXT NOT NULL CHECK(type IN ('created', 'approved', 'denied', 'committed', 'cancelled')),
+    policy_request_id TEXT NOT NULL,
+    user_email TEXT NOT NULL,
+    role_id TEXT,
+    details TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_ssh_policy_logs_timestamp ON ssh_policy_logs(timestamp DESC);
+
+  -- Policy templates for reusable Forseti contracts
+  CREATE TABLE IF NOT EXISTS policy_templates (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    description TEXT NOT NULL,
+    cs_code TEXT NOT NULL,
+    parameters TEXT NOT NULL DEFAULT '[]',
+    created_by TEXT NOT NULL,
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+    updated_at INTEGER
+  );
 `);
 
 // Lightweight migrations for existing DBs (CREATE TABLE IF NOT EXISTS doesn't alter).
@@ -149,6 +228,19 @@ try {
   }
   if (!hasUserEmail) {
     sqlite.prepare(`ALTER TABLE sessions ADD COLUMN user_email TEXT`).run();
+  }
+} catch {
+  // Ignore migration errors; queries will surface issues.
+}
+
+// Migration: Add policy_data column to ssh_policies for storing committed policy bytes
+try {
+  const policyColumns = sqlite
+    .prepare(`PRAGMA table_info(ssh_policies)`)
+    .all() as Array<{ name: string }>;
+  const hasPolicyData = policyColumns.some((c) => c.name === "policy_data");
+  if (!hasPolicyData) {
+    sqlite.prepare(`ALTER TABLE ssh_policies ADD COLUMN policy_data TEXT`).run();
   }
 } catch {
   // Ignore migration errors; queries will surface issues.
@@ -527,5 +619,614 @@ export class ApprovalStorage {
   }
 }
 
+// SSH Policy types
+export interface SshPolicy {
+  roleId: string;
+  contractType: string;
+  approvalType: "implicit" | "explicit";
+  executionType: "public" | "private";
+  threshold: number;
+  policyData?: string; // Base64 encoded committed policy bytes
+  createdAt: number;
+  updatedAt?: number;
+}
+
+export interface InsertSshPolicy {
+  roleId: string;
+  contractType: string;
+  approvalType: "implicit" | "explicit";
+  executionType: "public" | "private";
+  threshold: number;
+  policyData?: string; // Base64 encoded committed policy bytes
+}
+
+// SSH Policy storage class
+export class PolicyStorage {
+  // Create or update a policy for a role
+  async upsertPolicy(policy: InsertSshPolicy): Promise<SshPolicy> {
+    const existing = await this.getPolicy(policy.roleId);
+
+    if (existing) {
+      sqlite.prepare(`
+        UPDATE ssh_policies
+        SET contract_type = ?, approval_type = ?, execution_type = ?, threshold = ?, policy_data = ?, updated_at = strftime('%s', 'now')
+        WHERE role_id = ?
+      `).run(policy.contractType, policy.approvalType, policy.executionType, policy.threshold, policy.policyData || null, policy.roleId);
+
+      return {
+        ...policy,
+        createdAt: existing.createdAt,
+        updatedAt: Math.floor(Date.now() / 1000),
+      };
+    } else {
+      sqlite.prepare(`
+        INSERT INTO ssh_policies (role_id, contract_type, approval_type, execution_type, threshold, policy_data)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(policy.roleId, policy.contractType, policy.approvalType, policy.executionType, policy.threshold, policy.policyData || null);
+
+      return {
+        ...policy,
+        createdAt: Math.floor(Date.now() / 1000),
+      };
+    }
+  }
+
+  // Get policy by role ID
+  async getPolicy(roleId: string): Promise<SshPolicy | undefined> {
+    const row = sqlite.prepare(`
+      SELECT * FROM ssh_policies WHERE role_id = ?
+    `).get(roleId) as any | undefined;
+
+    if (!row) return undefined;
+
+    return {
+      roleId: row.role_id,
+      contractType: row.contract_type,
+      approvalType: row.approval_type as "implicit" | "explicit",
+      executionType: row.execution_type as "public" | "private",
+      threshold: row.threshold,
+      policyData: row.policy_data || undefined,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  // Get all policies
+  async getAllPolicies(): Promise<SshPolicy[]> {
+    const rows = sqlite.prepare(`
+      SELECT * FROM ssh_policies ORDER BY created_at DESC
+    `).all() as any[];
+
+    return rows.map(row => ({
+      roleId: row.role_id,
+      contractType: row.contract_type,
+      approvalType: row.approval_type as "implicit" | "explicit",
+      executionType: row.execution_type as "public" | "private",
+      threshold: row.threshold,
+      policyData: row.policy_data || undefined,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  // Delete policy by role ID
+  async deletePolicy(roleId: string): Promise<boolean> {
+    const result = sqlite.prepare(`
+      DELETE FROM ssh_policies WHERE role_id = ?
+    `).run(roleId);
+    return result.changes > 0;
+  }
+}
+
+// Pending SSH Policy types
+export interface PendingSshPolicy {
+  id: string;
+  roleId: string;
+  requestedBy: string;
+  requestedByEmail?: string;
+  policyRequestData: string;
+  status: "pending" | "approved" | "committed" | "cancelled";
+  threshold: number;
+  createdAt: number;
+  updatedAt?: number;
+  approvalCount?: number;
+  rejectionCount?: number;
+  approvedBy?: string[];
+  deniedBy?: string[];
+  commitReady?: boolean;
+}
+
+export interface InsertPendingSshPolicy {
+  id: string;
+  roleId: string;
+  requestedBy: string;
+  requestedByEmail?: string;
+  policyRequestData: string;
+  threshold?: number;
+}
+
+export interface SshPolicyDecision {
+  policyRequestId: string;
+  userVuid: string;
+  userEmail: string;
+  decision: 0 | 1; // 0 = reject, 1 = approve
+  createdAt: number;
+}
+
+// Pending SSH Policy storage class
+export class PendingPolicyStorage {
+  // Create a new pending policy request
+  async createPendingPolicy(policy: InsertPendingSshPolicy): Promise<PendingSshPolicy> {
+    sqlite.prepare(`
+      INSERT INTO pending_ssh_policies (id, role_id, requested_by, requested_by_email, policy_request_data, threshold)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(policy.id, policy.roleId, policy.requestedBy, policy.requestedByEmail || null, policy.policyRequestData, policy.threshold || 1);
+
+    // Log the creation
+    sqlite.prepare(`
+      INSERT INTO ssh_policy_logs (type, policy_request_id, user_email, role_id, details)
+      VALUES ('created', ?, ?, ?, ?)
+    `).run(policy.id, policy.requestedByEmail || policy.requestedBy, policy.roleId, JSON.stringify({ threshold: policy.threshold || 1 }));
+
+    return {
+      ...policy,
+      status: "pending",
+      threshold: policy.threshold || 1,
+      createdAt: Math.floor(Date.now() / 1000),
+    };
+  }
+
+  // Get pending policy by ID
+  async getPendingPolicy(id: string): Promise<PendingSshPolicy | undefined> {
+    const row = sqlite.prepare(`
+      SELECT p.*,
+        (SELECT COUNT(*) FROM ssh_policy_decisions d WHERE d.policy_request_id = p.id AND d.decision = 1) as approval_count,
+        (SELECT COUNT(*) FROM ssh_policy_decisions d WHERE d.policy_request_id = p.id AND d.decision = 0) as rejection_count
+      FROM pending_ssh_policies p WHERE p.id = ?
+    `).get(id) as any | undefined;
+
+    if (!row) return undefined;
+
+    return {
+      id: row.id,
+      roleId: row.role_id,
+      requestedBy: row.requested_by,
+      requestedByEmail: row.requested_by_email,
+      policyRequestData: row.policy_request_data,
+      status: row.status as "pending" | "approved" | "committed" | "cancelled",
+      threshold: row.threshold,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      approvalCount: row.approval_count,
+      rejectionCount: row.rejection_count,
+    };
+  }
+
+  // Get all pending policies (not yet committed or cancelled)
+  // For commit-ready policies, adds the admin policy to the request (required for Ork commit)
+  async getAllPendingPolicies(): Promise<PendingSshPolicy[]> {
+    const rows = sqlite.prepare(`
+      SELECT p.*,
+        (SELECT COUNT(*) FROM ssh_policy_decisions d WHERE d.policy_request_id = p.id AND d.decision = 1) as approval_count,
+        (SELECT COUNT(*) FROM ssh_policy_decisions d WHERE d.policy_request_id = p.id AND d.decision = 0) as rejection_count,
+        (SELECT GROUP_CONCAT(user_vuid) FROM ssh_policy_decisions d WHERE d.policy_request_id = p.id AND d.decision = 1) as approved_by,
+        (SELECT GROUP_CONCAT(user_vuid) FROM ssh_policy_decisions d WHERE d.policy_request_id = p.id AND d.decision = 0) as denied_by
+      FROM pending_ssh_policies p
+      WHERE p.status IN ('pending', 'approved')
+      ORDER BY p.created_at DESC
+    `).all() as any[];
+
+    // Fetch admin policy from TideCloak (needed to authorize commits)
+    let adminPolicyBytes: Uint8Array | null = null;
+    try {
+      const adminPolicyBase64 = await getAdminPolicy();
+      adminPolicyBytes = base64ToBytes(adminPolicyBase64);
+    } catch (error) {
+      console.error("Failed to fetch admin policy:", error);
+      // Continue without admin policy - commits will fail but approvals still work
+    }
+
+    const policies = await Promise.all(rows.map(async row => {
+      const isCommitReady = (row.approval_count || 0) >= row.threshold;
+      let policyRequestData = row.policy_request_data;
+
+      // If commit-ready and we have admin policy, add it to the request
+      if (isCommitReady && adminPolicyBytes) {
+        try {
+          const request = PolicySignRequest.decode(base64ToBytes(policyRequestData));
+          // Add the admin policy to authorize the commit
+          request.addPolicy(adminPolicyBytes);
+          const updatedData = bytesToBase64(request.encode());
+
+          // Update the request in the database with admin policy attached
+          sqlite.prepare(`
+            UPDATE pending_ssh_policies SET policy_request_data = ? WHERE id = ?
+          `).run(updatedData, row.id);
+
+          policyRequestData = updatedData;
+        } catch (error) {
+          console.error(`Failed to add admin policy to request ${row.id}:`, error);
+        }
+      }
+
+      return {
+        id: row.id,
+        roleId: row.role_id,
+        requestedBy: row.requested_by,
+        requestedByEmail: row.requested_by_email,
+        policyRequestData,
+        status: row.status as "pending" | "approved" | "committed" | "cancelled",
+        threshold: row.threshold,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+        approvalCount: row.approval_count || 0,
+        rejectionCount: row.rejection_count || 0,
+        approvedBy: row.approved_by ? row.approved_by.split(',') : [],
+        deniedBy: row.denied_by ? row.denied_by.split(',') : [],
+        commitReady: isCommitReady,
+      };
+    }));
+
+    return policies;
+  }
+
+  // Add approval/rejection decision
+  async addDecision(decision: Omit<SshPolicyDecision, "createdAt">): Promise<void> {
+    // Insert or update decision
+    sqlite.prepare(`
+      INSERT INTO ssh_policy_decisions (policy_request_id, user_vuid, user_email, decision)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(policy_request_id, user_vuid) DO UPDATE SET decision = excluded.decision, created_at = strftime('%s', 'now')
+    `).run(decision.policyRequestId, decision.userVuid, decision.userEmail, decision.decision);
+
+    // Log the decision
+    const logType = decision.decision === 1 ? "approved" : "denied";
+    const policy = await this.getPendingPolicy(decision.policyRequestId);
+    sqlite.prepare(`
+      INSERT INTO ssh_policy_logs (type, policy_request_id, user_email, role_id)
+      VALUES (?, ?, ?, ?)
+    `).run(logType, decision.policyRequestId, decision.userEmail, policy?.roleId || null);
+
+    // Check if threshold is met
+    if (policy && policy.approvalCount && policy.approvalCount + 1 >= policy.threshold) {
+      await this.updateStatus(decision.policyRequestId, "approved");
+    }
+  }
+
+  // Update policy status
+  async updateStatus(id: string, status: "pending" | "approved" | "committed" | "cancelled"): Promise<void> {
+    sqlite.prepare(`
+      UPDATE pending_ssh_policies SET status = ?, updated_at = strftime('%s', 'now') WHERE id = ?
+    `).run(status, id);
+  }
+
+  // Get decisions for a policy
+  async getDecisions(policyRequestId: string): Promise<SshPolicyDecision[]> {
+    const rows = sqlite.prepare(`
+      SELECT * FROM ssh_policy_decisions WHERE policy_request_id = ? ORDER BY created_at DESC
+    `).all(policyRequestId) as any[];
+
+    return rows.map(row => ({
+      policyRequestId: row.policy_request_id,
+      userVuid: row.user_vuid,
+      userEmail: row.user_email,
+      decision: row.decision as 0 | 1,
+      createdAt: row.created_at,
+    }));
+  }
+
+  // Check if user has already voted
+  async hasUserVoted(policyRequestId: string, userVuid: string): Promise<boolean> {
+    const row = sqlite.prepare(`
+      SELECT 1 FROM ssh_policy_decisions WHERE policy_request_id = ? AND user_vuid = ?
+    `).get(policyRequestId, userVuid);
+    return !!row;
+  }
+
+  // Update the policy request data (used to store signed/approved request)
+  async updatePolicyRequest(id: string, policyRequestData: string): Promise<void> {
+    sqlite.prepare(`
+      UPDATE pending_ssh_policies SET policy_request_data = ? WHERE id = ?
+    `).run(policyRequestData, id);
+  }
+
+  // Revoke a user's decision (remove their vote)
+  async revokeDecision(policyRequestId: string, userVuid: string, userEmail: string): Promise<boolean> {
+    const policy = await this.getPendingPolicy(policyRequestId);
+    if (!policy) throw new Error("Policy not found");
+    if (policy.status === "committed" || policy.status === "cancelled") {
+      throw new Error("Cannot revoke decision on committed or cancelled policy");
+    }
+
+    const result = sqlite.prepare(`
+      DELETE FROM ssh_policy_decisions WHERE policy_request_id = ? AND user_vuid = ?
+    `).run(policyRequestId, userVuid);
+
+    if (result.changes > 0) {
+      // Log the revocation
+      sqlite.prepare(`
+        INSERT INTO ssh_policy_logs (type, policy_request_id, user_email, role_id, details)
+        VALUES ('revoked', ?, ?, ?, 'User revoked their decision')
+      `).run(policyRequestId, userEmail, policy.roleId);
+
+      // If policy was "approved", check if it should go back to "pending"
+      if (policy.status === "approved") {
+        const updatedPolicy = await this.getPendingPolicy(policyRequestId);
+        if (updatedPolicy && (updatedPolicy.approvalCount || 0) < updatedPolicy.threshold) {
+          await this.updateStatus(policyRequestId, "pending");
+        }
+      }
+
+      return true;
+    }
+    return false;
+  }
+
+  // Commit a policy (after approval threshold is met)
+  async commitPolicy(id: string, userEmail: string): Promise<void> {
+    const policy = await this.getPendingPolicy(id);
+    if (!policy) throw new Error("Policy not found");
+    if (policy.status !== "approved") throw new Error("Policy not approved yet");
+
+    await this.updateStatus(id, "committed");
+
+    // Log the commit
+    sqlite.prepare(`
+      INSERT INTO ssh_policy_logs (type, policy_request_id, user_email, role_id)
+      VALUES ('committed', ?, ?, ?)
+    `).run(id, userEmail, policy.roleId);
+  }
+
+  // Cancel a pending policy
+  async cancelPolicy(id: string, userEmail: string): Promise<void> {
+    const policy = await this.getPendingPolicy(id);
+    if (!policy) throw new Error("Policy not found");
+
+    await this.updateStatus(id, "cancelled");
+
+    // Log the cancellation
+    sqlite.prepare(`
+      INSERT INTO ssh_policy_logs (type, policy_request_id, user_email, role_id)
+      VALUES ('cancelled', ?, ?, ?)
+    `).run(id, userEmail, policy.roleId);
+  }
+
+  // Get policy logs
+  async getLogs(limit: number = 100): Promise<any[]> {
+    const rows = sqlite.prepare(`
+      SELECT * FROM ssh_policy_logs ORDER BY timestamp DESC LIMIT ?
+    `).all(limit) as any[];
+
+    return rows.map(row => ({
+      id: row.id,
+      timestamp: row.timestamp,
+      type: row.type,
+      policyRequestId: row.policy_request_id,
+      userEmail: row.user_email,
+      roleId: row.role_id,
+      details: row.details,
+    }));
+  }
+}
+
+// Policy Template storage class
+export class TemplateStorage {
+  // Create a new template
+  async createTemplate(template: InsertPolicyTemplate): Promise<PolicyTemplate> {
+    const id = randomUUID();
+    const now = Math.floor(Date.now() / 1000);
+
+    sqlite.prepare(`
+      INSERT INTO policy_templates (id, name, description, cs_code, parameters, created_by, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(id, template.name, template.description, template.csCode, JSON.stringify(template.parameters), template.createdBy, now);
+
+    return {
+      id,
+      name: template.name,
+      description: template.description,
+      csCode: template.csCode,
+      parameters: template.parameters,
+      createdBy: template.createdBy,
+      createdAt: now,
+    };
+  }
+
+  // Get template by ID
+  async getTemplate(id: string): Promise<PolicyTemplate | undefined> {
+    const row = sqlite.prepare(`
+      SELECT * FROM policy_templates WHERE id = ?
+    `).get(id) as any | undefined;
+
+    if (!row) return undefined;
+
+    return {
+      id: row.id,
+      name: row.name,
+      description: row.description,
+      csCode: row.cs_code,
+      parameters: JSON.parse(row.parameters || '[]') as TemplateParameter[],
+      createdBy: row.created_by,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  // Get template by name
+  async getTemplateByName(name: string): Promise<PolicyTemplate | undefined> {
+    const row = sqlite.prepare(`
+      SELECT * FROM policy_templates WHERE name = ?
+    `).get(name) as any | undefined;
+
+    if (!row) return undefined;
+
+    return {
+      id: row.id,
+      name: row.name,
+      description: row.description,
+      csCode: row.cs_code,
+      parameters: JSON.parse(row.parameters || '[]') as TemplateParameter[],
+      createdBy: row.created_by,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  // Get all templates
+  async getAllTemplates(): Promise<PolicyTemplate[]> {
+    const rows = sqlite.prepare(`
+      SELECT * FROM policy_templates ORDER BY created_at DESC
+    `).all() as any[];
+
+    return rows.map(row => ({
+      id: row.id,
+      name: row.name,
+      description: row.description,
+      csCode: row.cs_code,
+      parameters: JSON.parse(row.parameters || '[]') as TemplateParameter[],
+      createdBy: row.created_by,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  // Update a template
+  async updateTemplate(id: string, data: Partial<InsertPolicyTemplate>): Promise<PolicyTemplate | undefined> {
+    const existing = await this.getTemplate(id);
+    if (!existing) return undefined;
+
+    const updates: string[] = [];
+    const values: any[] = [];
+
+    if (data.name !== undefined) {
+      updates.push('name = ?');
+      values.push(data.name);
+    }
+    if (data.description !== undefined) {
+      updates.push('description = ?');
+      values.push(data.description);
+    }
+    if (data.csCode !== undefined) {
+      updates.push('cs_code = ?');
+      values.push(data.csCode);
+    }
+    if (data.parameters !== undefined) {
+      updates.push('parameters = ?');
+      values.push(JSON.stringify(data.parameters));
+    }
+
+    if (updates.length > 0) {
+      updates.push('updated_at = ?');
+      values.push(Math.floor(Date.now() / 1000));
+      values.push(id);
+
+      sqlite.prepare(`
+        UPDATE policy_templates SET ${updates.join(', ')} WHERE id = ?
+      `).run(...values);
+    }
+
+    return this.getTemplate(id);
+  }
+
+  // Delete a template
+  async deleteTemplate(id: string): Promise<boolean> {
+    const result = sqlite.prepare(`
+      DELETE FROM policy_templates WHERE id = ?
+    `).run(id);
+    return result.changes > 0;
+  }
+}
+
+// Default SSH policy template
+const DEFAULT_SSH_TEMPLATE = {
+  name: "SSH Access Policy",
+  description: "Standard SSH access policy with role-based authorization. Configure approval and execution types for SSH challenge signing.",
+  csCode: `using Ork.Forseti.Sdk;
+
+/// <summary>
+/// SSH Challenge Signing Policy for Keyle-SSH.
+/// Validates SSH signing requests based on policy parameters.
+/// </summary>
+public class SshPolicy : IAccessPolicy
+{
+    public PolicyDecision Authorize(AccessContext ctx)
+    {
+        var policy = ctx.Policy;
+        var doken = ctx.Doken;
+
+        if (policy == null)
+            return PolicyDecision.Deny("No policy provided");
+
+        if (doken == null)
+            return PolicyDecision.Deny("No doken provided");
+
+        // Get required parameters from policy
+        if (!policy.TryGetParameter<string>("role", out var requiredRole) || string.IsNullOrEmpty(requiredRole))
+            return PolicyDecision.Deny("Policy missing required 'role' parameter");
+
+        if (!policy.TryGetParameter<string>("resource", out var resource) || string.IsNullOrEmpty(resource))
+            return PolicyDecision.Deny("Policy missing required 'resource' parameter");
+
+        // Verify that the user's doken contains the required role for this resource
+        if (!doken.Payload.ResourceAccessRoleExists(resource, requiredRole))
+            return PolicyDecision.Deny($"User does not have the required role '{requiredRole}' for resource '{resource}'");
+
+        // Get configurable parameters
+        var approvalType = "{{APPROVAL_TYPE}}";
+        var executionType = "{{EXECUTION_TYPE}}";
+
+        // Log the authorization attempt
+        ForsetiSdk.Log($"SSH signing authorized for role '{requiredRole}' (approval: {approvalType}, execution: {executionType})");
+
+        return PolicyDecision.Allow();
+    }
+}`,
+  parameters: [
+    {
+      name: "APPROVAL_TYPE",
+      type: "select" as const,
+      helpText: "Determines if user approval is needed before signing. 'implicit' allows automatic signing, 'explicit' requires user confirmation.",
+      required: true,
+      defaultValue: "implicit",
+      options: ["implicit", "explicit"]
+    },
+    {
+      name: "EXECUTION_TYPE",
+      type: "select" as const,
+      helpText: "Controls who can execute the signing operation. 'private' restricts to role members, 'public' allows broader access.",
+      required: true,
+      defaultValue: "private",
+      options: ["public", "private"]
+    }
+  ],
+  createdBy: "system"
+};
+
+// Seed or update default template
+try {
+  const existingTemplate = sqlite.prepare(`SELECT id, cs_code FROM policy_templates WHERE name = ? AND created_by = 'system'`).get(DEFAULT_SSH_TEMPLATE.name) as { id: string; cs_code: string } | undefined;
+
+  if (!existingTemplate) {
+    // Create new default template
+    const id = randomUUID();
+    const now = Math.floor(Date.now() / 1000);
+    sqlite.prepare(`
+      INSERT INTO policy_templates (id, name, description, cs_code, parameters, created_by, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(id, DEFAULT_SSH_TEMPLATE.name, DEFAULT_SSH_TEMPLATE.description, DEFAULT_SSH_TEMPLATE.csCode, JSON.stringify(DEFAULT_SSH_TEMPLATE.parameters), DEFAULT_SSH_TEMPLATE.createdBy, now);
+  } else if (existingTemplate.cs_code !== DEFAULT_SSH_TEMPLATE.csCode) {
+    // Update existing system template if code has changed (e.g., role check was added)
+    const now = Math.floor(Date.now() / 1000);
+    sqlite.prepare(`
+      UPDATE policy_templates SET cs_code = ?, description = ?, parameters = ?, updated_at = ? WHERE id = ?
+    `).run(DEFAULT_SSH_TEMPLATE.csCode, DEFAULT_SSH_TEMPLATE.description, JSON.stringify(DEFAULT_SSH_TEMPLATE.parameters), now, existingTemplate.id);
+  }
+} catch {
+  // Ignore seeding errors
+}
+
 export const storage = new SQLiteStorage();
 export const approvalStorage = new ApprovalStorage();
+export const policyStorage = new PolicyStorage();
+export const pendingPolicyStorage = new PendingPolicyStorage();
+export const templateStorage = new TemplateStorage();

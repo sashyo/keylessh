@@ -102,3 +102,33 @@ export interface AdminRole {
   clientRole?: boolean;
   clientId?: string;
 }
+
+// Policy Template parameter definition
+export interface TemplateParameter {
+  name: string;
+  type: "string" | "number" | "boolean" | "select";
+  helpText: string;
+  required: boolean;
+  defaultValue?: string | number | boolean;
+  options?: string[];  // For "select" type
+}
+
+// Policy Template entity
+export interface PolicyTemplate {
+  id: string;
+  name: string;
+  description: string;
+  csCode: string;
+  parameters: TemplateParameter[];
+  createdBy: string;
+  createdAt: number;
+  updatedAt?: number;
+}
+
+export interface InsertPolicyTemplate {
+  name: string;
+  description: string;
+  csCode: string;
+  parameters: TemplateParameter[];
+  createdBy: string;
+}

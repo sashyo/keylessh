@@ -8,6 +8,14 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Separator } from "@/components/ui/separator";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   Dialog,
   DialogContent,
@@ -36,22 +44,55 @@ import {
 } from "@/components/ui/table";
 import { useToast } from "@/hooks/use-toast";
 import { queryClient } from "@/lib/queryClient";
-import { api } from "@/lib/api";
+import { api, type PolicyTemplate, type TemplateParameter } from "@/lib/api";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
-import { KeyRound, Pencil, Plus, Trash2, Search } from "lucide-react";
+import { useAuth } from "@/contexts/AuthContext";
+import { KeyRound, Pencil, Plus, Trash2, Search, Shield, FileCode } from "lucide-react";
 import type { AdminRole } from "@shared/schema";
+import { createSshPolicyRequest, createSshPolicyRequestWithCode, bytesToBase64, SSH_MODEL_IDS } from "@/lib/sshPolicy";
+import adapter from "@/tidecloakAdapter.json";
+
+// SSH signing contract types
+const SSH_CONTRACT_TYPES = {
+  BASIC: "BasicCustom<SSH>:BasicCustom<1>",
+  DYNAMIC: "DynamicCustom<SSH>:DynamicCustom<1>",
+  DYNAMIC_APPROVED: "DynamicApprovedCustom<SSH>:DynamicApprovedCustom<1>",
+} as const;
+
+type SshContractType = typeof SSH_CONTRACT_TYPES[keyof typeof SSH_CONTRACT_TYPES];
+
+interface PolicyConfig {
+  enabled: boolean;
+  contractType: SshContractType;
+  approvalType: "implicit" | "explicit";
+  executionType: "public" | "private";
+  threshold: number;
+}
+
+const defaultPolicyConfig: PolicyConfig = {
+  enabled: true,
+  contractType: SSH_CONTRACT_TYPES.BASIC,
+  approvalType: "implicit",
+  executionType: "private",
+  threshold: 1,
+};
 
 export default function AdminRoles() {
   const { toast } = useToast();
+  const { initializeTideRequest } = useAuth();
   const [search, setSearch] = useState("");
   const [editingRole, setEditingRole] = useState<AdminRole | null>(null);
   const [creatingRole, setCreatingRole] = useState(false);
   const [deletingRole, setDeletingRole] = useState<AdminRole | null>(null);
   const [createAsSshRole, setCreateAsSshRole] = useState(true);
+  const [isCreatingPolicy, setIsCreatingPolicy] = useState(false);
   const [formData, setFormData] = useState<{ name: string; description: string }>({
     name: "",
     description: "",
   });
+  const [policyConfig, setPolicyConfig] = useState<PolicyConfig>(defaultPolicyConfig);
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
+  const [templateParams, setTemplateParams] = useState<Record<string, any>>({});
 
   const normalizeSshRoleName = (value: string) => {
     const trimmed = value.trim();
@@ -73,13 +114,39 @@ export default function AdminRoles() {
 
   const roles = rolesData?.roles || [];
 
+  // Query for policy templates
+  const { data: templatesData } = useQuery({
+    queryKey: ["/api/admin/policy-templates"],
+    queryFn: api.admin.policyTemplates.list,
+  });
+  const templates = templatesData?.templates || [];
+
+  // Helper to get selected template
+  const selectedTemplate = selectedTemplateId
+    ? templates.find((t) => t.id === selectedTemplateId)
+    : null;
+
+  // Replace placeholders in template code
+  const replacePlaceholders = (code: string, params: Record<string, any>): string => {
+    let result = code;
+    for (const [key, value] of Object.entries(params)) {
+      const placeholder = `{{${key}}}`;
+      result = result.replace(new RegExp(placeholder.replace(/[{}]/g, '\\$&'), 'g'), String(value));
+    }
+    return result;
+  };
+
   const createMutation = useMutation({
-    mutationFn: (data: { name: string; description?: string }) => api.admin.roles.create(data),
+    mutationFn: (data: { name: string; description?: string; policy?: PolicyConfig }) =>
+      api.admin.roles.create(data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/admin/roles"] });
       void queryClient.refetchQueries({ queryKey: ["/api/admin/roles"] });
       setCreatingRole(false);
       setFormData({ name: "", description: "" });
+      setPolicyConfig(defaultPolicyConfig);
+      setSelectedTemplateId(null);
+      setTemplateParams({});
       toast({ title: "Role created successfully" });
     },
     onError: (error: Error) => {
@@ -114,41 +181,231 @@ export default function AdminRoles() {
     },
   });
 
-  const handleEdit = (role: AdminRole) => {
+  // State for editing policy
+  const [editingPolicyConfig, setEditingPolicyConfig] = useState<PolicyConfig | null>(null);
+  const [loadingPolicy, setLoadingPolicy] = useState(false);
+  const [isUpdatingPolicy, setIsUpdatingPolicy] = useState(false);
+  const [editSelectedTemplateId, setEditSelectedTemplateId] = useState<string | null>(null);
+  const [editTemplateParams, setEditTemplateParams] = useState<Record<string, any>>({});
+
+  const handleEdit = async (role: AdminRole) => {
     setEditingRole(role);
     setFormData({
       name: role.name,
       description: role.description || "",
     });
+
+    // If it's an SSH role, fetch the current policy
+    if (/^ssh[:\-]/i.test(role.name)) {
+      setLoadingPolicy(true);
+      setEditingPolicyConfig(null);
+      setEditSelectedTemplateId(null);
+      setEditTemplateParams({});
+      try {
+        const { policy } = await api.admin.roles.policies.get(role.name);
+        if (policy) {
+          setEditingPolicyConfig({
+            enabled: true,
+            contractType: policy.contractType as SshContractType || SSH_CONTRACT_TYPES.BASIC,
+            approvalType: policy.approvalType || "implicit",
+            executionType: policy.executionType || "private",
+            threshold: policy.threshold || 1,
+          });
+        } else {
+          // No existing policy
+          setEditingPolicyConfig({
+            ...defaultPolicyConfig,
+            enabled: false,
+          });
+        }
+      } catch {
+        // No policy found, allow creating one
+        setEditingPolicyConfig({
+          ...defaultPolicyConfig,
+          enabled: false,
+        });
+      } finally {
+        setLoadingPolicy(false);
+      }
+    } else {
+      setEditingPolicyConfig(null);
+    }
   };
 
   const handleCreate = () => {
     setFormData({ name: "", description: "" });
     setCreateAsSshRole(true);
+    setPolicyConfig(defaultPolicyConfig);
     setCreatingRole(true);
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (editingRole) {
-      updateMutation.mutate({
-        name: formData.name,
-        description: formData.description || undefined,
-      });
+    if (!editingRole) return;
+
+    // Update role description
+    updateMutation.mutate({
+      name: formData.name,
+      description: formData.description || undefined,
+    });
+
+    // If policy config changed for SSH role, create new pending policy request
+    if (editingPolicyConfig && editingPolicyConfig.enabled && /^ssh[:\-]/i.test(editingRole.name)) {
+      setIsUpdatingPolicy(true);
+      try {
+        let policyRequest;
+        const editSelectedTemplate = editSelectedTemplateId
+          ? templates.find((t) => t.id === editSelectedTemplateId)
+          : null;
+
+        if (editSelectedTemplate) {
+          // Generate contract code from template with placeholders replaced
+          const contractCode = replacePlaceholders(editSelectedTemplate.csCode, editTemplateParams);
+
+          // Compile and create policy request with custom contract code
+          const { request } = await createSshPolicyRequestWithCode({
+            roleName: editingRole.name,
+            threshold: editingPolicyConfig.threshold,
+            approvalType: editingPolicyConfig.approvalType,
+            executionType: editingPolicyConfig.executionType,
+            modelId: SSH_MODEL_IDS.BASIC,
+            resource: adapter.resource,
+            vendorId: adapter.vendorId,
+            contractCode,
+          });
+          policyRequest = request;
+        } else {
+          // Compile and create policy request with default contract
+          policyRequest = await createSshPolicyRequest({
+            roleName: editingRole.name,
+            threshold: editingPolicyConfig.threshold,
+            approvalType: editingPolicyConfig.approvalType,
+            executionType: editingPolicyConfig.executionType,
+            modelId: SSH_MODEL_IDS.BASIC,
+            resource: adapter.resource,
+            vendorId: adapter.vendorId,
+          });
+        }
+
+        // Initialize the request with user's Tide credentials
+        const initializedRequest = await initializeTideRequest(policyRequest);
+
+        // Submit to server for pending approval storage
+        const response = await fetch("/api/admin/ssh-policies/pending", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${localStorage.getItem("access_token")}`,
+          },
+          body: JSON.stringify({
+            policyRequest: bytesToBase64(initializedRequest.encode()),
+            roleName: editingRole.name,
+          }),
+        });
+
+        if (!response.ok) {
+          const error = await response.json();
+          throw new Error(error.error || "Failed to create policy request");
+        }
+
+        toast({ title: "Policy update request created", description: "Pending admin approval" });
+      } catch (error) {
+        console.error("Failed to create policy update request:", error);
+        toast({
+          title: "Policy update failed",
+          description: error instanceof Error ? error.message : "Unknown error",
+          variant: "destructive",
+        });
+      } finally {
+        setIsUpdatingPolicy(false);
+      }
     }
   };
 
-  const handleCreateSubmit = (e: React.FormEvent) => {
+  const handleCreateSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const name = createAsSshRole ? normalizeSshRoleName(formData.name) : formData.name.trim();
     if (!name) {
       toast({ title: "Role name is required", variant: "destructive" });
       return;
     }
+
+    // First create the role
     createMutation.mutate({
       name,
       description: formData.description || undefined,
+      policy: createAsSshRole && policyConfig.enabled ? policyConfig : undefined,
     });
+
+    // If policy is enabled, create the PolicySignRequest with Forseti contract
+    if (createAsSshRole && policyConfig.enabled) {
+      setIsCreatingPolicy(true);
+      try {
+        let policyRequest;
+
+        // Check if using a template or default
+        if (selectedTemplate) {
+          // Generate contract code from template with placeholders replaced
+          const contractCode = replacePlaceholders(selectedTemplate.csCode, templateParams);
+
+          // Compile and create policy request with custom contract code
+          const { request } = await createSshPolicyRequestWithCode({
+            roleName: name,
+            threshold: policyConfig.threshold,
+            approvalType: policyConfig.approvalType,
+            executionType: policyConfig.executionType,
+            modelId: SSH_MODEL_IDS.BASIC,
+            resource: adapter.resource,
+            vendorId: adapter.vendorId,
+            contractCode,
+          });
+          policyRequest = request;
+        } else {
+          // Compile and create policy request with default contract
+          policyRequest = await createSshPolicyRequest({
+            roleName: name,
+            threshold: policyConfig.threshold,
+            approvalType: policyConfig.approvalType,
+            executionType: policyConfig.executionType,
+            modelId: SSH_MODEL_IDS.BASIC,
+            resource: adapter.resource,
+            vendorId: adapter.vendorId,
+          });
+        }
+
+        // Initialize the request with user's Tide credentials
+        const initializedRequest = await initializeTideRequest(policyRequest);
+
+        // Submit to server for pending approval storage
+        const response = await fetch("/api/admin/ssh-policies/pending", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${localStorage.getItem("access_token")}`,
+          },
+          body: JSON.stringify({
+            policyRequest: bytesToBase64(initializedRequest.encode()),
+            roleName: name,
+          }),
+        });
+
+        if (!response.ok) {
+          const error = await response.json();
+          throw new Error(error.error || "Failed to create policy request");
+        }
+
+        toast({ title: "Policy request created", description: "Pending admin approval" });
+      } catch (error) {
+        console.error("Failed to create policy request:", error);
+        toast({
+          title: "Policy creation failed",
+          description: error instanceof Error ? error.message : "Unknown error",
+          variant: "destructive",
+        });
+      } finally {
+        setIsCreatingPolicy(false);
+      }
+    }
   };
 
   const handleDeleteConfirm = () => {
@@ -304,11 +561,11 @@ export default function AdminRoles() {
 
       {/* Edit Role Dialog */}
       <Dialog open={!!editingRole} onOpenChange={(open) => !open && setEditingRole(null)}>
-        <DialogContent className="max-w-md">
+        <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Edit Role</DialogTitle>
             <DialogDescription>
-              Update the role description
+              Update the role settings
             </DialogDescription>
           </DialogHeader>
           <form onSubmit={handleSubmit} className="space-y-4">
@@ -332,6 +589,187 @@ export default function AdminRoles() {
               />
             </div>
 
+            {/* Policy Configuration Section - only for SSH roles */}
+            {editingRole && /^ssh[:\-]/i.test(editingRole.name) && (
+              <div className="space-y-4 pt-4 border-t">
+                <div className="flex items-center gap-2">
+                  <Shield className="h-4 w-4 text-muted-foreground" />
+                  <h4 className="font-medium">SSH Signing Policy</h4>
+                </div>
+
+                {loadingPolicy ? (
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <div className="h-4 w-4 border-2 border-muted-foreground border-t-transparent rounded-full animate-spin" />
+                    Loading policy...
+                  </div>
+                ) : editingPolicyConfig ? (
+                  <>
+                    <div className="flex items-center gap-2">
+                      <Checkbox
+                        id="editPolicyEnabled"
+                        checked={editingPolicyConfig.enabled}
+                        onCheckedChange={(v) => setEditingPolicyConfig({ ...editingPolicyConfig, enabled: Boolean(v) })}
+                      />
+                      <Label htmlFor="editPolicyEnabled" className="text-sm font-normal">
+                        {editingPolicyConfig.enabled ? "Update signing policy" : "Create signing policy for this role"}
+                      </Label>
+                    </div>
+
+                    {editingPolicyConfig.enabled && (
+                      <div className="space-y-4 pl-6">
+                        {/* Template Selection */}
+                        <div className="space-y-2">
+                          <div className="flex items-center gap-2">
+                            <FileCode className="h-4 w-4 text-muted-foreground" />
+                            <Label htmlFor="editTemplateSelect">Policy Template</Label>
+                          </div>
+                          <Select
+                            value={editSelectedTemplateId || "default"}
+                            onValueChange={(v) => {
+                              if (v === "default") {
+                                setEditSelectedTemplateId(null);
+                                setEditTemplateParams({});
+                              } else {
+                                setEditSelectedTemplateId(v);
+                                const template = templates.find((t) => t.id === v);
+                                if (template) {
+                                  const defaults: Record<string, any> = {};
+                                  template.parameters.forEach((p) => {
+                                    if (p.defaultValue !== undefined) {
+                                      defaults[p.name] = p.defaultValue;
+                                    }
+                                  });
+                                  setEditTemplateParams(defaults);
+                                }
+                              }
+                            }}
+                          >
+                            <SelectTrigger>
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="default">Default SSH Policy</SelectItem>
+                              {templates.map((t) => (
+                                <SelectItem key={t.id} value={t.id}>
+                                  {t.name}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+
+                        {/* Template Parameters */}
+                        {editSelectedTemplateId && (
+                          (() => {
+                            const editSelectedTemplate = templates.find((t) => t.id === editSelectedTemplateId);
+                            return editSelectedTemplate && editSelectedTemplate.parameters.length > 0 ? (
+                              <div className="space-y-3 p-3 border rounded-md bg-muted/50">
+                                <p className="text-xs font-medium">Template Parameters</p>
+                                {editSelectedTemplate.parameters.map((param) => (
+                                  <div key={param.name} className="space-y-1">
+                                    <Label className="text-xs">
+                                      {param.name}
+                                      {param.required && <span className="text-destructive ml-1">*</span>}
+                                    </Label>
+                                    {param.helpText && (
+                                      <p className="text-xs text-muted-foreground">{param.helpText}</p>
+                                    )}
+                                    {param.type === "select" && (
+                                      <Select
+                                        value={editTemplateParams[param.name] || param.defaultValue?.toString() || ""}
+                                        onValueChange={(v) => setEditTemplateParams({ ...editTemplateParams, [param.name]: v })}
+                                      >
+                                        <SelectTrigger className="h-8 text-sm">
+                                          <SelectValue />
+                                        </SelectTrigger>
+                                        <SelectContent>
+                                          {param.options?.map((opt) => (
+                                            <SelectItem key={opt} value={opt}>{opt}</SelectItem>
+                                          ))}
+                                        </SelectContent>
+                                      </Select>
+                                    )}
+                                    {param.type === "string" && (
+                                      <Input
+                                        value={editTemplateParams[param.name] || ""}
+                                        onChange={(e) => setEditTemplateParams({ ...editTemplateParams, [param.name]: e.target.value })}
+                                        className="h-8 text-sm"
+                                      />
+                                    )}
+                                    {param.type === "number" && (
+                                      <Input
+                                        type="number"
+                                        value={editTemplateParams[param.name] || ""}
+                                        onChange={(e) => setEditTemplateParams({ ...editTemplateParams, [param.name]: parseInt(e.target.value) || 0 })}
+                                        className="h-8 text-sm"
+                                      />
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            ) : null;
+                          })()
+                        )}
+
+                        <div className="grid grid-cols-2 gap-4">
+                          <div className="space-y-2">
+                            <Label>Approval Type</Label>
+                            <Select
+                              value={editingPolicyConfig.approvalType}
+                              onValueChange={(v) => setEditingPolicyConfig({ ...editingPolicyConfig, approvalType: v as "implicit" | "explicit" })}
+                            >
+                              <SelectTrigger>
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="implicit">Implicit</SelectItem>
+                                <SelectItem value="explicit">Explicit</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+
+                          <div className="space-y-2">
+                            <Label>Execution Type</Label>
+                            <Select
+                              value={editingPolicyConfig.executionType}
+                              onValueChange={(v) => setEditingPolicyConfig({ ...editingPolicyConfig, executionType: v as "public" | "private" })}
+                            >
+                              <SelectTrigger>
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="public">Public</SelectItem>
+                                <SelectItem value="private">Private</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+                        </div>
+
+                        {editingPolicyConfig.approvalType === "explicit" && (
+                          <div className="space-y-2">
+                            <Label>Approval Threshold</Label>
+                            <Input
+                              type="number"
+                              min={1}
+                              value={editingPolicyConfig.threshold}
+                              onChange={(e) => setEditingPolicyConfig({ ...editingPolicyConfig, threshold: parseInt(e.target.value) || 1 })}
+                            />
+                            <p className="text-xs text-muted-foreground">
+                              Number of approvals required before signing
+                            </p>
+                          </div>
+                        )}
+
+                        <p className="text-xs text-muted-foreground bg-amber-50 text-amber-800 p-2 rounded">
+                          Updating the policy will create a new pending approval request that must be approved by admins.
+                        </p>
+                      </div>
+                    )}
+                  </>
+                ) : null}
+              </div>
+            )}
+
             <DialogFooter className="flex justify-between sm:justify-between">
               <Button
                 type="button"
@@ -346,8 +784,8 @@ export default function AdminRoles() {
                 <Button type="button" variant="outline" onClick={() => setEditingRole(null)}>
                   Cancel
                 </Button>
-                <Button type="submit" disabled={updateMutation.isPending} data-testid="submit-role-form">
-                  {updateMutation.isPending ? "Saving..." : "Save Changes"}
+                <Button type="submit" disabled={updateMutation.isPending || isUpdatingPolicy} data-testid="submit-role-form">
+                  {updateMutation.isPending || isUpdatingPolicy ? "Saving..." : "Save Changes"}
                 </Button>
               </div>
             </DialogFooter>
@@ -408,12 +846,234 @@ export default function AdminRoles() {
               />
             </div>
 
+            {/* Policy Configuration Section - only for SSH roles */}
+            {createAsSshRole && (
+              <div className="space-y-4 pt-4 border-t">
+                <div className="flex items-center gap-2">
+                  <Shield className="h-4 w-4 text-muted-foreground" />
+                  <h4 className="font-medium">SSH Signing Policy</h4>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Configure the Tide policy for SSH challenge signing with this role.
+                </p>
+
+                <div className="flex items-center gap-2">
+                  <Checkbox
+                    id="policyEnabled"
+                    checked={policyConfig.enabled}
+                    onCheckedChange={(v) => setPolicyConfig({ ...policyConfig, enabled: Boolean(v) })}
+                  />
+                  <Label htmlFor="policyEnabled" className="text-sm font-normal">
+                    Create signing policy for this role
+                  </Label>
+                </div>
+
+                {policyConfig.enabled && (
+                  <div className="space-y-4 pl-6">
+                    {/* Template Selection */}
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-2">
+                        <FileCode className="h-4 w-4 text-muted-foreground" />
+                        <Label htmlFor="templateSelect">Policy Template</Label>
+                      </div>
+                      <Select
+                        value={selectedTemplateId || "default"}
+                        onValueChange={(v) => {
+                          if (v === "default") {
+                            setSelectedTemplateId(null);
+                            setTemplateParams({});
+                          } else {
+                            setSelectedTemplateId(v);
+                            // Initialize params with defaults
+                            const template = templates.find((t) => t.id === v);
+                            if (template) {
+                              const defaults: Record<string, any> = {};
+                              template.parameters.forEach((p) => {
+                                if (p.defaultValue !== undefined) {
+                                  defaults[p.name] = p.defaultValue;
+                                }
+                              });
+                              setTemplateParams(defaults);
+                            }
+                          }
+                        }}
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="default">Default SSH Policy</SelectItem>
+                          {templates.map((t) => (
+                            <SelectItem key={t.id} value={t.id}>
+                              {t.name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <p className="text-xs text-muted-foreground">
+                        {selectedTemplate
+                          ? selectedTemplate.description
+                          : "Uses the built-in SSH signing policy contract"}
+                      </p>
+                    </div>
+
+                    {/* Template Parameter Inputs */}
+                    {selectedTemplate && selectedTemplate.parameters.length > 0 && (
+                      <div className="space-y-3 p-3 border rounded-md bg-muted/50">
+                        <p className="text-xs font-medium">Template Parameters</p>
+                        {selectedTemplate.parameters.map((param) => (
+                          <div key={param.name} className="space-y-1">
+                            <Label className="text-xs">
+                              {param.name}
+                              {param.required && <span className="text-destructive ml-1">*</span>}
+                            </Label>
+                            {param.helpText && (
+                              <p className="text-xs text-muted-foreground">{param.helpText}</p>
+                            )}
+                            {param.type === "string" && (
+                              <Input
+                                value={templateParams[param.name] || ""}
+                                onChange={(e) => setTemplateParams({ ...templateParams, [param.name]: e.target.value })}
+                                placeholder={param.defaultValue?.toString() || ""}
+                                required={param.required}
+                                className="h-8 text-sm"
+                              />
+                            )}
+                            {param.type === "number" && (
+                              <Input
+                                type="number"
+                                value={templateParams[param.name] || ""}
+                                onChange={(e) => setTemplateParams({ ...templateParams, [param.name]: parseInt(e.target.value) || 0 })}
+                                placeholder={param.defaultValue?.toString() || ""}
+                                required={param.required}
+                                className="h-8 text-sm"
+                              />
+                            )}
+                            {param.type === "boolean" && (
+                              <div className="flex items-center gap-2">
+                                <Checkbox
+                                  checked={templateParams[param.name] || false}
+                                  onCheckedChange={(v) => setTemplateParams({ ...templateParams, [param.name]: Boolean(v) })}
+                                />
+                                <span className="text-xs">{templateParams[param.name] ? "Yes" : "No"}</span>
+                              </div>
+                            )}
+                            {param.type === "select" && (
+                              <Select
+                                value={templateParams[param.name] || param.defaultValue?.toString() || ""}
+                                onValueChange={(v) => setTemplateParams({ ...templateParams, [param.name]: v })}
+                              >
+                                <SelectTrigger className="h-8 text-sm">
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  {param.options?.map((opt) => (
+                                    <SelectItem key={opt} value={opt}>{opt}</SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    <div className="space-y-2">
+                      <Label htmlFor="contractType">Contract Type</Label>
+                      <Select
+                        value={policyConfig.contractType}
+                        onValueChange={(v) => setPolicyConfig({ ...policyConfig, contractType: v as SshContractType })}
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value={SSH_CONTRACT_TYPES.BASIC}>
+                            Basic - All data at creation time
+                          </SelectItem>
+                          <SelectItem value={SSH_CONTRACT_TYPES.DYNAMIC}>
+                            Dynamic - Challenge can change
+                          </SelectItem>
+                          <SelectItem value={SSH_CONTRACT_TYPES.DYNAMIC_APPROVED}>
+                            Dynamic Approved - With human readable approval
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <p className="text-xs text-muted-foreground">
+                        Contract ID: <code className="bg-muted px-1 rounded">{policyConfig.contractType}</code>
+                      </p>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="space-y-2">
+                        <Label htmlFor="approvalType">Approval Type</Label>
+                        <Select
+                          value={policyConfig.approvalType}
+                          onValueChange={(v) => setPolicyConfig({ ...policyConfig, approvalType: v as "implicit" | "explicit" })}
+                        >
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="implicit">Implicit</SelectItem>
+                            <SelectItem value="explicit">Explicit</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        <p className="text-xs text-muted-foreground">
+                          {policyConfig.approvalType === "implicit"
+                            ? "No manual approval required"
+                            : "Requires user approval"}
+                        </p>
+                      </div>
+
+                      <div className="space-y-2">
+                        <Label htmlFor="executionType">Execution Type</Label>
+                        <Select
+                          value={policyConfig.executionType}
+                          onValueChange={(v) => setPolicyConfig({ ...policyConfig, executionType: v as "public" | "private" })}
+                        >
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="public">Public</SelectItem>
+                            <SelectItem value="private">Private</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        <p className="text-xs text-muted-foreground">
+                          {policyConfig.executionType === "public"
+                            ? "Anyone can execute"
+                            : "Role-based execution"}
+                        </p>
+                      </div>
+                    </div>
+
+                    {policyConfig.approvalType === "explicit" && (
+                      <div className="space-y-2">
+                        <Label htmlFor="threshold">Approval Threshold</Label>
+                        <Input
+                          id="threshold"
+                          type="number"
+                          min={1}
+                          value={policyConfig.threshold}
+                          onChange={(e) => setPolicyConfig({ ...policyConfig, threshold: parseInt(e.target.value) || 1 })}
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          Number of approvals required before signing
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
             <DialogFooter>
               <Button type="button" variant="outline" onClick={() => setCreatingRole(false)}>
                 Cancel
               </Button>
-              <Button type="submit" disabled={createMutation.isPending}>
-                {createMutation.isPending ? "Creating..." : "Create Role"}
+              <Button type="submit" disabled={createMutation.isPending || isCreatingPolicy}>
+                {createMutation.isPending || isCreatingPolicy ? "Creating..." : "Create Role"}
               </Button>
             </DialogFooter>
           </form>

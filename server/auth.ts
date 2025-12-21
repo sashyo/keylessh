@@ -104,6 +104,51 @@ export function requireAdmin(
   next();
 }
 
+// Middleware to require policy creator permissions
+// Allows: tide-realm-admin, realm-admin (realm-management), or policy-creator role
+export function requirePolicyCreator(
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+) {
+  if (!req.user) {
+    res.status(401).json({ message: "Authentication required" });
+    return;
+  }
+
+  const payload = req.tokenPayload;
+  if (!payload) {
+    res.status(401).json({ message: "Token payload not available" });
+    return;
+  }
+
+  // Check for policy creator permissions in various role locations
+  const realmManagementRoles = payload.resource_access?.[REALM_MANAGEMENT_CLIENT]?.roles || [];
+  const realmRoles = payload.realm_access?.roles || [];
+
+  // Get the resource client roles (e.g., keylessh client)
+  const resourceClient = Object.keys(payload.resource_access || {}).find(
+    (key) => key !== REALM_MANAGEMENT_CLIENT && key !== "account"
+  );
+  const resourceRoles = resourceClient
+    ? payload.resource_access?.[resourceClient]?.roles || []
+    : [];
+
+  const hasPermission =
+    realmManagementRoles.includes(ADMIN_ROLE) ||
+    realmManagementRoles.includes("realm-admin") ||
+    realmRoles.includes(ADMIN_ROLE) ||
+    realmRoles.includes("realm-admin") ||
+    resourceRoles.includes("policy-creator");
+
+  if (!hasPermission) {
+    res.status(403).json({ message: "Policy creator access required" });
+    return;
+  }
+
+  next();
+}
+
 // Admin User type (TideCloak Admin API shape)
 export interface AdminUser {
   id: string;

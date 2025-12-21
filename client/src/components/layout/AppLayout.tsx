@@ -24,7 +24,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Terminal, Server, Users, Activity, LogOut, Shield, ChevronDown, Layers, ScrollText, KeyRound, CheckSquare, RefreshCw } from "lucide-react";
+import { Terminal, Server, Users, Activity, LogOut, Shield, ChevronDown, Layers, ScrollText, KeyRound, CheckSquare, RefreshCw, FileCode } from "lucide-react";
 import type { ReactNode } from "react";
 import { useToast } from "@/hooks/use-toast";
 
@@ -41,6 +41,7 @@ const adminNavItems = [
   { title: "Manage Servers", url: "/admin/servers", icon: Server },
   { title: "Manage Users", url: "/admin/users", icon: Users },
   { title: "Manage Roles", url: "/admin/roles", icon: KeyRound },
+  { title: "Policy Templates", url: "/admin/policy-templates", icon: FileCode },
   { title: "Approvals", url: "/admin/approvals", icon: CheckSquare },
   { title: "Manage Sessions", url: "/admin/sessions", icon: Activity },
   { title: "Logs", url: "/admin/logs", icon: ScrollText },

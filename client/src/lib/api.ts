@@ -5,6 +5,9 @@ import type {
   ActiveSession,
   AdminUser,
   AdminRole,
+  PolicyTemplate,
+  InsertPolicyTemplate,
+  TemplateParameter,
 } from "@shared/schema";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
@@ -34,7 +37,50 @@ async function apiRequest<T>(
   return response.json();
 }
 
+// Forseti contract compilation result
+export interface ForsetiCompileResult {
+  success: boolean;
+  contractId?: string;
+  sdkVersion?: string;
+  error?: string;
+  validated?: boolean;
+}
+
+// Committed policy result
+export interface CommittedPolicyResult {
+  roleId: string;
+  policyData: string; // Base64 encoded policy bytes
+}
+
 export const api = {
+  // Forseti contract operations
+  forseti: {
+    /**
+     * Compiles a Forseti contract and returns its hash (contractId).
+     * The contractId is the SHA512 hash of the compiled DLL.
+     */
+    compile: (source: string, options?: { validate?: boolean; entryType?: string }) =>
+      apiRequest<ForsetiCompileResult>("/api/forseti/compile", {
+        method: "POST",
+        body: JSON.stringify({ source, ...options }),
+      }),
+  },
+  // SSH policy operations
+  sshPolicies: {
+    /**
+     * Gets the committed policy for an SSH user.
+     * Role format is ssh:<sshUser>, e.g. ssh:root, ssh:ubuntu
+     * Used to attach policy to SSH signing requests.
+     */
+    getForSshUser: (sshUser: string) =>
+      apiRequest<CommittedPolicyResult>(`/api/ssh-policies/for-ssh-user/${encodeURIComponent(sshUser)}`),
+
+    /**
+     * Gets the committed policy for a specific role.
+     */
+    getByRole: (roleId: string) =>
+      apiRequest<CommittedPolicyResult>(`/api/ssh-policies/committed/${encodeURIComponent(roleId)}`),
+  },
   servers: {
     list: () => apiRequest<ServerWithAccess[]>("/api/servers"),
     get: (id: string) => apiRequest<ServerWithAccess>(`/api/servers/${id}`),
@@ -94,7 +140,7 @@ export const api = {
     roles: {
       list: () => apiRequest<{ roles: AdminRole[] }>("/api/admin/roles"),
       listAll: () => apiRequest<{ roles: AdminRole[] }>("/api/admin/roles/all"),
-      create: (data: { name: string; description?: string }) =>
+      create: (data: { name: string; description?: string; policy?: SshPolicyConfig }) =>
         apiRequest<{ success: string }>("/api/admin/roles", {
           method: "POST",
           body: JSON.stringify(data),
@@ -108,6 +154,11 @@ export const api = {
         apiRequest<{ success: string }>(`/api/admin/roles?roleName=${roleName}`, {
           method: "DELETE",
         }),
+      policies: {
+        list: () => apiRequest<{ policies: SshPolicyResponse[] }>("/api/admin/roles/policies"),
+        get: (roleName: string) =>
+          apiRequest<{ policy: SshPolicyResponse }>(`/api/admin/roles/${encodeURIComponent(roleName)}/policy`),
+      },
     },
     sessions: {
       list: () => apiRequest<ActiveSession[]>("/api/admin/sessions"),
@@ -181,8 +232,131 @@ export const api = {
           body: JSON.stringify({ changeSet }),
         }),
     },
+    sshPolicies: {
+      listPending: () =>
+        apiRequest<{ policies: PendingSshPolicy[] }>("/api/admin/ssh-policies/pending"),
+      getPending: (id: string) =>
+        apiRequest<{ policy: PendingSshPolicy; decisions: SshPolicyDecision[] }>(
+          `/api/admin/ssh-policies/pending/${id}`
+        ),
+      create: (data: { policyRequest: string; roleName: string }) =>
+        apiRequest<{ message: string; id: string }>("/api/admin/ssh-policies/pending", {
+          method: "POST",
+          body: JSON.stringify(data),
+        }),
+      // Swarm-style approval: accepts full signed policyRequest, extracts ID from request
+      approve: (policyRequest: string, rejected: boolean = false) =>
+        apiRequest<{ message: string }>("/api/admin/ssh-policies/pending/approve", {
+          method: "POST",
+          body: JSON.stringify({ policyRequest, decision: { rejected } }),
+        }),
+      commit: (id: string, signature?: string) =>
+        apiRequest<{ message: string }>(`/api/admin/ssh-policies/pending/${id}/commit`, {
+          method: "POST",
+          body: JSON.stringify({ signature }),
+        }),
+      cancel: (id: string) =>
+        apiRequest<{ message: string }>(`/api/admin/ssh-policies/pending/${id}/cancel`, {
+          method: "POST",
+        }),
+      revoke: (id: string) =>
+        apiRequest<{ message: string }>(`/api/admin/ssh-policies/pending/${id}/revoke`, {
+          method: "POST",
+        }),
+      getLogs: (limit?: number, offset?: number) =>
+        apiRequest<{ logs: SshPolicyLog[] }>(
+          `/api/admin/ssh-policies/logs?limit=${limit || 100}&offset=${offset || 0}`
+        ),
+    },
+    policyTemplates: {
+      list: () =>
+        apiRequest<{ templates: PolicyTemplate[] }>("/api/admin/policy-templates"),
+      get: (id: string) =>
+        apiRequest<{ template: PolicyTemplate }>(`/api/admin/policy-templates/${id}`),
+      create: (data: Omit<InsertPolicyTemplate, "createdBy">) =>
+        apiRequest<{ template: PolicyTemplate }>("/api/admin/policy-templates", {
+          method: "POST",
+          body: JSON.stringify(data),
+        }),
+      update: (id: string, data: Partial<Omit<InsertPolicyTemplate, "createdBy">>) =>
+        apiRequest<{ template: PolicyTemplate }>(`/api/admin/policy-templates/${id}`, {
+          method: "PUT",
+          body: JSON.stringify(data),
+        }),
+      delete: (id: string) =>
+        apiRequest<{ success: boolean }>(`/api/admin/policy-templates/${id}`, {
+          method: "DELETE",
+        }),
+      preview: (id: string, params: Record<string, any>) =>
+        apiRequest<{ code: string }>(`/api/admin/policy-templates/${id}/preview`, {
+          method: "POST",
+          body: JSON.stringify({ params }),
+        }),
+    },
   },
 };
+
+// Re-export template types for convenience
+export type { PolicyTemplate, InsertPolicyTemplate, TemplateParameter };
+
+// SSH Policy Configuration for role creation
+export interface SshPolicyConfig {
+  enabled: boolean;
+  contractType: string;
+  approvalType: "implicit" | "explicit";
+  executionType: "public" | "private";
+  threshold: number;
+}
+
+// SSH Policy response from server
+export interface SshPolicyResponse {
+  roleId: string;
+  contractType: string;
+  approvalType: "implicit" | "explicit";
+  executionType: "public" | "private";
+  threshold: number;
+  createdAt: number;
+  updatedAt?: number;
+}
+
+// Pending SSH Policy types
+export type SshPolicyStatus = "pending" | "approved" | "committed" | "cancelled";
+
+export interface PendingSshPolicy {
+  id: string;
+  roleId: string;
+  requestedBy: string;
+  requestedByEmail?: string;
+  policyRequestData: string;
+  status: SshPolicyStatus;
+  threshold: number;
+  createdAt: number;
+  approvalCount?: number;
+  rejectionCount?: number;
+  approvedBy?: string[];
+  deniedBy?: string[];
+  commitReady?: boolean;
+}
+
+export interface SshPolicyDecision {
+  id: string;
+  policyId: string;
+  decidedBy: string;
+  decidedByEmail?: string;
+  decision: "approved" | "rejected";
+  createdAt: number;
+}
+
+export interface SshPolicyLog {
+  id: string;
+  policyId: string;
+  roleId: string;
+  action: string;
+  performedBy: string;
+  performedByEmail?: string;
+  details?: string;
+  createdAt: number;
+}
 
 // Approval types
 export type ApprovalType = 'user_create' | 'user_update' | 'user_delete' | 'role_assign' | 'role_remove';
