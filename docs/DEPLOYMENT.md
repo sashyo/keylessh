@@ -40,19 +40,41 @@ The server reads `data/tidecloak.json` from the working directory (`process.cwd(
 
 ### Environment variables
 
+Copy `.env.example` to `.env` and customize:
+
+```bash
+cp .env.example .env
+```
+
+Available variables:
+
 ```env
 PORT=3000
+NODE_ENV=development
 
 # SQLite path (file path, not a DSN)
 DATABASE_URL=./data/keylessh.db
+
+# Forseti compiler (choose one)
+COMPILER_IMAGE=ghcr.io/tide-foundation/forseti-compiler:latest  # Published image (default)
+COMPILER_CONTAINER=Ork-1  # Or use local ORK container
 
 # Optional external TCP bridge
 BRIDGE_URL=wss://<your-bridge-fqdn>
 BRIDGE_SECRET=<shared-secret>
 
-# Ork connectivity (for Policy:1 authorization)
-# The browser connects to Ork via TideCloak's enclave proxy
-# Ensure TideCloak is configured with Ork endpoints
+# Debug logging
+DEBUG=true
+```
+
+For local development with ORK containers:
+
+```env
+# .env
+PORT=3000
+NODE_ENV=development
+DATABASE_URL=./data/keylessh.db
+COMPILER_CONTAINER=Ork-1
 ```
 
 ### Reverse proxy / TLS
@@ -137,41 +159,22 @@ SSH signing requires the ORK network (Tide's decentralised nodes) for Policy:1 a
 
 ## Forseti Contract Compiler
 
-The ContractCompiler tool computes the SHA512 hash (contractId) of compiled Forseti contracts. This hash must match exactly between the client (Keyle-SSH) and the ORK network for policy validation to succeed.
+Keyle-SSH uses a **standalone compiler container** (`ghcr.io/tide-foundation/forseti-compiler`) to compile Forseti contracts. This container is built from the same base as ORK containers to ensure hash consistency.
 
 ### Why It's Needed
 
-When creating SSH policies, Keyle-SSH compiles the C# contract source code to get a `contractId`. During signing, ORKs independently compile the same source and verify the hash matches. Due to Roslyn compiler determinism requirements, both must use identical:
+When creating SSH policies, Keyle-SSH compiles the C# contract source code to get a `contractId` (SHA512 hash of the DLL). During signing, ORKs independently compile the same source and verify the hash matches. The standalone compiler uses identical:
 
-- .NET runtime assemblies (same version, same paths)
+- .NET runtime assemblies (same base image as ORK)
 - SDK version metadata
 - Compilation options
 
-The ContractCompiler tool runs **inside the ORK Docker container** to guarantee hash consistency.
+This guarantees hash consistency between Keyle-SSH and ORK without requiring an ORK container locally.
 
 ### Prerequisites
 
-- ORK Docker container running (e.g., `Ork-1`)
-- ContractCompiler built into the container at `/opt/forseti-compile/`
-
-The ORK Dockerfiles (`MasterLocalDockerfile`, `Dockerfile-ork`, etc.) include ContractCompiler in the build.
-
-### Usage
-
-The tool is invoked via `docker exec` to run inside the ORK container:
-
-```bash
-# Compile from stdin
-echo 'using Ork.Forseti.Sdk;
-public class MyPolicy : IAccessPolicy {
-    public PolicyDecision Authorize(AccessContext ctx) {
-        return PolicyDecision.Allow();
-    }
-}' | docker exec -i Ork-1 dotnet /opt/forseti-compile/ContractCompiler.dll --json
-
-# Output:
-# {"Success":true,"ContractId":"66F795D1...","SdkVersion":"1.0.0","Validated":false}
-```
+- Docker installed on the Keyle-SSH server host
+- Internet access to pull `ghcr.io/tide-foundation/forseti-compiler:latest` (or pre-pulled image)
 
 ### Quick Start
 
@@ -210,7 +213,7 @@ function getContractId(source: string): string {
 Or configure via environment variable:
 
 ```env
-FORSETI_COMPILER_IMAGE=ghcr.io/tide-foundation/forseti-compiler:latest
+COMPILER_IMAGE=ghcr.io/tide-foundation/forseti-compiler:latest
 ```
 
 ### Code Examples
@@ -369,7 +372,7 @@ The server compiles contracts when creating SSH policies. Configure via environm
 # Use published image (recommended)
 COMPILER_IMAGE=ghcr.io/tide-foundation/forseti-compiler:latest
 
-# Or use local ORK container (if running ORK locally)
+# Or use local ORK container (if running ORK locally, and it includes the compiler at /opt/forseti-compile/ContractCompiler.dll)
 COMPILER_CONTAINER=Ork-1
 ```
 
@@ -413,12 +416,23 @@ If you see errors like:
 Policy refers to wrong contract. Expected 'ABC123...' but policy has 'DEF456...'
 ```
 
-This means the ContractCompiler hash doesn't match what ORK computed. Common causes:
+This means the compiler hash doesn't match what ORK computed. Common causes:
 
-1. **ContractCompiler not in Docker**: Ensure it's running inside the ORK container, not on the host
-2. **Outdated container**: Rebuild with `docker-compose build ork`
-3. **Different source code**: Check for whitespace/encoding differences
-4. **Cached references**: Restart the ORK container after updates
+1. **Outdated compiler image**: Pull latest with `docker pull ghcr.io/tide-foundation/forseti-compiler:latest`
+2. **Different source code**: Check for whitespace/encoding differences
+3. **Using host .NET instead of Docker**: Always use the Docker container, not a local .NET install
+4. **ORK container outdated**: If using `COMPILER_CONTAINER`, rebuild ORK with `docker-compose build ork`
+
+### Using Local ORK Container (Alternative)
+
+If you're running ORK containers locally for development, you can use them instead of the published image:
+
+```env
+# .env
+COMPILER_CONTAINER=Ork-1
+```
+
+This uses `docker exec` to run the compiler inside your local ORK container. The ORK container must have the compiler at `/opt/forseti-compile/ContractCompiler.dll`.
 
 ### Verifying Hash Consistency
 
@@ -436,4 +450,3 @@ curl -s -X POST http://localhost:8080/Forseti/Compile/preview \
 ```
 
 Both should return identical `contractId` values.
-
