@@ -37,7 +37,7 @@ SSH signing uses Tide Protocol's Policy:1 auth flow with Forseti contracts.
   - `SSH_FORSETI_CONTRACT`: The C# Forseti contract source code for SSH authorization
   - `SSH_MODEL_IDS`: Supported model patterns (Basic, Dynamic, DynamicApproved)
   - `createSshPolicyRequest()`: Creates a PolicySignRequest with contract compilation
-  - `compileForsetiContract()`: Compiles C# to get contractId via Ork
+  - `compileForsetiContract()`: Calls `POST /api/forseti/compile` to deterministically compile C# and return `contractId`
 - `client/src/lib/tideSsh.ts`
   - `createTideSshSigner()`: Creates SSH signer using BasicCustomRequest pattern
   - `createDynamicTideSshSigner()`: Creates SSH signer using DynamicCustomRequest pattern
@@ -158,9 +158,13 @@ The SSH contract is in `client/src/lib/sshPolicy.ts` as `SSH_FORSETI_CONTRACT`.
 
 To modify:
 1. Edit the C# code in `SSH_FORSETI_CONTRACT`
-2. The contract is compiled via `POST /api/forseti/compile` on policy creation
+2. The contract is compiled via `POST /api/forseti/compile` on policy creation (server shells out to a standalone Forseti compiler container)
 3. Ork IL-vets the contract (blocks forbidden namespaces)
 4. Test with a new policy template to get the new contractId
+
+Notes:
+- The compile endpoint requires Docker on the server host.
+- Configure the compiler via `COMPILER_IMAGE` (recommended) or `COMPILER_CONTAINER` (for local ORK containers).
 
 ## Related Docs
 
