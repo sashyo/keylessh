@@ -121,6 +121,52 @@ function TideCloakAuthBridge({ children }: { children: ReactNode }) {
     }
   }, [tidecloak.isInitializing, tidecloak.authenticated, tidecloak.token, tidecloak]);
 
+  // Set up IAMService event listeners for automatic token refresh
+  useEffect(() => {
+    // Set up event handlers for token management (chain like ideed-swarm)
+    IAMService
+      .on("tokenExpired", async () => {
+        console.log("[AuthContext] Token expired, refreshing...");
+        try {
+          await IAMService.updateIAMToken();
+        } catch (error) {
+          console.error("[AuthContext] Failed to refresh expired token:", error);
+          setState(prev => ({ ...prev, isAuthenticated: false }));
+        }
+      })
+      .on("authRefreshError", (_event: string, error: unknown) => {
+        console.error("[AuthContext] Token refresh failed:", error);
+        setState(prev => ({ ...prev, isAuthenticated: false }));
+      })
+      .on("authRefreshSuccess", () => {
+        console.log("[AuthContext] Token refreshed successfully");
+        // Update token in localStorage from tidecloak
+        if (tidecloak.token) {
+          localStorage.setItem("access_token", tidecloak.token);
+          setState(prev => ({ ...prev, accessToken: tidecloak.token }));
+        }
+      });
+
+    // Proactive refresh: check every 60 seconds and refresh if token expires within 5 minutes
+    const refreshInterval = setInterval(async () => {
+      if (IAMService.isLoggedIn()) {
+        try {
+          const expiresIn = IAMService.getTokenExp();
+          if (expiresIn < 300) {
+            console.log("[AuthContext] Token expiring soon, refreshing...");
+            await IAMService.updateIAMToken();
+          }
+        } catch (error) {
+          console.error("[AuthContext] Error checking/refreshing token:", error);
+        }
+      }
+    }, 60000);
+
+    return () => {
+      clearInterval(refreshInterval);
+    };
+  }, [tidecloak.token]);
+
   // If there was an init error, throw it to be caught by ErrorBoundary
   if (initError) {
     throw initError;
