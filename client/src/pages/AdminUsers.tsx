@@ -39,6 +39,7 @@ import { api } from "@/lib/api";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 import { Users, Pencil, Search, Shield, User as UserIcon, Plus, Trash2, X, Link, Unlink, Copy, Check } from "lucide-react";
 import type { AdminUser } from "@shared/schema";
+import { UpgradeBanner } from "@/components/UpgradeBanner";
 
 interface EditFormData {
   id: string;
@@ -74,10 +75,15 @@ export default function AdminUsers() {
     queryKey: ["/api/admin/users"],
     queryFn: api.admin.users.list,
   });
+
+  const { data: userLimit, refetch: refetchUserLimit } = useQuery({
+    queryKey: ["/api/admin/license/check/user"],
+    queryFn: () => api.admin.license.checkLimit("user"),
+  });
   const isFetchingUsers = useIsFetching({ queryKey: ["/api/admin/users"] }) > 0;
   const { secondsRemaining, refreshNow } = useAutoRefresh({
     intervalSeconds: 15,
-    refresh: () => refetchUsers(),
+    refresh: () => Promise.all([refetchUsers(), refetchUserLimit()]),
     isBlocked: isFetchingUsers,
   });
 
@@ -117,6 +123,7 @@ export default function AdminUsers() {
       api.admin.users.add(data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/admin/users"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/license/check/user"] });
       void queryClient.refetchQueries({ queryKey: ["/api/admin/users"] });
       setCreatingUser(false);
       setCreateFormData({ username: "", firstName: "", lastName: "", email: "" });
@@ -131,6 +138,7 @@ export default function AdminUsers() {
     mutationFn: (userId: string) => api.admin.users.delete(userId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/admin/users"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/license/check/user"] });
       void queryClient.refetchQueries({ queryKey: ["/api/admin/users"] });
       setDeletingUser(null);
       setEditingUser(null);
@@ -267,12 +275,30 @@ export default function AdminUsers() {
           >
             Refresh{secondsRemaining !== null ? ` (auto in ${secondsRemaining}s)` : ""}
           </Button>
-          <Button onClick={() => setCreatingUser(true)} data-testid="add-user-button">
+          <Button
+            onClick={() => setCreatingUser(true)}
+            disabled={userLimit ? !userLimit.allowed : false}
+            title={
+              userLimit && !userLimit.allowed
+                ? `User limit reached (${userLimit.current}/${userLimit.limit}). Upgrade your plan to add more.`
+                : undefined
+            }
+            data-testid="add-user-button"
+          >
             <Plus className="h-4 w-4 mr-2" />
             Add User
           </Button>
         </div>
       </div>
+
+      {userLimit && !userLimit.allowed && (
+        <UpgradeBanner
+          message={`User limit reached (${userLimit.current}/${userLimit.limit}) on the ${userLimit.tierName} plan. Upgrade to add more users.`}
+          current={userLimit.current}
+          limit={userLimit.limit}
+          tierName={userLimit.tierName}
+        />
+      )}
 
       <Card>
         <div className="p-4 border-b border-border">

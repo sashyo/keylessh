@@ -293,6 +293,22 @@ export const api = {
           body: JSON.stringify({ params }),
         }),
     },
+    license: {
+      get: () => apiRequest<LicenseInfo>("/api/admin/license"),
+      checkLimit: (resource: "user" | "server") =>
+        apiRequest<LimitCheck>(`/api/admin/license/check/${resource}`),
+      createCheckout: (priceId: string) =>
+        apiRequest<{ url: string }>("/api/admin/license/checkout", {
+          method: "POST",
+          body: JSON.stringify({ priceId }),
+        }),
+      createPortal: () =>
+        apiRequest<{ url: string }>("/api/admin/license/portal", {
+          method: "POST",
+        }),
+      getBillingHistory: () => apiRequest<BillingHistoryItem[]>("/api/admin/license/billing"),
+      getPrices: () => apiRequest<PricingInfo>("/api/admin/license/prices"),
+    },
   },
 };
 
@@ -408,3 +424,64 @@ export interface AccessApproval {
 
 // SSH connections are now handled via Socket.IO to KeyleSSH
 // See Console.tsx for the Socket.IO implementation
+
+// License/Subscription types
+export type SubscriptionTier = "free" | "pro" | "enterprise";
+export type SubscriptionStatus = "active" | "canceled" | "past_due" | "trialing";
+
+export interface Subscription {
+  id: string;
+  tier: SubscriptionTier;
+  stripeCustomerId?: string;
+  stripeSubscriptionId?: string;
+  stripePriceId?: string;
+  status: string;
+  currentPeriodEnd?: number;
+  cancelAtPeriodEnd?: boolean;
+  createdAt: number;
+  updatedAt?: number;
+}
+
+export interface LicenseInfo {
+  subscription: Subscription | null;
+  usage: { users: number; servers: number };
+  limits: { maxUsers: number; maxServers: number };
+  tier: SubscriptionTier;
+  tierName: string;
+}
+
+export interface LimitCheck {
+  allowed: boolean;
+  current: number;
+  limit: number;
+  tier: SubscriptionTier;
+  tierName: string;
+}
+
+export interface BillingHistoryItem {
+  id: string;
+  subscriptionId: string;
+  stripeInvoiceId?: string;
+  amount: number;
+  currency: string;
+  status: string;
+  invoicePdf?: string;
+  description?: string;
+  createdAt: number;
+}
+
+export interface TierInfo {
+  name: string;
+  maxUsers: number;
+  maxServers: number;
+  priceId: string | null;
+}
+
+export interface PricingInfo {
+  tiers: {
+    free: TierInfo;
+    pro: TierInfo;
+    enterprise: TierInfo;
+  };
+  stripeConfigured: boolean;
+}

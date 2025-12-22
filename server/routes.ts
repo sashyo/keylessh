@@ -1,6 +1,8 @@
 import type { Express } from "express";
 import type { Server } from "http";
-import { storage, approvalStorage, policyStorage, pendingPolicyStorage, templateStorage, type ApprovalType } from "./storage";
+import { storage, approvalStorage, policyStorage, pendingPolicyStorage, templateStorage, subscriptionStorage, type ApprovalType } from "./storage";
+import { subscriptionTiers, type SubscriptionTier } from "@shared/schema";
+import * as stripeLib from "./lib/stripe";
 import { log, logForseti, logError } from "./logger";
 import { terminateSession } from "./wsBridge";
 import type { ServerWithAccess, ActiveSession, ServerStatus, Server as ServerType } from "@shared/schema";
@@ -189,6 +191,146 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
+  // ============================================
+  // Stripe Webhook (unauthenticated, must come before auth middleware)
+  // ============================================
+
+  app.post("/api/webhooks/stripe", async (req, res) => {
+    try {
+      if (!stripeLib.isStripeConfigured()) {
+        res.status(503).json({ error: "Stripe is not configured" });
+        return;
+      }
+
+      const signature = req.headers["stripe-signature"];
+      if (!signature || typeof signature !== "string") {
+        res.status(400).json({ error: "Missing stripe-signature header" });
+        return;
+      }
+
+      // Use raw body for webhook verification
+      const rawBody = (req as any).rawBody;
+      if (!rawBody) {
+        res.status(400).json({ error: "Missing raw body" });
+        return;
+      }
+
+      let event;
+      try {
+        event = stripeLib.constructWebhookEvent(rawBody, signature);
+      } catch (err) {
+        log(`Webhook signature verification failed: ${err}`);
+        res.status(400).json({ error: "Webhook signature verification failed" });
+        return;
+      }
+
+      log(`Stripe webhook received: ${event.type}`);
+
+      // Handle the event
+      switch (event.type) {
+        case "checkout.session.completed": {
+          const session = event.data.object as any;
+          if (session.mode === "subscription" && session.subscription) {
+            const subscriptionId = session.subscription as string;
+            const customerId = session.customer as string;
+
+            // Get the subscription to find the price/tier
+            const stripeSubscription = await stripeLib.getSubscription(subscriptionId);
+            const priceId = stripeSubscription.items.data[0]?.price.id;
+            const tier = stripeLib.getTierFromPriceId(priceId || "");
+
+            const currentPeriodEnd =
+              stripeSubscription.items.data[0]?.current_period_end ?? null;
+
+            await subscriptionStorage.upsertSubscription({
+              tier,
+              stripeCustomerId: customerId,
+              stripeSubscriptionId: subscriptionId,
+              stripePriceId: priceId,
+              status: "active",
+              currentPeriodEnd: currentPeriodEnd ?? undefined,
+            });
+
+            log(`Subscription created/updated: ${tier} tier for customer ${customerId}`);
+          }
+          break;
+        }
+
+        case "customer.subscription.updated": {
+          const subscription = event.data.object as any;
+          const priceId = subscription.items.data[0]?.price.id;
+          const tier = stripeLib.getTierFromPriceId(priceId || "");
+
+          await subscriptionStorage.upsertSubscription({
+            tier,
+            stripeSubscriptionId: subscription.id,
+            stripePriceId: priceId,
+            status: subscription.status,
+            currentPeriodEnd: subscription.current_period_end,
+            cancelAtPeriodEnd: subscription.cancel_at_period_end,
+          });
+
+          log(`Subscription updated: ${tier} tier, status: ${subscription.status}`);
+          break;
+        }
+
+        case "customer.subscription.deleted": {
+          // Subscription cancelled - revert to free tier
+          await subscriptionStorage.upsertSubscription({
+            tier: "free",
+            status: "canceled",
+            stripeSubscriptionId: null as any,
+            stripePriceId: null as any,
+          });
+
+          log(`Subscription deleted - reverted to free tier`);
+          break;
+        }
+
+        case "invoice.paid": {
+          const invoice = event.data.object as any;
+          await subscriptionStorage.addBillingRecord({
+            stripeInvoiceId: invoice.id,
+            amount: invoice.amount_paid,
+            currency: invoice.currency,
+            status: "paid",
+            invoicePdf: invoice.invoice_pdf,
+            description: invoice.lines?.data?.[0]?.description || "Subscription payment",
+          });
+
+          log(`Invoice paid: ${invoice.id} for ${invoice.amount_paid / 100} ${invoice.currency.toUpperCase()}`);
+          break;
+        }
+
+        case "invoice.payment_failed": {
+          const invoice = event.data.object as any;
+          await subscriptionStorage.upsertSubscription({
+            status: "past_due",
+          });
+
+          await subscriptionStorage.addBillingRecord({
+            stripeInvoiceId: invoice.id,
+            amount: invoice.amount_due,
+            currency: invoice.currency,
+            status: "failed",
+            description: "Payment failed",
+          });
+
+          log(`Invoice payment failed: ${invoice.id}`);
+          break;
+        }
+
+        default:
+          log(`Unhandled webhook event: ${event.type}`);
+      }
+
+      res.json({ received: true });
+    } catch (error) {
+      log(`Webhook error: ${error}`);
+      res.status(500).json({ error: "Webhook processing failed" });
+    }
+  });
+
   // ============================================
   // User Routes (authenticated users)
   // ============================================
@@ -409,6 +551,21 @@ export async function registerRoutes(
     requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
+        // Check server limit before creating
+        const serverCount = await subscriptionStorage.getServerCount();
+        const limitCheck = await subscriptionStorage.checkCanAdd('server', serverCount);
+        if (!limitCheck.allowed) {
+          res.status(403).json({
+            error: 'Server limit reached',
+            message: `Your ${limitCheck.tierName} plan allows ${limitCheck.limit} servers. Upgrade to add more.`,
+            current: limitCheck.current,
+            limit: limitCheck.limit,
+            tier: limitCheck.tier,
+            upgradeRequired: true,
+          });
+          return;
+        }
+
         const server = await storage.createServer(req.body);
         res.json(server);
       } catch (error) {
@@ -566,6 +723,21 @@ export async function registerRoutes(
 
         if (!username || !firstName || !lastName || !email) {
           res.status(400).json({ error: "Missing required fields" });
+          return;
+        }
+
+        // Check user limit before creating
+        const users = await tidecloakAdmin.getUsers(token);
+        const limitCheck = await subscriptionStorage.checkCanAdd('user', users.length);
+        if (!limitCheck.allowed) {
+          res.status(403).json({
+            error: 'User limit reached',
+            message: `Your ${limitCheck.tierName} plan allows ${limitCheck.limit} users. Upgrade to add more.`,
+            current: limitCheck.current,
+            limit: limitCheck.limit,
+            tier: limitCheck.tier,
+            upgradeRequired: true,
+          });
           return;
         }
 
@@ -1876,6 +2048,168 @@ export async function registerRoutes(
       } catch (error) {
         log(`Failed to compile contract: ${error}`);
         res.status(500).json({ error: "Failed to compile contract" });
+      }
+    }
+  );
+
+  // ============================================
+  // License Management Routes
+  // ============================================
+
+  // GET /api/admin/license - Get current subscription and usage
+  app.get(
+    "/api/admin/license",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const token = req.accessToken!;
+        // Get user count from TideCloak
+        const users = await tidecloakAdmin.getUsers(token);
+        const userCount = users.length;
+
+        const licenseInfo = await subscriptionStorage.getLicenseInfo(userCount);
+        res.json(licenseInfo);
+      } catch (error) {
+        log(`Failed to fetch license info: ${error}`);
+        res.status(500).json({ error: "Failed to fetch license info" });
+      }
+    }
+  );
+
+  // GET /api/admin/license/check/:resource - Check if can add user or server
+  app.get(
+    "/api/admin/license/check/:resource",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const { resource } = req.params;
+        if (resource !== 'user' && resource !== 'server') {
+          res.status(400).json({ error: "Resource must be 'user' or 'server'" });
+          return;
+        }
+
+        let currentCount: number;
+        if (resource === 'user') {
+          const token = req.accessToken!;
+          const users = await tidecloakAdmin.getUsers(token);
+          currentCount = users.length;
+        } else {
+          currentCount = await subscriptionStorage.getServerCount();
+        }
+
+        const limitCheck = await subscriptionStorage.checkCanAdd(resource, currentCount);
+        res.json(limitCheck);
+      } catch (error) {
+        log(`Failed to check license limit: ${error}`);
+        res.status(500).json({ error: "Failed to check license limit" });
+      }
+    }
+  );
+
+  // POST /api/admin/license/checkout - Create Stripe checkout session
+  app.post(
+    "/api/admin/license/checkout",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        if (!stripeLib.isStripeConfigured()) {
+          res.status(503).json({ error: "Stripe is not configured" });
+          return;
+        }
+
+        const { priceId } = req.body;
+        if (!priceId) {
+          res.status(400).json({ error: "priceId is required" });
+          return;
+        }
+
+        const subscription = await subscriptionStorage.getSubscription();
+        const appUrl = process.env.APP_URL || `${req.protocol}://${req.get("host")}`;
+
+        const session = await stripeLib.createCheckoutSession({
+          customerId: subscription?.stripeCustomerId || undefined,
+          customerEmail: subscription?.stripeCustomerId ? undefined : req.user?.email,
+          priceId,
+          successUrl: `${appUrl}/admin/license?success=true`,
+          cancelUrl: `${appUrl}/admin/license?canceled=true`,
+        });
+
+        res.json({ url: session.url });
+      } catch (error) {
+        log(`Failed to create checkout session: ${error}`);
+        res.status(500).json({ error: "Failed to create checkout session" });
+      }
+    }
+  );
+
+  // POST /api/admin/license/portal - Create Stripe billing portal session
+  app.post(
+    "/api/admin/license/portal",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        if (!stripeLib.isStripeConfigured()) {
+          res.status(503).json({ error: "Stripe is not configured" });
+          return;
+        }
+
+        const subscription = await subscriptionStorage.getSubscription();
+        if (!subscription?.stripeCustomerId) {
+          res.status(400).json({ error: "No active subscription found" });
+          return;
+        }
+
+        const appUrl = process.env.APP_URL || `${req.protocol}://${req.get("host")}`;
+        const portalUrl = await stripeLib.createBillingPortalSession(
+          subscription.stripeCustomerId,
+          `${appUrl}/admin/license`
+        );
+
+        res.json({ url: portalUrl });
+      } catch (error) {
+        log(`Failed to create portal session: ${error}`);
+        res.status(500).json({ error: "Failed to create portal session" });
+      }
+    }
+  );
+
+  // GET /api/admin/license/billing - Get billing history
+  app.get(
+    "/api/admin/license/billing",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const history = await subscriptionStorage.getBillingHistory();
+        res.json(history);
+      } catch (error) {
+        log(`Failed to fetch billing history: ${error}`);
+        res.status(500).json({ error: "Failed to fetch billing history" });
+      }
+    }
+  );
+
+  // GET /api/admin/license/prices - Get available price IDs
+  app.get(
+    "/api/admin/license/prices",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const prices = stripeLib.getAvailablePrices();
+        const tiers = {
+          free: { ...subscriptionTiers.free, priceId: null },
+          pro: { ...subscriptionTiers.pro, priceId: prices.pro || null },
+          enterprise: { ...subscriptionTiers.enterprise, priceId: prices.enterprise || null },
+        };
+        res.json({ tiers, stripeConfigured: stripeLib.isStripeConfigured() });
+      } catch (error) {
+        log(`Failed to fetch prices: ${error}`);
+        res.status(500).json({ error: "Failed to fetch prices" });
       }
     }
   );

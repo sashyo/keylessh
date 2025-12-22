@@ -24,7 +24,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Terminal, Server, Users, Activity, LogOut, Shield, ChevronDown, Layers, ScrollText, KeyRound, CheckSquare, RefreshCw, FileCode } from "lucide-react";
+import { Terminal, Server, Users, Activity, LogOut, Shield, ChevronDown, Layers, ScrollText, KeyRound, CheckSquare, RefreshCw, FileCode, CreditCard } from "lucide-react";
 import type { ReactNode } from "react";
 import { useToast } from "@/hooks/use-toast";
 
@@ -64,6 +64,12 @@ const adminNavGroups = [
     items: [
       { title: "Approvals", url: "/admin/approvals", icon: CheckSquare },
       { title: "Audit Logs", url: "/admin/logs", icon: ScrollText },
+    ],
+  },
+  {
+    label: "Settings",
+    items: [
+      { title: "License", url: "/admin/license", icon: CreditCard },
     ],
   },
 ];

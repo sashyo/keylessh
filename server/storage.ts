@@ -8,6 +8,9 @@ import {
   users,
   servers,
   sessions,
+  subscriptions,
+  billingHistory,
+  subscriptionTiers,
   type User,
   type InsertUser,
   type Server,
@@ -17,6 +20,13 @@ import {
   type PolicyTemplate,
   type InsertPolicyTemplate,
   type TemplateParameter,
+  type Subscription,
+  type InsertSubscription,
+  type BillingHistory,
+  type InsertBillingHistory,
+  type SubscriptionTier,
+  type LicenseInfo,
+  type LimitCheck,
 } from "@shared/schema";
 import { getAdminPolicy } from "./lib/tidecloakApi";
 import { createRequire } from "module";
@@ -202,6 +212,35 @@ sqlite.exec(`
     created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
     updated_at INTEGER
   );
+
+  -- Subscription table for license management
+  CREATE TABLE IF NOT EXISTS subscriptions (
+    id TEXT PRIMARY KEY,
+    tier TEXT NOT NULL DEFAULT 'free',
+    stripe_customer_id TEXT,
+    stripe_subscription_id TEXT,
+    stripe_price_id TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
+    current_period_end INTEGER,
+    cancel_at_period_end INTEGER DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER
+  );
+
+  -- Billing history table
+  CREATE TABLE IF NOT EXISTS billing_history (
+    id TEXT PRIMARY KEY,
+    subscription_id TEXT NOT NULL,
+    stripe_invoice_id TEXT,
+    amount INTEGER NOT NULL,
+    currency TEXT NOT NULL DEFAULT 'usd',
+    status TEXT NOT NULL,
+    invoice_pdf TEXT,
+    description TEXT,
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_billing_history_subscription ON billing_history(subscription_id);
+  CREATE INDEX IF NOT EXISTS idx_billing_history_created ON billing_history(created_at DESC);
 `);
 
 // Lightweight migrations for existing DBs (CREATE TABLE IF NOT EXISTS doesn't alter).
@@ -1209,8 +1248,217 @@ try {
   // Ignore seeding errors
 }
 
+// Subscription storage class for license management
+export class SubscriptionStorage {
+  // Get the current subscription (there's only one per installation)
+  async getSubscription(): Promise<Subscription | null> {
+    const row = sqlite.prepare(`
+      SELECT * FROM subscriptions ORDER BY created_at DESC LIMIT 1
+    `).get() as any | undefined;
+
+    if (!row) return null;
+
+    return {
+      id: row.id,
+      tier: row.tier as SubscriptionTier,
+      stripeCustomerId: row.stripe_customer_id,
+      stripeSubscriptionId: row.stripe_subscription_id,
+      stripePriceId: row.stripe_price_id,
+      status: row.status,
+      currentPeriodEnd: row.current_period_end,
+      cancelAtPeriodEnd: !!row.cancel_at_period_end,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  // Create or update the subscription
+  async upsertSubscription(data: Partial<InsertSubscription> & { tier?: SubscriptionTier }): Promise<Subscription> {
+    const existing = await this.getSubscription();
+    const now = Math.floor(Date.now() / 1000);
+
+    if (existing) {
+      // Update existing subscription
+      const updates: string[] = [];
+      const values: any[] = [];
+
+      if (data.tier !== undefined) {
+        updates.push('tier = ?');
+        values.push(data.tier);
+      }
+      if (data.stripeCustomerId !== undefined) {
+        updates.push('stripe_customer_id = ?');
+        values.push(data.stripeCustomerId);
+      }
+      if (data.stripeSubscriptionId !== undefined) {
+        updates.push('stripe_subscription_id = ?');
+        values.push(data.stripeSubscriptionId);
+      }
+      if (data.stripePriceId !== undefined) {
+        updates.push('stripe_price_id = ?');
+        values.push(data.stripePriceId);
+      }
+      if (data.status !== undefined) {
+        updates.push('status = ?');
+        values.push(data.status);
+      }
+      if (data.currentPeriodEnd !== undefined) {
+        updates.push('current_period_end = ?');
+        values.push(data.currentPeriodEnd);
+      }
+      if (data.cancelAtPeriodEnd !== undefined) {
+        updates.push('cancel_at_period_end = ?');
+        values.push(data.cancelAtPeriodEnd ? 1 : 0);
+      }
+
+      if (updates.length > 0) {
+        updates.push('updated_at = ?');
+        values.push(now);
+        values.push(existing.id);
+
+        sqlite.prepare(`
+          UPDATE subscriptions SET ${updates.join(', ')} WHERE id = ?
+        `).run(...values);
+      }
+
+      return (await this.getSubscription())!;
+    } else {
+      // Create new subscription
+      const id = randomUUID();
+      sqlite.prepare(`
+        INSERT INTO subscriptions (id, tier, stripe_customer_id, stripe_subscription_id, stripe_price_id, status, current_period_end, cancel_at_period_end, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
+        data.tier || 'free',
+        data.stripeCustomerId || null,
+        data.stripeSubscriptionId || null,
+        data.stripePriceId || null,
+        data.status || 'active',
+        data.currentPeriodEnd || null,
+        data.cancelAtPeriodEnd ? 1 : 0,
+        now
+      );
+
+      return (await this.getSubscription())!;
+    }
+  }
+
+  // Get current usage counts
+  async getUsageCounts(): Promise<{ users: number; servers: number }> {
+    // Count servers from local database
+    const serverCount = sqlite.prepare(`
+      SELECT COUNT(*) as count FROM servers
+    `).get() as { count: number };
+
+    // Note: Users are counted from TideCloak, not local DB
+    // This method returns server count; user count comes from TideCloak API
+    return {
+      users: 0, // Will be filled from TideCloak
+      servers: serverCount.count,
+    };
+  }
+
+  // Get server count only (for limit checks)
+  async getServerCount(): Promise<number> {
+    const result = sqlite.prepare(`
+      SELECT COUNT(*) as count FROM servers
+    `).get() as { count: number };
+    return result.count;
+  }
+
+  // Check if can add a resource (user or server)
+  async checkCanAdd(resource: 'user' | 'server', currentCount: number): Promise<LimitCheck> {
+    const subscription = await this.getSubscription();
+    const tier: SubscriptionTier = (subscription?.tier as SubscriptionTier) || 'free';
+    const tierConfig = subscriptionTiers[tier];
+    const limit = resource === 'user' ? tierConfig.maxUsers : tierConfig.maxServers;
+
+    // -1 means unlimited
+    const allowed = limit === -1 || currentCount < limit;
+
+    return {
+      allowed,
+      current: currentCount,
+      limit: limit === -1 ? Infinity : limit,
+      tier,
+      tierName: tierConfig.name,
+    };
+  }
+
+  // Get full license info
+  async getLicenseInfo(userCount: number): Promise<LicenseInfo> {
+    const subscription = await this.getSubscription();
+    const tier: SubscriptionTier = (subscription?.tier as SubscriptionTier) || 'free';
+    const tierConfig = subscriptionTiers[tier];
+    const serverCount = await this.getServerCount();
+
+    return {
+      subscription,
+      usage: { users: userCount, servers: serverCount },
+      limits: {
+        maxUsers: tierConfig.maxUsers === -1 ? Infinity : tierConfig.maxUsers,
+        maxServers: tierConfig.maxServers === -1 ? Infinity : tierConfig.maxServers,
+      },
+      tier,
+      tierName: tierConfig.name,
+    };
+  }
+
+  // Add a billing history record
+  async addBillingRecord(data: {
+    stripeInvoiceId?: string;
+    amount: number;
+    currency?: string;
+    status: string;
+    invoicePdf?: string;
+    description?: string;
+  }): Promise<void> {
+    const subscription = await this.getSubscription();
+    if (!subscription) return;
+
+    const id = randomUUID();
+    const now = Math.floor(Date.now() / 1000);
+
+    sqlite.prepare(`
+      INSERT INTO billing_history (id, subscription_id, stripe_invoice_id, amount, currency, status, invoice_pdf, description, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      subscription.id,
+      data.stripeInvoiceId || null,
+      data.amount,
+      data.currency || 'usd',
+      data.status,
+      data.invoicePdf || null,
+      data.description || null,
+      now
+    );
+  }
+
+  // Get billing history
+  async getBillingHistory(limit: number = 50): Promise<BillingHistory[]> {
+    const rows = sqlite.prepare(`
+      SELECT * FROM billing_history ORDER BY created_at DESC LIMIT ?
+    `).all(limit) as any[];
+
+    return rows.map(row => ({
+      id: row.id,
+      subscriptionId: row.subscription_id,
+      stripeInvoiceId: row.stripe_invoice_id,
+      amount: row.amount,
+      currency: row.currency,
+      status: row.status,
+      invoicePdf: row.invoice_pdf,
+      description: row.description,
+      createdAt: row.created_at,
+    }));
+  }
+}
+
 export const storage = new SQLiteStorage();
 export const approvalStorage = new ApprovalStorage();
 export const policyStorage = new PolicyStorage();
 export const pendingPolicyStorage = new PendingPolicyStorage();
 export const templateStorage = new TemplateStorage();
+export const subscriptionStorage = new SubscriptionStorage();

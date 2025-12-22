@@ -37,6 +37,8 @@ import { queryClient, apiRequest } from "@/lib/queryClient";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 import { Plus, Pencil, Trash2, Server, Search } from "lucide-react";
 import type { Server as ServerType } from "@shared/schema";
+import { api } from "@/lib/api";
+import { UpgradeBanner } from "@/components/UpgradeBanner";
 
 interface ServerFormData {
   name: string;
@@ -202,10 +204,15 @@ export default function AdminServers() {
   const { data: servers, isLoading, refetch } = useQuery<ServerType[]>({
     queryKey: ["/api/admin/servers"],
   });
+
+  const { data: serverLimit, refetch: refetchServerLimit } = useQuery({
+    queryKey: ["/api/admin/license/check/server"],
+    queryFn: () => api.admin.license.checkLimit("server"),
+  });
   const isFetching = useIsFetching({ queryKey: ["/api/admin/servers"] }) > 0;
   const { secondsRemaining, refreshNow } = useAutoRefresh({
     intervalSeconds: 15,
-    refresh: () => refetch(),
+    refresh: () => Promise.all([refetch(), refetchServerLimit()]),
     isBlocked: isFetching,
   });
 
@@ -225,6 +232,7 @@ export default function AdminServers() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/admin/servers"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/license/check/server"] });
       void queryClient.refetchQueries({ queryKey: ["/api/admin/servers"] });
       setIsDialogOpen(false);
       toast({ title: "Server created successfully" });
@@ -266,6 +274,7 @@ export default function AdminServers() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/admin/servers"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/license/check/server"] });
       void queryClient.refetchQueries({ queryKey: ["/api/admin/servers"] });
       toast({ title: "Server deleted successfully" });
     },
@@ -323,7 +332,16 @@ export default function AdminServers() {
 
         <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
           <DialogTrigger asChild>
-            <Button onClick={() => setEditingServer(null)} data-testid="add-server-button">
+            <Button
+              onClick={() => setEditingServer(null)}
+              disabled={serverLimit ? !serverLimit.allowed : false}
+              title={
+                serverLimit && !serverLimit.allowed
+                  ? `Server limit reached (${serverLimit.current}/${serverLimit.limit}). Upgrade your plan to add more.`
+                  : undefined
+              }
+              data-testid="add-server-button"
+            >
               <Plus className="h-4 w-4 mr-2" />
               Add Server
             </Button>
@@ -357,6 +375,15 @@ export default function AdminServers() {
           </DialogContent>
         </Dialog>
       </div>
+
+      {serverLimit && !serverLimit.allowed && (
+        <UpgradeBanner
+          message={`Server limit reached (${serverLimit.current}/${serverLimit.limit}) on the ${serverLimit.tierName} plan. Upgrade to add more servers.`}
+          current={serverLimit.current}
+          limit={serverLimit.limit}
+          tierName={serverLimit.tierName}
+        />
+      )}
 
       <Card>
         <CardHeader className="pb-4">

@@ -34,17 +34,78 @@ export const sessions = sqliteTable("sessions", {
   endedAt: integer("ended_at", { mode: "timestamp" }),
 });
 
+// Subscription tier definitions
+export const subscriptionTiers = {
+  free: { name: 'Free', maxUsers: 5, maxServers: 2 },
+  pro: { name: 'Pro', maxUsers: 25, maxServers: 10 },
+  enterprise: { name: 'Enterprise', maxUsers: -1, maxServers: -1 }, // -1 = unlimited
+} as const;
+
+export type SubscriptionTier = keyof typeof subscriptionTiers;
+export type SubscriptionStatus = 'active' | 'canceled' | 'past_due' | 'trialing';
+
+// Organization subscription table
+export const subscriptions = sqliteTable("subscriptions", {
+  id: text("id").primaryKey(),
+  tier: text("tier").notNull().default("free"),
+  stripeCustomerId: text("stripe_customer_id"),
+  stripeSubscriptionId: text("stripe_subscription_id"),
+  stripePriceId: text("stripe_price_id"),
+  status: text("status").notNull().default("active"),
+  currentPeriodEnd: integer("current_period_end"),
+  cancelAtPeriodEnd: integer("cancel_at_period_end", { mode: "boolean" }).default(false),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at"),
+});
+
+// Billing history table
+export const billingHistory = sqliteTable("billing_history", {
+  id: text("id").primaryKey(),
+  subscriptionId: text("subscription_id").notNull(),
+  stripeInvoiceId: text("stripe_invoice_id"),
+  amount: integer("amount").notNull(), // cents
+  currency: text("currency").notNull().default("usd"),
+  status: text("status").notNull(), // paid, open, void
+  invoicePdf: text("invoice_pdf"),
+  description: text("description"),
+  createdAt: integer("created_at").notNull(),
+});
+
 export const insertUserSchema = createInsertSchema(users).omit({ id: true });
 export const insertServerSchema = createInsertSchema(servers).omit({ id: true });
 export const insertSessionSchema = createInsertSchema(sessions).omit({ id: true, startedAt: true, endedAt: true });
+export const insertSubscriptionSchema = createInsertSchema(subscriptions).omit({ id: true, createdAt: true, updatedAt: true });
+export const insertBillingHistorySchema = createInsertSchema(billingHistory).omit({ id: true, createdAt: true });
 
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type InsertServer = z.infer<typeof insertServerSchema>;
 export type InsertSession = z.infer<typeof insertSessionSchema>;
+export type InsertSubscription = z.infer<typeof insertSubscriptionSchema>;
+export type InsertBillingHistory = z.infer<typeof insertBillingHistorySchema>;
 
 export type User = typeof users.$inferSelect;
 export type Server = typeof servers.$inferSelect;
 export type Session = typeof sessions.$inferSelect;
+export type Subscription = typeof subscriptions.$inferSelect;
+export type BillingHistory = typeof billingHistory.$inferSelect;
+
+// License info response for API
+export interface LicenseInfo {
+  subscription: Subscription | null;
+  usage: { users: number; servers: number };
+  limits: { maxUsers: number; maxServers: number };
+  tier: SubscriptionTier;
+  tierName: string;
+}
+
+// Limit check response
+export interface LimitCheck {
+  allowed: boolean;
+  current: number;
+  limit: number;
+  tier: SubscriptionTier;
+  tierName: string;
+}
 
 export type UserRole = "user" | "admin";
 
