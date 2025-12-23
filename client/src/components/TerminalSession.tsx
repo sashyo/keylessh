@@ -29,7 +29,15 @@ import {
   Loader2,
   Key,
   X,
+  FolderOpen,
+  PanelLeftClose,
 } from "lucide-react";
+import {
+  ResizablePanelGroup,
+  ResizablePanel,
+  ResizableHandle,
+} from "@/components/ui/resizable";
+import { FileBrowser } from "@/components/sftp";
 import type { ServerWithAccess } from "@shared/schema";
 import type { SSHConnectionStatus } from "@/lib/sshClient";
 
@@ -88,13 +96,16 @@ export function TerminalSession({
   const serverIsDisabled = server ? !server.enabled : false;
   const serverIsOffline = server ? server.status === "offline" : false;
 
-  const { connect, disconnect, send, resize, setDimensions, status, error } = useSSHSession({
+  const { connect, disconnect, send, resize, setDimensions, status, error, openSftp, closeSftp, sftpClient } = useSSHSession({
     host: server?.host || "",
     port: server?.port || 22,
     serverId,
     username: sshUser,
     onData: writeToTerminal,
   });
+
+  const [showFileBrowser, setShowFileBrowser] = useState(false);
+  const [sftpLoading, setSftpLoading] = useState(false);
 
   const prevStatusRef = useRef<SSHConnectionStatus>("disconnected");
   const disconnectedWithReason = status === "disconnected" && !!error;
@@ -160,8 +171,35 @@ export function TerminalSession({
 
   const handleDisconnect = useCallback(() => {
     userInitiatedDisconnectRef.current = true;
+    setShowFileBrowser(false);
+    closeSftp();
     disconnect();
-  }, [disconnect]);
+  }, [closeSftp, disconnect]);
+
+  const toggleFileBrowser = useCallback(async () => {
+    if (showFileBrowser) {
+      setShowFileBrowser(false);
+      return;
+    }
+
+    if (!sftpClient) {
+      setSftpLoading(true);
+      try {
+        await openSftp();
+      } catch (err) {
+        console.error("Failed to open SFTP:", err);
+        toast({
+          title: "SFTP Error",
+          description: err instanceof Error ? err.message : "Failed to open SFTP session",
+          variant: "destructive",
+        });
+        setSftpLoading(false);
+        return;
+      }
+      setSftpLoading(false);
+    }
+    setShowFileBrowser(true);
+  }, [showFileBrowser, sftpClient, openSftp, toast]);
 
   const handleCopy = useCallback(() => {
     const selection = xtermRef.current?.getSelection();
@@ -354,6 +392,21 @@ export function TerminalSession({
               Close tab
             </Button>
           )}
+          <Button
+            variant={showFileBrowser ? "secondary" : "outline"}
+            size="sm"
+            onClick={toggleFileBrowser}
+            disabled={status !== "connected" || sftpLoading}
+          >
+            {sftpLoading ? (
+              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+            ) : showFileBrowser ? (
+              <PanelLeftClose className="h-4 w-4 mr-2" />
+            ) : (
+              <FolderOpen className="h-4 w-4 mr-2" />
+            )}
+            {showFileBrowser ? "Hide Files" : "Files"}
+          </Button>
           <Button variant="outline" size="sm" onClick={handleCopy} disabled={status !== "connected"}>
             <Copy className="h-4 w-4 mr-2" />
             Copy
@@ -376,68 +429,80 @@ export function TerminalSession({
         </div>
       </div>
 
-      <div className="terminal-surface flex-1 min-h-[420px] w-full rounded-xl overflow-hidden relative">
-        <div ref={terminalRef} className="absolute inset-3" data-testid="terminal-container" />
-
-        {status !== "connected" && (
-          <div className="absolute inset-0 flex items-center justify-center bg-background/70 backdrop-blur-[1px]">
-            <div className="text-center space-y-3 max-w-md px-4">
-              {(serverIsDisabled || serverIsOffline) && (
-                <div className="text-sm font-medium">
-                  {serverIsDisabled ? "Server disabled" : "Server appears offline"}
-                </div>
-              )}
-              <div className="text-sm font-medium">
-                {status === "connecting" || status === "authenticating"
-                  ? "Connecting…"
-                  : status === "error"
-                    ? "Connection failed"
-                    : disconnectedWithReason
-                      ? "Session disconnected"
-                      : "Not connected"}
-              </div>
-              {(status === "error" || disconnectedWithReason) && (
-                <div className="text-sm text-muted-foreground">
-                  {error}
-                </div>
-              )}
-              <div className="flex items-center justify-center gap-2">
-                <Button
-                  size="sm"
-                  onClick={() => setShowKeyDialog(true)}
-                  disabled={
-                    serverLoading ||
-                    serverIsDisabled ||
-                    serverIsOffline ||
-                    status === "connecting" ||
-                    status === "authenticating"
-                  }
-                >
-                  <RefreshCw className={`h-4 w-4 mr-2 ${status === "connecting" || status === "authenticating" ? "animate-spin" : ""}`} />
-                  {status === "error" || disconnectedWithReason ? "Reconnect" : "Connect"}
-                </Button>
-                {serverIsOffline && !serverIsDisabled && (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => setShowKeyDialog(true)}
-                    disabled={serverLoading || status === "connecting" || status === "authenticating"}
-                    title="Status checks can be wrong; try connecting anyway."
-                  >
-                    Try anyway
-                  </Button>
-                )}
-                {onCloseTab && (
-                  <Button size="sm" variant="outline" onClick={handleCloseTabClick}>
-                    <X className="h-4 w-4 mr-2" />
-                    Close
-                  </Button>
-                )}
-              </div>
-            </div>
-          </div>
+      <ResizablePanelGroup direction="horizontal" className="flex-1 min-h-[420px] w-full rounded-xl overflow-hidden">
+        {showFileBrowser && sftpClient && (
+          <>
+            <ResizablePanel defaultSize={25} minSize={15} maxSize={50} className="border rounded-l-xl bg-background">
+              <FileBrowser client={sftpClient} initialPath="~" />
+            </ResizablePanel>
+            <ResizableHandle withHandle />
+          </>
         )}
-      </div>
+        <ResizablePanel defaultSize={showFileBrowser ? 75 : 100}>
+          <div className="terminal-surface h-full w-full overflow-hidden relative">
+            <div ref={terminalRef} className="absolute inset-3" data-testid="terminal-container" />
+
+            {status !== "connected" && (
+              <div className="absolute inset-0 flex items-center justify-center bg-background/70 backdrop-blur-[1px]">
+                <div className="text-center space-y-3 max-w-md px-4">
+                  {(serverIsDisabled || serverIsOffline) && (
+                    <div className="text-sm font-medium">
+                      {serverIsDisabled ? "Server disabled" : "Server appears offline"}
+                    </div>
+                  )}
+                  <div className="text-sm font-medium">
+                    {status === "connecting" || status === "authenticating"
+                      ? "Connecting…"
+                      : status === "error"
+                        ? "Connection failed"
+                        : disconnectedWithReason
+                          ? "Session disconnected"
+                          : "Not connected"}
+                  </div>
+                  {(status === "error" || disconnectedWithReason) && (
+                    <div className="text-sm text-muted-foreground">
+                      {error}
+                    </div>
+                  )}
+                  <div className="flex items-center justify-center gap-2">
+                    <Button
+                      size="sm"
+                      onClick={() => setShowKeyDialog(true)}
+                      disabled={
+                        serverLoading ||
+                        serverIsDisabled ||
+                        serverIsOffline ||
+                        status === "connecting" ||
+                        status === "authenticating"
+                      }
+                    >
+                      <RefreshCw className={`h-4 w-4 mr-2 ${status === "connecting" || status === "authenticating" ? "animate-spin" : ""}`} />
+                      {status === "error" || disconnectedWithReason ? "Reconnect" : "Connect"}
+                    </Button>
+                    {serverIsOffline && !serverIsDisabled && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => setShowKeyDialog(true)}
+                        disabled={serverLoading || status === "connecting" || status === "authenticating"}
+                        title="Status checks can be wrong; try connecting anyway."
+                      >
+                        Try anyway
+                      </Button>
+                    )}
+                    {onCloseTab && (
+                      <Button size="sm" variant="outline" onClick={handleCloseTabClick}>
+                        <X className="h-4 w-4 mr-2" />
+                        Close
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </ResizablePanel>
+      </ResizablePanelGroup>
 
       <PrivateKeyInput
         open={showKeyDialog}

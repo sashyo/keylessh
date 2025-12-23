@@ -25,6 +25,7 @@ The result: enterprise-grade SSH access control without any private keys to mana
 ## Features
 
 - Browser-side SSH via `@microsoft/dev-tunnels-ssh` + `xterm.js`
+- **SFTP file browser** - Browse, upload, download, rename, delete files via split-panel UI
 - OIDC login with TideCloak - no passwords, no keys — https://tide.org
 - **Policy:1 authorization** with Forseti contracts for SSH signing
 - Role-based SSH access (e.g., only `ssh:root` role holders can SSH as root)

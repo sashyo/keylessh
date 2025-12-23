@@ -6,7 +6,7 @@ KeyleSSH is a browser-based SSH console with policy-based cryptographic authoriz
 
 ```
 ┌────────────────────────── Browser ──────────────────────────┐
-│  React UI + xterm.js                                         │
+│  React UI + xterm.js + SFTP FileBrowser                      │
 │  @microsoft/dev-tunnels-ssh (SSH protocol + crypto)          │
 │  heimdall-tide (Policy:1 signing via TideCloak enclave)      │
 │                                                             │
@@ -14,8 +14,10 @@ KeyleSSH is a browser-based SSH console with policy-based cryptographic authoriz
 │  2) POST /api/sessions (serverId + sshUser) → sessionId      │
 │  3) WS /ws/tcp?serverId=…&sessionId=…&token=JWT              │
 │  4) SSH handshake → Policy:1 signing via Ork enclave         │
+│  5) Optional: Open SFTP channel for file operations          │
 └───────────────────────────────────────┬─────────────────────┘
                                         │ encrypted SSH bytes (WS)
+                                        │ (shell + SFTP channels multiplexed)
                                         ▼
 ┌──────────────────────── Express Server ──────────────────────┐
 │ REST API (servers/sessions/admin/ssh-policies/*)             │
@@ -38,7 +40,7 @@ KeyleSSH is a browser-based SSH console with policy-based cryptographic authoriz
 
 ## Components
 
-- `client/`: React app (UI, xterm.js, SSH client, session UX).
+- `client/`: React app (UI, xterm.js, SSH client, SFTP browser, session UX).
 - `server/`: Express API + WebSocket bridge + SQLite storage.
 - `tcp-bridge/` (optional deployment): stateless WS↔TCP forwarder.
 - `shared/`: shared types + schema/config.
@@ -56,6 +58,62 @@ KeyleSSH is a browser-based SSH console with policy-based cryptographic authoriz
 5. Server opens a TCP connection (locally or via external bridge) and forwards bytes.
 6. Browser initiates SSH handshake; during auth, triggers Policy:1 signing (see below).
 7. Browser completes SSH handshake and opens a shell; xterm.js renders I/O.
+
+## SFTP File Browser
+
+KeyleSSH includes a built-in SFTP file browser that runs alongside the terminal. SFTP uses the same SSH session - no additional authentication required.
+
+### Architecture
+
+```
+┌─────────────────────── Browser ───────────────────────┐
+│                                                        │
+│  ┌─────────────────────────────────────────────────┐  │
+│  │              SSH Session                         │  │
+│  │  ┌─────────────────┐  ┌─────────────────────┐   │  │
+│  │  │  Shell Channel  │  │   SFTP Channel      │   │  │
+│  │  │  (terminal I/O) │  │   (file ops)        │   │  │
+│  │  └────────┬────────┘  └──────────┬──────────┘   │  │
+│  └───────────┼──────────────────────┼──────────────┘  │
+│              │                      │                  │
+│  ┌───────────▼──────────────────────▼──────────────┐  │
+│  │            @microsoft/dev-tunnels-ssh            │  │
+│  │            (channel multiplexing)                │  │
+│  └────────────────────────┬────────────────────────┘  │
+└───────────────────────────┼────────────────────────────┘
+                            │ WebSocket (encrypted SSH bytes)
+                            ▼
+┌─────────────────── TCP Bridge ────────────────────────┐
+│         Forwards bytes to SSH server                   │
+└────────────────────────────────────────────────────────┘
+```
+
+### How It Works
+
+1. User clicks "Files" button in the terminal toolbar.
+2. Client opens a new SSH channel on the existing session.
+3. Client requests the "sftp" subsystem on that channel.
+4. SFTP v3 protocol runs over the channel (same connection, different channel).
+5. File operations are performed via SFTP protocol messages.
+
+### SFTP Protocol Implementation
+
+The client implements SFTP v3 (draft-ietf-secsh-filexfer-02) for maximum OpenSSH compatibility:
+
+- **Protocol layer** (`client/src/lib/sftp/`): Constants, types, binary buffer utilities, SftpClient class
+- **React hooks** (`client/src/hooks/useSftp.ts`): Directory state, navigation, file operations
+- **UI components** (`client/src/components/sftp/`): FileBrowser, FileList, dialogs
+
+### Features
+
+- Browse directories with breadcrumb navigation
+- Upload files (drag-drop or file picker)
+- Download files
+- Create, rename, delete files and folders
+- Change permissions (chmod) via properties dialog
+- File type icons based on extension
+- Right-click context menu
+- Resizable split-panel layout (file browser + terminal)
 
 ## Policy:1 Authorization Flow
 

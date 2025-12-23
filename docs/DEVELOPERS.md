@@ -83,11 +83,37 @@ SSH username access is token-based (applies to everyone, including admins).
 
 - `client/src/pages/Console.tsx`
   - xterm.js initialization, FitAddon sizing, UX for connect/disconnect
-  - Buffers output until terminal is mounted (prevents “connected but blank terminal”)
+  - Buffers output until terminal is mounted (prevents "connected but blank terminal")
 - `client/src/hooks/useSSHSession.ts`
   - Wraps the browser SSH client lifecycle and persists initial PTY dimensions
+  - Exposes `openSftp()`, `closeSftp()`, `sftpClient` for SFTP access
 - `client/src/lib/sshClient.ts`
   - `BrowserSSHClient`: creates session record, opens WS, runs SSH handshake via `@microsoft/dev-tunnels-ssh`
+  - `openSftp()`: opens SFTP channel on existing SSH session
+
+### SFTP File Browser
+
+SFTP runs over the same SSH session using a separate channel.
+
+- `client/src/lib/sftp/`
+  - `protocol.ts`: SFTP v3 constants, types, status codes, helper functions
+  - `buffer.ts`: Binary read/write utilities for SFTP packets (SftpBufferWriter, SftpBufferReader)
+  - `client.ts`: SftpClient class with all SFTP operations (list, upload, download, rename, delete, chmod, mkdir)
+- `client/src/hooks/useSftp.ts`
+  - Directory state management (currentPath, entries, loading, error)
+  - Navigation (navigateTo, goUp, refresh)
+  - File operations (download, upload, remove, rename, mkdir, chmod)
+  - Selection management (selectedPaths, toggleSelection, selectAll)
+- `client/src/components/sftp/`
+  - `FileBrowser.tsx`: Main file browser panel (integrates all components)
+  - `FileList.tsx`: File/folder list with context menu and selection
+  - `FileIcon.tsx`: File type icons based on extension
+  - `FileToolbar.tsx`: Upload, New Folder, Refresh, Delete buttons
+  - `PathBreadcrumb.tsx`: Clickable path navigation
+  - `NewFolderDialog.tsx`, `RenameDialog.tsx`, `PropertiesDialog.tsx`, `DeleteConfirmDialog.tsx`
+- `client/src/components/TerminalSession.tsx`
+  - Integrates FileBrowser with ResizablePanelGroup
+  - "Files" button toggles split-panel view
 
 ### Storage
 

@@ -12,8 +12,10 @@ The bridge:
 1. Accepts WebSocket connections with a JWT token
 2. Verifies the JWT against TideCloak JWKS
 3. Opens TCP socket to the specified SSH server
-4. Pipes bytes bidirectionally
+4. Pipes bytes bidirectionally (terminal I/O + SFTP file operations share the same connection)
 5. Closes both connections when either side disconnects
+
+**Note:** Both SSH terminal and SFTP file browser use the same WebSocket connection. The SSH protocol multiplexes channels internally - no bridge changes needed for SFTP support.
 
 ## Architecture
 
