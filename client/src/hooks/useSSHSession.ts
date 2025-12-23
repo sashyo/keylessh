@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { BrowserSSHClient, SSHConnectionStatus, type SSHSigner, type SSHAuth } from "@/lib/sshClient";
+import type { SftpClient } from "@/lib/sftp";
 
 interface UseSSHSessionOptions {
   host: string;
@@ -18,6 +19,10 @@ interface UseSSHSessionReturn {
   setDimensions: (cols: number, rows: number) => void;
   status: SSHConnectionStatus;
   error: string | null;
+  // SFTP
+  openSftp: () => Promise<SftpClient>;
+  closeSftp: () => void;
+  sftpClient: SftpClient | null;
 }
 
 export function useSSHSession({
@@ -30,6 +35,7 @@ export function useSSHSession({
 }: UseSSHSessionOptions): UseSSHSessionReturn {
   const [status, setStatus] = useState<SSHConnectionStatus>("disconnected");
   const [error, setError] = useState<string | null>(null);
+  const [sftpClient, setSftpClient] = useState<SftpClient | null>(null);
   const clientRef = useRef<BrowserSSHClient | null>(null);
   const initialColsRef = useRef<number>(80);
   const initialRowsRef = useRef<number>(24);
@@ -137,6 +143,22 @@ export function useSSHSession({
     }
   }, []);
 
+  const openSftp = useCallback(async (): Promise<SftpClient> => {
+    if (!clientRef.current) {
+      throw new Error("SSH not connected");
+    }
+    const client = await clientRef.current.openSftp();
+    setSftpClient(client);
+    return client;
+  }, []);
+
+  const closeSftp = useCallback(() => {
+    if (clientRef.current) {
+      clientRef.current.closeSftp();
+    }
+    setSftpClient(null);
+  }, []);
+
   return {
     connect,
     disconnect,
@@ -145,5 +167,8 @@ export function useSSHSession({
     setDimensions,
     status,
     error,
+    openSftp,
+    closeSftp,
+    sftpClient,
   };
 }

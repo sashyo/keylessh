@@ -11,6 +11,7 @@ import type { Session } from "@shared/schema";
 import type { KeyPair } from "@microsoft/dev-tunnels-ssh";
 import type { Signer } from "@microsoft/dev-tunnels-ssh";
 import type { Verifier } from "@microsoft/dev-tunnels-ssh";
+import { SftpClient } from "./sftp";
 
 function sshWriteString(value: Buffer): Buffer {
   const len = Buffer.alloc(4);
@@ -256,6 +257,23 @@ async function createShellRequest(): Promise<any> {
 }
 
 /**
+ * Create a subsystem request message (e.g., for SFTP).
+ */
+async function createSubsystemRequest(subsystem: string): Promise<any> {
+  const ChannelRequestMessage = await getChannelRequestMessageClass();
+  const msg = new ChannelRequestMessage("subsystem", true);
+
+  const originalOnWrite = Object.getPrototypeOf(msg).onWrite;
+
+  msg.onWrite = function (writer: SshDataWriter) {
+    originalOnWrite.call(this, writer);
+    writer.writeString(subsystem, "ascii");
+  };
+
+  return msg;
+}
+
+/**
  * Create a window change request message.
  */
 async function createWindowChangeRequest(
@@ -316,6 +334,8 @@ export interface SSHClientOptions {
 export class BrowserSSHClient {
   private session: SshClientSession | null = null;
   private channel: SshChannel | null = null;
+  private sftpChannel: SshChannel | null = null;
+  private sftpClient: SftpClient | null = null;
   private websocket: WebSocket | null = null;
   private options: SSHClientOptions;
   private cols: number = 80;
@@ -689,6 +709,72 @@ export class BrowserSSHClient {
   }
 
   /**
+   * Open an SFTP session on this SSH connection.
+   * Returns an SftpClient for file operations.
+   */
+  async openSftp(): Promise<SftpClient> {
+    if (!this.session) {
+      throw new Error("SSH session not connected");
+    }
+
+    if (this.sftpClient) {
+      return this.sftpClient;
+    }
+
+    console.log("[SSH] Opening SFTP channel...");
+
+    // Open a new session channel for SFTP
+    this.sftpChannel = await this.session.openChannel("session");
+    console.log("[SSH] SFTP channel opened, id:", this.sftpChannel.channelId);
+
+    // Request the sftp subsystem
+    const subsystemRequest = await createSubsystemRequest("sftp");
+    const result = await this.sftpChannel.request(subsystemRequest);
+
+    if (!result) {
+      this.sftpChannel.dispose();
+      this.sftpChannel = null;
+      throw new Error("SFTP subsystem request denied by server");
+    }
+
+    console.log("[SSH] SFTP subsystem opened");
+
+    // Create SFTP client
+    this.sftpClient = new SftpClient(this.sftpChannel);
+    await this.sftpClient.init();
+
+    console.log("[SSH] SFTP client initialized");
+
+    return this.sftpClient;
+  }
+
+  /**
+   * Close the SFTP session (keeps SSH connection open)
+   */
+  closeSftp(): void {
+    if (this.sftpClient) {
+      this.sftpClient.dispose();
+      this.sftpClient = null;
+    }
+
+    if (this.sftpChannel) {
+      try {
+        this.sftpChannel.dispose();
+      } catch {
+        // Ignore
+      }
+      this.sftpChannel = null;
+    }
+  }
+
+  /**
+   * Check if SFTP is currently open
+   */
+  get hasSftp(): boolean {
+    return this.sftpClient !== null;
+  }
+
+  /**
    * Disconnect from the SSH server
    */
   disconnect(): void {
@@ -701,6 +787,9 @@ export class BrowserSSHClient {
     this.isCleaningUp = true;
 
     void this.endSessionRecordOnce();
+
+    // Close SFTP first
+    this.closeSftp();
 
     if (this.channel) {
       try {
