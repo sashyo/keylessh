@@ -288,7 +288,6 @@ export function AdminActiveSessionsContent({ embedded = false }: { embedded?: bo
 }
 
 export function AdminSessionHistoryContent({ embedded = false }: { embedded?: boolean }) {
-  const [search, setSearch] = useState("");
   const [historyPage, setHistoryPage] = useState(0);
   const [historyPageSizeMode, setHistoryPageSizeMode] = useState<PageSizeMode>("auto");
   const [historyPageSize, setHistoryPageSize] = useState(25);
@@ -298,19 +297,12 @@ export function AdminSessionHistoryContent({ embedded = false }: { embedded?: bo
     queryKey: ["/api/admin/sessions"],
   });
 
-  const filteredSessions = sessions?.filter(
-    (session) =>
-      session.serverName?.toLowerCase().includes(search.toLowerCase()) ||
-      session.sshUser.toLowerCase().includes(search.toLowerCase()) ||
-      session.userId.toLowerCase().includes(search.toLowerCase())
-  );
-
-  const inactiveSessions = filteredSessions?.filter((s) => s.status !== "active") || [];
-  const historySessions = inactiveSessions.length > 0 ? inactiveSessions : filteredSessions || [];
+  const inactiveSessions = sessions?.filter((s) => s.status !== "active") || [];
+  const historySessions = inactiveSessions.length > 0 ? inactiveSessions : sessions || [];
 
   useEffect(() => {
     setHistoryPage(0);
-  }, [search, historyPageSize]);
+  }, [historyPageSize]);
 
   useEffect(() => {
     if (historyPageSizeMode !== "auto") return;
@@ -354,33 +346,8 @@ export function AdminSessionHistoryContent({ embedded = false }: { embedded?: bo
     return `${minutes}m`;
   };
 
-  return (
-    <div className={cn("space-y-6", !embedded && "p-6")}>
-      {!embedded && (
-        <div className="space-y-1">
-          <h1 className="text-2xl font-semibold tracking-tight flex items-center gap-2">
-            <Clock className="h-6 w-6" />
-            Session History
-          </h1>
-          <p className="text-muted-foreground">
-            Review historical SSH sessions
-          </p>
-        </div>
-      )}
-
-      <div className="flex items-center gap-4">
-        <div className="relative flex-1 max-w-sm">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-          <Input
-            placeholder="Search sessions..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="pl-9"
-          />
-        </div>
-      </div>
-
-      <Card>
+  const cardContent = (
+    <Card>
         <div className="p-4 border-b border-border">
           <div className="flex items-center justify-between gap-3">
             <h2 className="font-medium flex items-center gap-2">
@@ -450,13 +417,9 @@ export function AdminSessionHistoryContent({ embedded = false }: { embedded?: bo
           ) : historySessions.length > 0 ? (
             <div
               ref={historyTableViewportRef}
-              className={cn(
-                embedded
-                  ? "h-[max(220px,calc(100vh-520px))]"
-                  : "h-[max(260px,calc(100vh-420px))]"
-              )}
+              className="h-[max(240px,calc(100vh-420px))] md:h-[max(320px,calc(100vh-360px))] overflow-auto"
             >
-              <Table containerClassName="h-full overflow-x-auto overflow-y-hidden">
+              <Table>
                 <TableHeader>
                   <TableRow>
                     <TableHead>Server</TableHead>
@@ -523,12 +486,30 @@ export function AdminSessionHistoryContent({ embedded = false }: { embedded?: bo
               <Clock className="h-12 w-12 text-muted-foreground mb-4" />
               <h3 className="font-medium">No session history</h3>
               <p className="text-sm text-muted-foreground mt-1">
-                {search ? "Try a different search term" : "Completed sessions will appear here"}
+                Completed sessions will appear here
               </p>
             </div>
           )}
         </CardContent>
       </Card>
+  );
+
+  if (embedded) {
+    return cardContent;
+  }
+
+  return (
+    <div className="p-6 space-y-6">
+      <div className="space-y-1">
+        <h1 className="text-2xl font-semibold tracking-tight flex items-center gap-2">
+          <Clock className="h-6 w-6" />
+          Session History
+        </h1>
+        <p className="text-muted-foreground">
+          Review historical SSH sessions
+        </p>
+      </div>
+      {cardContent}
     </div>
   );
 }

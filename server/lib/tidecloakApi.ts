@@ -364,6 +364,44 @@ export const DeleteUser = async (userId: string, token: string): Promise<void> =
   return;
 };
 
+export const SetUserEnabled = async (
+  userId: string,
+  enabled: boolean,
+  token: string
+): Promise<void> => {
+  // Fetch the current user to preserve other fields
+  const userResponse = await fetch(`${getTcUrl()}/users/${userId}`, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
+
+  if (!userResponse.ok) {
+    throw new Error(`Error fetching user: ${userResponse.statusText}`);
+  }
+
+  const user = await userResponse.json();
+  const updatedUserRep = { ...user, enabled };
+
+  const response = await fetch(`${getTcUrl()}/users/${userId}`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify(updatedUserRep),
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.text();
+    console.error(`Error setting user enabled status: ${response.statusText}`);
+    throw new Error(`Error setting user enabled status: ${errorBody}`);
+  }
+
+  return;
+};
+
 export const DeleteRole = async (roleName: string, token: string): Promise<void> => {
   const client: ClientRepresentation | null = await getClientByClientId(
     getClient(),

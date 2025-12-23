@@ -9,12 +9,26 @@ export default function Login() {
   const { login, isAuthenticated, isLoading } = useAuth();
   const [, setLocation] = useLocation();
   const [sessionExpired, setSessionExpired] = useState(false);
+  const [accountDisabled, setAccountDisabled] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
 
   useEffect(() => {
     const expired = sessionStorage.getItem("tokenExpired");
     if (expired === "true") {
       setSessionExpired(true);
       sessionStorage.removeItem("tokenExpired");
+    }
+
+    const disabled = sessionStorage.getItem("accountDisabled");
+    if (disabled === "true") {
+      setAccountDisabled(true);
+      sessionStorage.removeItem("accountDisabled");
+    }
+
+    const error = sessionStorage.getItem("authError");
+    if (error) {
+      setAuthError(error);
+      sessionStorage.removeItem("authError");
     }
   }, []);
 
@@ -110,6 +124,16 @@ export default function Login() {
               {sessionExpired && (
                 <p className="text-sm text-destructive mt-2">
                   Your session has expired. Please sign in again.
+                </p>
+              )}
+              {accountDisabled && (
+                <p className="text-sm text-destructive mt-2">
+                  Your account has been disabled. Please contact an administrator to regain access.
+                </p>
+              )}
+              {authError && !accountDisabled && !sessionExpired && (
+                <p className="text-sm text-destructive mt-2">
+                  Authentication failed: {authError}
                 </p>
               )}
             </CardHeader>

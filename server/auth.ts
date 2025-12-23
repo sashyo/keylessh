@@ -8,6 +8,7 @@ import {
   AddUser,
   UpdateUser,
   DeleteUser,
+  SetUserEnabled,
   GrantUserRole,
   RemoveUserRole,
   GetTideLinkUrl,
@@ -158,6 +159,8 @@ export interface AdminUser {
   username?: string;
   role: string[];
   linked: boolean;
+  enabled: boolean;
+  isAdmin: boolean;
 }
 
 // Admin Role type (TideCloak Admin API shape)
@@ -184,6 +187,9 @@ export class TidecloakAdmin {
             )
           : [];
 
+        // Check if user has admin role (tide-realm-admin)
+        const isAdmin = userClientRoles.includes(ADMIN_ROLE);
+
         return {
           id: u.id ?? "",
           firstName: u.firstName ?? "",
@@ -192,6 +198,8 @@ export class TidecloakAdmin {
           username: u.username,
           role: userClientRoles,
           linked: !!u.attributes?.vuid?.[0],
+          enabled: u.enabled !== false, // Default to true if not set
+          isAdmin,
         };
       })
     );
@@ -241,6 +249,11 @@ export class TidecloakAdmin {
   // Delete user
   async deleteUser(token: string, userId: string): Promise<void> {
     await DeleteUser(userId, token);
+  }
+
+  // Enable or disable a user
+  async setUserEnabled(token: string, userId: string, enabled: boolean): Promise<void> {
+    await SetUserEnabled(userId, enabled, token);
   }
 
   // Get Tide link URL for account linking

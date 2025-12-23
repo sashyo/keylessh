@@ -88,6 +88,24 @@ export type Session = typeof sessions.$inferSelect;
 export type Subscription = typeof subscriptions.$inferSelect;
 export type BillingHistory = typeof billingHistory.$inferSelect;
 
+// Over-limit status for resources
+export interface OverLimitStatus {
+  users: {
+    isOverLimit: boolean;
+    enabled: number;
+    total: number;
+    limit: number;
+    overBy: number;
+  };
+  servers: {
+    isOverLimit: boolean;
+    enabled: number;
+    total: number;
+    limit: number;
+    overBy: number;
+  };
+}
+
 // License info response for API
 export interface LicenseInfo {
   subscription: Subscription | null;
@@ -95,6 +113,7 @@ export interface LicenseInfo {
   limits: { maxUsers: number; maxServers: number };
   tier: SubscriptionTier;
   tierName: string;
+  overLimit?: OverLimitStatus;
 }
 
 // Limit check response
@@ -146,6 +165,8 @@ export interface AdminUser {
   username?: string;
   role: string[];  // Array of role names
   linked: boolean; // Tide account link status
+  enabled: boolean; // Whether the user account is enabled
+  isAdmin: boolean; // Whether the user is an administrator
 }
 
 // Admin User Update type

@@ -7,6 +7,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Switch } from "@/components/ui/switch";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   Dialog,
   DialogContent,
@@ -37,7 +39,7 @@ import { useToast } from "@/hooks/use-toast";
 import { queryClient } from "@/lib/queryClient";
 import { api } from "@/lib/api";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
-import { Users, Pencil, Search, Shield, User as UserIcon, Plus, Trash2, X, Link, Unlink, Copy, Check } from "lucide-react";
+import { Users, Pencil, Search, Shield, User as UserIcon, Plus, Trash2, X, Link, Unlink, Copy, Check, AlertCircle } from "lucide-react";
 import type { AdminUser } from "@shared/schema";
 import { UpgradeBanner } from "@/components/UpgradeBanner";
 import { RefreshButton } from "@/components/RefreshButton";
@@ -81,10 +83,15 @@ export default function AdminUsers() {
     queryKey: ["/api/admin/license/check/user"],
     queryFn: () => api.admin.license.checkLimit("user"),
   });
+
+  const { data: licenseInfo, refetch: refetchLicense } = useQuery({
+    queryKey: ["/api/admin/license"],
+    queryFn: api.admin.license.get,
+  });
   const isFetchingUsers = useIsFetching({ queryKey: ["/api/admin/users"] }) > 0;
   const { secondsRemaining, refreshNow } = useAutoRefresh({
     intervalSeconds: 15,
-    refresh: () => Promise.all([refetchUsers(), refetchUserLimit()]),
+    refresh: () => Promise.all([refetchUsers(), refetchUserLimit(), refetchLicense()]),
     isBlocked: isFetchingUsers,
   });
 
@@ -147,6 +154,20 @@ export default function AdminUsers() {
     },
     onError: (error: Error) => {
       toast({ title: "Failed to delete user", description: error.message, variant: "destructive" });
+    },
+  });
+
+  const setEnabledMutation = useMutation({
+    mutationFn: ({ userId, enabled }: { userId: string; enabled: boolean }) =>
+      api.admin.users.setEnabled(userId, enabled),
+    onSuccess: (_, { enabled }) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/users"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/license"] });
+      void queryClient.refetchQueries({ queryKey: ["/api/admin/users"] });
+      toast({ title: enabled ? "User enabled" : "User disabled" });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Failed to update user status", description: error.message, variant: "destructive" });
     },
   });
 
@@ -299,6 +320,16 @@ export default function AdminUsers() {
         />
       )}
 
+      {licenseInfo?.overLimit?.users.isOverLimit && (
+        <Alert className="bg-red-50 border-red-200 dark:bg-red-950/20 dark:border-red-800">
+          <AlertCircle className="h-4 w-4 text-red-600 dark:text-red-400" />
+          <AlertDescription className="text-red-800 dark:text-red-200">
+            <strong>User limit exceeded.</strong> You have {licenseInfo.overLimit.users.enabled} enabled users but your plan allows {licenseInfo.overLimit.users.limit}.
+            Please disable {licenseInfo.overLimit.users.overBy} user(s) or upgrade your plan.
+          </AlertDescription>
+        </Alert>
+      )}
+
       <Card>
         <div className="p-4 border-b border-border">
           <div className="relative max-w-sm">
@@ -333,6 +364,7 @@ export default function AdminUsers() {
                   <TableHead>User</TableHead>
                   <TableHead>Roles</TableHead>
                   <TableHead>Account Status</TableHead>
+                  <TableHead>Access</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
               </TableHeader>
@@ -379,7 +411,7 @@ export default function AdminUsers() {
                       </TableCell>
                       <TableCell>
                         {user.linked ? (
-                          <Badge variant="outline" className="bg-green-50 text-green-700 border-green-200">
+                          <Badge variant="outline" className="bg-green-50 text-green-700 border-green-200 dark:bg-green-950/30 dark:text-green-400 dark:border-green-800">
                             <Link className="h-3 w-3 mr-1" />
                             Linked
                           </Badge>
@@ -388,6 +420,24 @@ export default function AdminUsers() {
                             <Unlink className="h-3 w-3 mr-1" />
                             Not linked
                           </Badge>
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        {isAdmin ? (
+                          <span className="text-xs text-muted-foreground">Admin (cannot disable)</span>
+                        ) : (
+                          <div className="flex items-center gap-2">
+                            <Switch
+                              checked={user.enabled}
+                              onCheckedChange={(enabled) =>
+                                setEnabledMutation.mutate({ userId: user.id, enabled })
+                              }
+                              disabled={setEnabledMutation.isPending}
+                            />
+                            <span className={`text-xs ${user.enabled ? "text-green-600 dark:text-green-400" : "text-muted-foreground"}`}>
+                              {user.enabled ? "Enabled" : "Disabled"}
+                            </span>
+                          </div>
                         )}
                       </TableCell>
                       <TableCell className="text-right">
@@ -461,7 +511,7 @@ export default function AdminUsers() {
             <div className="space-y-2">
               <Label>Manage Roles</Label>
               {!editingUser?.linked && (
-                <p className="text-sm text-amber-600">
+                <p className="text-sm text-amber-600 dark:text-amber-400">
                   User must be linked to their Tide account before roles can be assigned.
                 </p>
               )}
@@ -555,7 +605,7 @@ export default function AdminUsers() {
                   </Button>
                   {copyStatus && (
                     <span className="text-sm text-muted-foreground flex items-center gap-1">
-                      <Check className="h-4 w-4 text-green-600" />
+                      <Check className="h-4 w-4 text-green-600 dark:text-green-400" />
                       {copyStatus}
                     </span>
                   )}

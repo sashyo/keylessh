@@ -170,7 +170,7 @@ export default function AdminDashboard() {
         <div className="space-y-1">
           <h1 className="text-2xl font-semibold tracking-tight flex items-center gap-2" data-testid="admin-title">
             <Shield className="h-6 w-6 text-primary" />
-            Admin Dashboard
+            Admin Overview
           </h1>
           <p className="text-muted-foreground">
             System overview and management

@@ -265,8 +265,7 @@ export async function registerRoutes(
             const priceId = stripeSubscription.items.data[0]?.price.id;
             const tier = stripeLib.getTierFromPriceId(priceId || "");
 
-            const currentPeriodEnd =
-              stripeSubscription.items.data[0]?.current_period_end ?? null;
+            const currentPeriodEnd = stripeSubscription.current_period_end ?? null;
 
             await subscriptionStorage.upsertSubscription({
               tier,
@@ -459,6 +458,32 @@ export async function registerRoutes(
         return;
       }
 
+      // Refresh and check if SSH access is blocked due to over-limit
+      const token = req.accessToken;
+      if (token) {
+        try {
+          const users = await tidecloakAdmin.getUsers(token);
+          // Count ALL enabled users (including admins) for the limit check
+          const enabledCount = users.filter(u => u.enabled).length;
+          const subscription = await subscriptionStorage.getSubscription();
+          const tier = (subscription?.tier as SubscriptionTier) || 'free';
+          const tierConfig = subscriptionTiers[tier];
+          const userLimit = tierConfig.maxUsers;
+          const isUsersOverLimit = userLimit !== -1 && enabledCount > userLimit;
+          const serverCounts = await subscriptionStorage.getServerCounts();
+          const serverLimit = tierConfig.maxServers;
+          const isServersOverLimit = serverLimit !== -1 && serverCounts.enabled > serverLimit;
+          await subscriptionStorage.updateOverLimitStatus(isUsersOverLimit, isServersOverLimit);
+        } catch {
+          // If we can't refresh, continue with cached status
+        }
+      }
+      const sshStatus = await subscriptionStorage.isSshBlocked();
+      if (sshStatus.blocked) {
+        res.status(403).json({ message: sshStatus.reason || "SSH access is currently disabled" });
+        return;
+      }
+
       const serverSshUsers = server.sshUsers || [];
       if (!serverSshUsers.includes(sshUser)) {
         res.status(400).json({ message: `SSH user '${sshUser}' is not allowed for this server` });
@@ -537,6 +562,32 @@ export async function registerRoutes(
           return;
         }
 
+        // Refresh and check if SSH access is blocked due to over-limit
+        const token = req.accessToken;
+        if (token) {
+          try {
+            const users = await tidecloakAdmin.getUsers(token);
+            // Count ALL enabled users (including admins) for the limit check
+            const enabledCount = users.filter(u => u.enabled).length;
+            const subscription = await subscriptionStorage.getSubscription();
+            const tier = (subscription?.tier as SubscriptionTier) || 'free';
+            const tierConfig = subscriptionTiers[tier];
+            const userLimit = tierConfig.maxUsers;
+            const isUsersOverLimit = userLimit !== -1 && enabledCount > userLimit;
+            const serverCounts = await subscriptionStorage.getServerCounts();
+            const serverLimit = tierConfig.maxServers;
+            const isServersOverLimit = serverLimit !== -1 && serverCounts.enabled > serverLimit;
+            await subscriptionStorage.updateOverLimitStatus(isUsersOverLimit, isServersOverLimit);
+          } catch {
+            // If we can't refresh, continue with cached status
+          }
+        }
+        const sshStatus = await subscriptionStorage.isSshBlocked();
+        if (sshStatus.blocked) {
+          res.status(403).json({ message: sshStatus.reason || "SSH access is currently disabled" });
+          return;
+        }
+
         // Return server connection details
         // The JWT token from the Authorization header will be used for WebSocket auth
         res.json({
@@ -549,6 +600,46 @@ export async function registerRoutes(
       } catch (error) {
         log(`SSH authorize error: ${error}`);
         res.status(500).json({ message: "Failed to authorize SSH connection" });
+      }
+    }
+  );
+
+  // GET /api/ssh/access-status - Check if SSH access is blocked for the current user
+  app.get(
+    "/api/ssh/access-status",
+    authenticate,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        // Refresh the over-limit status using the user's token for real-time accuracy
+        const token = req.accessToken;
+        if (token) {
+          try {
+            const users = await tidecloakAdmin.getUsers(token);
+            // Count ALL enabled users (including admins) for the limit check
+            // Admins count toward the limit, they just can't be individually disabled
+            const enabledCount = users.filter(u => u.enabled).length;
+            const subscription = await subscriptionStorage.getSubscription();
+            const tier = (subscription?.tier as SubscriptionTier) || 'free';
+            const tierConfig = subscriptionTiers[tier];
+            const userLimit = tierConfig.maxUsers;
+            const isUsersOverLimit = userLimit !== -1 && enabledCount > userLimit;
+            const serverCounts = await subscriptionStorage.getServerCounts();
+            const serverLimit = tierConfig.maxServers;
+            const isServersOverLimit = serverLimit !== -1 && serverCounts.enabled > serverLimit;
+            log(`SSH access check: ${enabledCount} enabled users (limit: ${userLimit}), ${serverCounts.enabled} enabled servers (limit: ${serverLimit}), usersOver: ${isUsersOverLimit}, serversOver: ${isServersOverLimit}`);
+            await subscriptionStorage.updateOverLimitStatus(isUsersOverLimit, isServersOverLimit);
+          } catch (err) {
+            log(`Failed to refresh over-limit status: ${err}`);
+          }
+        } else {
+          log(`SSH access check: no token available`);
+        }
+
+        const status = await subscriptionStorage.isSshBlocked();
+        res.json(status);
+      } catch (error) {
+        log(`Failed to check SSH access status: ${error}`);
+        res.status(500).json({ message: "Failed to check SSH access status" });
       }
     }
   );
@@ -748,10 +839,64 @@ export async function registerRoutes(
 
         await tidecloakAdmin.deleteUser(token, userId);
 
+        // Update the over-limit status after deleting user
+        // Count ALL enabled users (including admins) for the limit check
+        const users = await tidecloakAdmin.getUsers(token);
+        const enabledCount = users.filter(u => u.enabled).length;
+        const subscription = await subscriptionStorage.getSubscription();
+        const tier = (subscription?.tier as SubscriptionTier) || 'free';
+        const tierConfig = subscriptionTiers[tier];
+        const userLimit = tierConfig.maxUsers;
+        const isUsersOverLimit = userLimit !== -1 && enabledCount > userLimit;
+        const serverCounts = await subscriptionStorage.getServerCounts();
+        const serverLimit = tierConfig.maxServers;
+        const isServersOverLimit = serverLimit !== -1 && serverCounts.enabled > serverLimit;
+        await subscriptionStorage.updateOverLimitStatus(isUsersOverLimit, isServersOverLimit);
+
         res.json({ success: true });
       } catch (error) {
         log(`Failed to delete user: ${error}`);
         res.status(400).json({ error: "Failed to delete user" });
+      }
+    }
+  );
+
+  // PUT /api/admin/users/:id/enabled - Enable or disable a user
+  app.put(
+    "/api/admin/users/:id/enabled",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const token = req.accessToken!;
+        const userId = req.params.id;
+        const { enabled } = req.body;
+
+        if (typeof enabled !== "boolean") {
+          res.status(400).json({ error: "enabled must be a boolean" });
+          return;
+        }
+
+        await tidecloakAdmin.setUserEnabled(token, userId, enabled);
+
+        // Update the over-limit status after changing user enabled state
+        // Count ALL enabled users (including admins) for the limit check
+        const users = await tidecloakAdmin.getUsers(token);
+        const enabledCount = users.filter(u => u.enabled).length;
+        const subscription = await subscriptionStorage.getSubscription();
+        const tier = (subscription?.tier as SubscriptionTier) || 'free';
+        const tierConfig = subscriptionTiers[tier];
+        const userLimit = tierConfig.maxUsers;
+        const isUsersOverLimit = userLimit !== -1 && enabledCount > userLimit;
+        const serverCounts = await subscriptionStorage.getServerCounts();
+        const serverLimit = tierConfig.maxServers;
+        const isServersOverLimit = serverLimit !== -1 && serverCounts.enabled > serverLimit;
+        await subscriptionStorage.updateOverLimitStatus(isUsersOverLimit, isServersOverLimit);
+
+        res.json({ success: true, enabled });
+      } catch (error) {
+        log(`Failed to set user enabled status: ${error}`);
+        res.status(400).json({ error: "Failed to update user status" });
       }
     }
   );
@@ -787,6 +932,20 @@ export async function registerRoutes(
         }
 
         await tidecloakAdmin.addUser(token, { username, firstName, lastName, email });
+
+        // Update the over-limit status after adding user
+        // Count ALL enabled users (including admins) for the limit check
+        const updatedUsers = await tidecloakAdmin.getUsers(token);
+        const enabledCount = updatedUsers.filter(u => u.enabled).length;
+        const subscription = await subscriptionStorage.getSubscription();
+        const tier = (subscription?.tier as SubscriptionTier) || 'free';
+        const tierConfig = subscriptionTiers[tier];
+        const userLimit = tierConfig.maxUsers;
+        const isUsersOverLimit = userLimit !== -1 && enabledCount > userLimit;
+        const serverCounts = await subscriptionStorage.getServerCounts();
+        const serverLimit = tierConfig.maxServers;
+        const isServersOverLimit = serverLimit !== -1 && serverCounts.enabled > serverLimit;
+        await subscriptionStorage.updateOverLimitStatus(isUsersOverLimit, isServersOverLimit);
 
         res.json({ message: "User has been added" });
       } catch (error) {
@@ -1361,7 +1520,25 @@ export async function registerRoutes(
     async (req: AuthenticatedRequest, res) => {
       try {
         const limit = parseInt(req.query.limit as string) || 100;
-        const logs = await pendingPolicyStorage.getLogs(limit);
+        const offset = parseInt(req.query.offset as string) || 0;
+        const rawLogs = await pendingPolicyStorage.getLogs(limit, offset);
+        // Map field names to match client API interface
+        const logs = rawLogs.map(log => ({
+          id: log.id,
+          policyId: log.policyRequestId,
+          roleId: log.roleId,
+          action: log.type,
+          performedBy: log.userEmail,
+          performedByEmail: log.userEmail,
+          details: log.details,
+          createdAt: log.timestamp,
+          policyStatus: log.policyStatus,
+          policyThreshold: log.policyThreshold,
+          policyCreatedAt: log.policyCreatedAt,
+          policyRequestedBy: log.policyRequestedBy,
+          approvalCount: log.approvalCount,
+          rejectionCount: log.rejectionCount,
+        }));
         res.json({ logs });
       } catch (error) {
         log(`Failed to fetch policy logs: ${error}`);
@@ -2109,11 +2286,141 @@ export async function registerRoutes(
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
-        // Get user count from TideCloak
+        // Get users from TideCloak and count total/enabled
+        // Admins count toward the limit, they just can't be individually disabled
         const users = await tidecloakAdmin.getUsers(token);
-        const userCount = users.length;
+        const userCounts = {
+          total: users.length, // All users for usage display
+          enabled: users.filter(u => u.enabled).length, // All enabled users (including admins) for over-limit check
+        };
 
-        const licenseInfo = await subscriptionStorage.getLicenseInfo(userCount);
+        // Always validate local subscription against Stripe to ensure consistency
+        if (stripeLib.isStripeConfigured()) {
+          try {
+            const existing = await subscriptionStorage.getSubscription();
+
+            // If we have a Stripe subscription ID, verify it's still valid
+            if (existing?.stripeSubscriptionId) {
+              try {
+                const stripeSubscription = await stripeLib.getSubscription(existing.stripeSubscriptionId);
+                const priceId = stripeSubscription.items.data[0]?.price?.id || null;
+                const now = Math.floor(Date.now() / 1000);
+
+                // Grant paid tier if:
+                // - subscription is active/trialing/past_due, OR
+                // - subscription is canceled but still within the paid period
+                const isActiveSub = ["active", "trialing", "past_due"].includes(stripeSubscription.status);
+                const isCanceledButValid = stripeSubscription.status === "canceled" &&
+                  stripeSubscription.current_period_end &&
+                  stripeSubscription.current_period_end > now;
+                const shouldGrantPaidTier = isActiveSub || isCanceledButValid;
+                const tier = shouldGrantPaidTier && priceId ? stripeLib.getTierFromPriceId(priceId) : "free";
+
+                // Sync current state from Stripe
+                await subscriptionStorage.upsertSubscription({
+                  tier,
+                  stripeCustomerId: typeof stripeSubscription.customer === "string"
+                    ? stripeSubscription.customer
+                    : stripeSubscription.customer?.id || existing.stripeCustomerId,
+                  stripeSubscriptionId: shouldGrantPaidTier ? stripeSubscription.id : null as any,
+                  stripePriceId: shouldGrantPaidTier ? priceId || undefined : null as any,
+                  status: shouldGrantPaidTier ? stripeSubscription.status : "active",
+                  currentPeriodEnd: shouldGrantPaidTier ? stripeSubscription.current_period_end : null as any,
+                  cancelAtPeriodEnd: shouldGrantPaidTier ? stripeSubscription.cancel_at_period_end : false,
+                });
+              } catch (stripeError: any) {
+                // Subscription not found in Stripe - revert to free
+                if (stripeError?.statusCode === 404 || stripeError?.code === "resource_missing") {
+                  log(`Stripe subscription ${existing.stripeSubscriptionId} not found - reverting to free tier`);
+                  await subscriptionStorage.upsertSubscription({
+                    tier: "free",
+                    status: "active",
+                    stripeSubscriptionId: null as any,
+                    stripePriceId: null as any,
+                    currentPeriodEnd: null as any,
+                    cancelAtPeriodEnd: false,
+                  });
+                } else {
+                  throw stripeError;
+                }
+              }
+            } else if (existing?.stripeCustomerId) {
+              // No subscription ID but have customer ID - check for subscriptions
+              const stripeSubscription = await stripeLib.findBestSubscriptionForCustomer(existing.stripeCustomerId);
+              if (stripeSubscription) {
+                const priceId = stripeSubscription.items.data[0]?.price?.id || null;
+                const now = Math.floor(Date.now() / 1000);
+                const isActiveSub = ["active", "trialing", "past_due"].includes(stripeSubscription.status);
+                const isCanceledButValid = stripeSubscription.status === "canceled" &&
+                  stripeSubscription.current_period_end &&
+                  stripeSubscription.current_period_end > now;
+                const shouldGrantPaidTier = isActiveSub || isCanceledButValid;
+                const tier = shouldGrantPaidTier && priceId ? stripeLib.getTierFromPriceId(priceId) : "free";
+
+                await subscriptionStorage.upsertSubscription({
+                  tier,
+                  stripeCustomerId: existing.stripeCustomerId,
+                  stripeSubscriptionId: shouldGrantPaidTier ? stripeSubscription.id : null as any,
+                  stripePriceId: shouldGrantPaidTier ? priceId || undefined : null as any,
+                  status: shouldGrantPaidTier ? stripeSubscription.status : "active",
+                  currentPeriodEnd: shouldGrantPaidTier ? stripeSubscription.current_period_end : null as any,
+                  cancelAtPeriodEnd: shouldGrantPaidTier ? stripeSubscription.cancel_at_period_end : false,
+                });
+              } else {
+                // Customer exists but no active subscription - ensure free tier
+                if (existing.tier !== "free") {
+                  await subscriptionStorage.upsertSubscription({
+                    tier: "free",
+                    status: "active",
+                    stripeSubscriptionId: null as any,
+                    stripePriceId: null as any,
+                    currentPeriodEnd: null as any,
+                    cancelAtPeriodEnd: false,
+                  });
+                }
+              }
+            } else {
+              // No Stripe IDs stored - try to discover by email
+              const email = req.user?.email;
+              if (email) {
+                const customer = await stripeLib.findCustomerByEmail(email);
+                if (customer?.id) {
+                  const stripeSubscription = await stripeLib.findBestSubscriptionForCustomer(customer.id);
+                  if (stripeSubscription) {
+                    const priceId = stripeSubscription.items.data[0]?.price?.id || null;
+                    const now = Math.floor(Date.now() / 1000);
+                    const isActiveSub = ["active", "trialing", "past_due"].includes(stripeSubscription.status);
+                    const isCanceledButValid = stripeSubscription.status === "canceled" &&
+                      stripeSubscription.current_period_end &&
+                      stripeSubscription.current_period_end > now;
+                    const shouldGrantPaidTier = isActiveSub || isCanceledButValid;
+                    const tier = shouldGrantPaidTier && priceId ? stripeLib.getTierFromPriceId(priceId) : "free";
+
+                    await subscriptionStorage.upsertSubscription({
+                      tier,
+                      stripeCustomerId: customer.id,
+                      stripeSubscriptionId: shouldGrantPaidTier ? stripeSubscription.id : null as any,
+                      stripePriceId: shouldGrantPaidTier ? priceId || undefined : null as any,
+                      status: shouldGrantPaidTier ? stripeSubscription.status : "active",
+                      currentPeriodEnd: shouldGrantPaidTier ? stripeSubscription.current_period_end : null as any,
+                      cancelAtPeriodEnd: shouldGrantPaidTier ? stripeSubscription.cancel_at_period_end : false,
+                    });
+                  }
+                }
+              }
+            }
+          } catch (error) {
+            log(`Stripe subscription validation failed: ${error}`);
+          }
+        }
+
+        const licenseInfo = await subscriptionStorage.getLicenseInfo(userCounts);
+
+        // Cache the over-limit status for SSH access control
+        const isUsersOverLimit = licenseInfo.overLimit?.users.isOverLimit || false;
+        const isServersOverLimit = licenseInfo.overLimit?.servers.isOverLimit || false;
+        await subscriptionStorage.updateOverLimitStatus(isUsersOverLimit, isServersOverLimit);
+
         res.json(licenseInfo);
       } catch (error) {
         log(`Failed to fetch license info: ${error}`);
@@ -2174,13 +2481,32 @@ export async function registerRoutes(
         const subscription = await subscriptionStorage.getSubscription();
         const appUrl = process.env.APP_URL || `${req.protocol}://${req.get("host")}`;
 
-        const session = await stripeLib.createCheckoutSession({
-          customerId: subscription?.stripeCustomerId || undefined,
-          customerEmail: subscription?.stripeCustomerId ? undefined : req.user?.email,
-          priceId,
-          successUrl: `${appUrl}/admin/license?success=true`,
-          cancelUrl: `${appUrl}/admin/license?canceled=true`,
-        });
+        let session;
+        try {
+          session = await stripeLib.createCheckoutSession({
+            customerId: subscription?.stripeCustomerId || undefined,
+            customerEmail: subscription?.stripeCustomerId ? undefined : req.user?.email,
+            priceId,
+            successUrl: `${appUrl}/admin/license?success=true&session_id={CHECKOUT_SESSION_ID}`,
+            cancelUrl: `${appUrl}/admin/license?canceled=true`,
+          });
+        } catch (checkoutError: any) {
+          // If customer doesn't exist in Stripe, clear bad ID and retry with email
+          if (checkoutError?.code === "resource_missing" || checkoutError?.message?.includes("No such customer")) {
+            log(`Stripe customer ${subscription?.stripeCustomerId} not found - clearing and using email`);
+            await subscriptionStorage.upsertSubscription({
+              stripeCustomerId: null as any,
+            });
+            session = await stripeLib.createCheckoutSession({
+              customerEmail: req.user?.email,
+              priceId,
+              successUrl: `${appUrl}/admin/license?success=true&session_id={CHECKOUT_SESSION_ID}`,
+              cancelUrl: `${appUrl}/admin/license?canceled=true`,
+            });
+          } else {
+            throw checkoutError;
+          }
+        }
 
         res.json({ url: session.url });
       } catch (error) {
@@ -2255,6 +2581,114 @@ export async function registerRoutes(
       } catch (error) {
         log(`Failed to fetch prices: ${error}`);
         res.status(500).json({ error: "Failed to fetch prices" });
+      }
+    }
+  );
+
+  // POST /api/admin/license/sync - Sync subscription state from a Checkout session
+  app.post(
+    "/api/admin/license/sync",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        if (!stripeLib.isStripeConfigured()) {
+          res.status(503).json({ error: "Stripe is not configured" });
+          return;
+        }
+
+        const { sessionId } = req.body ?? {};
+        if (!sessionId || typeof sessionId !== "string") {
+          res.status(400).json({ error: "sessionId is required" });
+          return;
+        }
+
+        const session = await stripeLib.getCheckoutSession(sessionId);
+
+        if (session.mode !== "subscription" || !session.subscription) {
+          res.status(400).json({ error: "Checkout session is not a subscription session" });
+          return;
+        }
+
+        const subscriptionId =
+          typeof session.subscription === "string" ? session.subscription : session.subscription.id;
+        const customerId =
+          typeof session.customer === "string" ? session.customer : session.customer?.id;
+
+        const stripeSubscription = await stripeLib.getSubscription(subscriptionId);
+        const priceId = stripeSubscription.items.data[0]?.price?.id || null;
+        const tier = priceId ? stripeLib.getTierFromPriceId(priceId) : "free";
+
+        await subscriptionStorage.upsertSubscription({
+          tier,
+          stripeCustomerId: customerId || undefined,
+          stripeSubscriptionId: subscriptionId,
+          stripePriceId: priceId || undefined,
+          status: stripeSubscription.status,
+          currentPeriodEnd: stripeSubscription.current_period_end,
+          cancelAtPeriodEnd: stripeSubscription.cancel_at_period_end,
+        });
+
+        res.json({ success: true, tier });
+      } catch (error) {
+        log(`Failed to sync subscription from Stripe: ${error}`);
+        res.status(500).json({ error: "Failed to sync subscription from Stripe" });
+      }
+    }
+  );
+
+  // POST /api/admin/license/sync-manual - Sync subscription by Stripe subscription ID or customer ID
+  app.post(
+    "/api/admin/license/sync-manual",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        if (!stripeLib.isStripeConfigured()) {
+          res.status(503).json({ error: "Stripe is not configured" });
+          return;
+        }
+
+        const { subscriptionId, customerId } = req.body ?? {};
+
+        if (!subscriptionId && !customerId) {
+          res.status(400).json({ error: "Either subscriptionId or customerId is required" });
+          return;
+        }
+
+        let stripeSubscription;
+
+        if (subscriptionId) {
+          stripeSubscription = await stripeLib.getSubscription(subscriptionId);
+        } else {
+          stripeSubscription = await stripeLib.findBestSubscriptionForCustomer(customerId);
+          if (!stripeSubscription) {
+            res.status(404).json({ error: "No subscription found for this customer" });
+            return;
+          }
+        }
+
+        const priceId = stripeSubscription.items.data[0]?.price?.id || null;
+        const tier = priceId ? stripeLib.getTierFromPriceId(priceId) : "free";
+        const customerIdFromSub = typeof stripeSubscription.customer === "string"
+          ? stripeSubscription.customer
+          : stripeSubscription.customer?.id;
+
+        await subscriptionStorage.upsertSubscription({
+          tier,
+          stripeCustomerId: customerIdFromSub || customerId || undefined,
+          stripeSubscriptionId: stripeSubscription.id,
+          stripePriceId: priceId || undefined,
+          status: stripeSubscription.status,
+          currentPeriodEnd: stripeSubscription.current_period_end,
+          cancelAtPeriodEnd: stripeSubscription.cancel_at_period_end,
+        });
+
+        log(`Manual subscription sync: ${tier} tier, status: ${stripeSubscription.status}`);
+        res.json({ success: true, tier, status: stripeSubscription.status });
+      } catch (error) {
+        log(`Failed to manually sync subscription: ${error}`);
+        res.status(500).json({ error: "Failed to sync subscription from Stripe" });
       }
     }
   );

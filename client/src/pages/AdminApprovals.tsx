@@ -308,8 +308,8 @@ function AccessApprovalsTab() {
                     variant="outline"
                     className={
                       approval.commitReady
-                        ? "bg-green-50 text-green-700 border-green-200"
-                        : "bg-yellow-50 text-yellow-700 border-yellow-200"
+                        ? "bg-green-50 text-green-700 border-green-200 dark:bg-green-950/30 dark:text-green-400 dark:border-green-800"
+                        : "bg-yellow-50 text-yellow-700 border-yellow-200 dark:bg-yellow-950/30 dark:text-yellow-400 dark:border-yellow-800"
                     }
                   >
                     {approval.commitReady ? "Ready to Commit" : "Pending Review"}
@@ -328,7 +328,7 @@ function AccessApprovalsTab() {
                       approval.commitReady ? handleCommit(approval.id) : handleReview(approval.id)
                     }
                     title={approval.commitReady ? "Commit access change" : "Review access request"}
-                    className={approval.commitReady ? "text-cyan-600" : ""}
+                    className={approval.commitReady ? "text-cyan-600 dark:text-cyan-400" : ""}
                   >
                     {approval.commitReady ? (
                       <Upload className="h-4 w-4" />
@@ -361,13 +361,13 @@ function formatPolicyTimestamp(ts: number): string {
 function getPolicyStatusBadge(status: string) {
   switch (status) {
     case "pending":
-      return <Badge variant="outline" className="bg-yellow-50 text-yellow-700 border-yellow-200"><Clock className="h-3 w-3 mr-1" />Pending</Badge>;
+      return <Badge variant="outline" className="bg-yellow-50 text-yellow-700 border-yellow-200 dark:bg-yellow-950/30 dark:text-yellow-400 dark:border-yellow-800"><Clock className="h-3 w-3 mr-1" />Pending</Badge>;
     case "approved":
-      return <Badge variant="outline" className="bg-green-50 text-green-700 border-green-200"><CheckCircle2 className="h-3 w-3 mr-1" />Approved</Badge>;
+      return <Badge variant="outline" className="bg-green-50 text-green-700 border-green-200 dark:bg-green-950/30 dark:text-green-400 dark:border-green-800"><CheckCircle2 className="h-3 w-3 mr-1" />Approved</Badge>;
     case "committed":
-      return <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200"><Check className="h-3 w-3 mr-1" />Committed</Badge>;
+      return <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950/30 dark:text-blue-400 dark:border-blue-800"><Check className="h-3 w-3 mr-1" />Committed</Badge>;
     case "cancelled":
-      return <Badge variant="outline" className="bg-gray-50 text-gray-700 border-gray-200"><XCircle className="h-3 w-3 mr-1" />Cancelled</Badge>;
+      return <Badge variant="outline" className="bg-gray-50 text-gray-700 border-gray-200 dark:bg-gray-900/30 dark:text-gray-400 dark:border-gray-700"><XCircle className="h-3 w-3 mr-1" />Cancelled</Badge>;
     default:
       return <Badge variant="outline">{status}</Badge>;
   }
@@ -689,11 +689,11 @@ function PolicyApprovalsTab() {
               <TableCell>{policy.requestedByEmail || policy.requestedBy}</TableCell>
               <TableCell>
                 <div className="flex items-center gap-2">
-                  <span className="text-green-600">{policy.approvalCount || 0}</span>
+                  <span className="text-green-600 dark:text-green-400">{policy.approvalCount || 0}</span>
                   <span className="text-muted-foreground">/</span>
                   <span>{policy.threshold}</span>
                   {policy.rejectionCount ? (
-                    <span className="text-red-600 text-sm">({policy.rejectionCount} rejected)</span>
+                    <span className="text-red-600 dark:text-red-400 text-sm">({policy.rejectionCount} rejected)</span>
                   ) : null}
                 </div>
               </TableCell>
@@ -720,7 +720,7 @@ function PolicyApprovalsTab() {
                       onClick={() => revokeDecision(policy.id)}
                       disabled={isProcessing}
                       title="Revoke your decision"
-                      className="text-orange-600"
+                      className="text-orange-600 dark:text-orange-400"
                     >
                       <Undo2 className="h-4 w-4" />
                     </Button>
@@ -732,7 +732,7 @@ function PolicyApprovalsTab() {
                       onClick={() => commitPolicies([policy.id])}
                       disabled={isProcessing}
                       title="Commit policy"
-                      className="text-green-600"
+                      className="text-green-600 dark:text-green-400"
                     >
                       <Upload className="h-4 w-4" />
                     </Button>
@@ -751,7 +751,7 @@ function PolicyApprovalsTab() {
                     onClick={() => deletePolicy(policy.id)}
                     disabled={isProcessing}
                     title="Delete request"
-                    className="text-red-600"
+                    className="text-red-600 dark:text-red-400"
                   >
                     <Trash2 className="h-4 w-4" />
                   </Button>
@@ -790,8 +790,8 @@ function PolicyApprovalsTab() {
                 <div>
                   <p className="text-muted-foreground">Progress</p>
                   <p className="font-medium">
-                    <span className="text-green-600">{selectedPolicy.approvalCount || 0}</span> approved,{" "}
-                    <span className="text-red-600">{selectedPolicy.rejectionCount || 0}</span> rejected
+                    <span className="text-green-600 dark:text-green-400">{selectedPolicy.approvalCount || 0}</span> approved,{" "}
+                    <span className="text-red-600 dark:text-red-400">{selectedPolicy.rejectionCount || 0}</span> rejected
                   </p>
                 </div>
                 <div>
@@ -808,11 +808,11 @@ function PolicyApprovalsTab() {
                       <div key={i} className="flex items-center justify-between text-sm">
                         <span>{decision.decidedByEmail || decision.decidedBy}</span>
                         {decision.decision === "approved" ? (
-                          <Badge variant="outline" className="bg-green-50 text-green-700">
+                          <Badge variant="outline" className="bg-green-50 text-green-700 dark:bg-green-950/30 dark:text-green-400">
                             <Check className="h-3 w-3 mr-1" />Approved
                           </Badge>
                         ) : (
-                          <Badge variant="outline" className="bg-red-50 text-red-700">
+                          <Badge variant="outline" className="bg-red-50 text-red-700 dark:bg-red-950/30 dark:text-red-400">
                             <X className="h-3 w-3 mr-1" />Rejected
                           </Badge>
                         )}
@@ -882,7 +882,7 @@ function PolicyApprovalsTab() {
                           }
                         }}
                         disabled={isProcessing}
-                        className="text-orange-600 border-orange-300 hover:bg-orange-50"
+                        className="text-orange-600 border-orange-300 hover:bg-orange-50 dark:text-orange-400 dark:border-orange-700 dark:hover:bg-orange-950/30"
                       >
                         <Undo2 className="h-4 w-4 mr-1" />
                         {isProcessing ? "Revoking..." : "Revoke Decision"}

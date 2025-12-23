@@ -12,6 +12,30 @@ export default function AuthRedirect() {
     if (params.get("auth") === "failed") {
       sessionStorage.setItem("tokenExpired", "true");
       logout();
+      return;
+    }
+
+    // Check for disabled account error from TideCloak/Keycloak
+    const error = params.get("error");
+    const errorDescription = params.get("error_description") || "";
+
+    // Keycloak returns various error codes for disabled accounts
+    if (error) {
+      const isDisabledAccount =
+        errorDescription.toLowerCase().includes("disabled") ||
+        errorDescription.toLowerCase().includes("account is not fully set up") ||
+        errorDescription.toLowerCase().includes("user is disabled") ||
+        error === "access_denied";
+
+      if (isDisabledAccount) {
+        sessionStorage.setItem("accountDisabled", "true");
+        logout();
+        return;
+      }
+
+      // Generic auth error - treat as session issue
+      sessionStorage.setItem("authError", errorDescription || "Authentication failed");
+      logout();
     }
   }, [logout]);
 
