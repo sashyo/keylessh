@@ -4,9 +4,11 @@ import type { Server, IncomingMessage } from "http";
 import type { Duplex } from "stream";
 import { createHmac } from "crypto";
 import { log } from "./logger";
-import { storage } from "./storage";
+import { storage, subscriptionStorage } from "./storage";
 import { verifyTideCloakToken, type TokenPayload } from "./lib/auth/tideJWT";
 import { getAllowedSshUsersFromToken } from "./lib/auth/sshUsers";
+import { tidecloakAdmin } from "./auth";
+import { subscriptionTiers, type SubscriptionTier } from "@shared/schema";
 
 // External bridge configuration
 const BRIDGE_URL = process.env.BRIDGE_URL; // e.g., wss://keylessh-tcp-bridge.azurecontainerapps.io
@@ -221,6 +223,32 @@ export function setupWSBridge(httpServer: Server): WebSocketServer {
       if (configuredServer.host !== host || (configuredServer.port ?? 22) !== port) {
         log(`WebSocket connection rejected: host/port mismatch for server ${serverId}`);
         ws.close(4003, "Invalid server connection details");
+        return;
+      }
+
+      // Refresh and check if SSH access is blocked due to over-limit
+      if (token) {
+        try {
+          const users = await tidecloakAdmin.getUsers(token);
+          // Count ALL enabled users (including admins) for the limit check
+          const enabledCount = users.filter(u => u.enabled).length;
+          const subscription = await subscriptionStorage.getSubscription();
+          const tier = (subscription?.tier as SubscriptionTier) || 'free';
+          const tierConfig = subscriptionTiers[tier];
+          const userLimit = tierConfig.maxUsers;
+          const isUsersOverLimit = userLimit !== -1 && enabledCount > userLimit;
+          const serverCounts = await subscriptionStorage.getServerCounts();
+          const serverLimit = tierConfig.maxServers;
+          const isServersOverLimit = serverLimit !== -1 && serverCounts.enabled > serverLimit;
+          await subscriptionStorage.updateOverLimitStatus(isUsersOverLimit, isServersOverLimit);
+        } catch {
+          // If we can't refresh, continue with cached status
+        }
+      }
+      const sshStatus = await subscriptionStorage.isSshBlocked();
+      if (sshStatus.blocked) {
+        log(`WebSocket connection rejected: SSH access blocked - ${sshStatus.reason}`);
+        ws.close(4003, "SSH access is currently disabled");
         return;
       }
 

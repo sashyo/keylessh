@@ -35,7 +35,8 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { queryClient, apiRequest } from "@/lib/queryClient";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
-import { Plus, Pencil, Trash2, Server, Search } from "lucide-react";
+import { Plus, Pencil, Trash2, Server, Search, AlertCircle } from "lucide-react";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import type { Server as ServerType, ServerStatus } from "@shared/schema";
 import { api } from "@/lib/api";
 import { UpgradeBanner } from "@/components/UpgradeBanner";
@@ -200,10 +201,16 @@ export default function AdminServers() {
     queryKey: ["/api/admin/license/check/server"],
     queryFn: () => api.admin.license.checkLimit("server"),
   });
+
+  const { data: licenseInfo, refetch: refetchLicense } = useQuery({
+    queryKey: ["/api/admin/license"],
+    queryFn: api.admin.license.get,
+  });
+
   const isFetching = useIsFetching({ queryKey: ["/api/admin/servers"] }) > 0;
   const { secondsRemaining, refreshNow } = useAutoRefresh({
     intervalSeconds: 15,
-    refresh: () => Promise.all([refetch(), refetchServerStatus(), refetchServerLimit()]),
+    refresh: () => Promise.all([refetch(), refetchServerStatus(), refetchServerLimit(), refetchLicense()]),
     isBlocked: isFetching,
   });
 
@@ -272,6 +279,21 @@ export default function AdminServers() {
     },
     onError: (error) => {
       toast({ title: "Failed to delete server", description: error.message, variant: "destructive" });
+    },
+  });
+
+  const toggleEnabledMutation = useMutation({
+    mutationFn: async ({ id, enabled }: { id: string; enabled: boolean }) => {
+      return apiRequest("PATCH", `/api/admin/servers/${id}`, { enabled });
+    },
+    onSuccess: (_, { enabled }) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/servers"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/license"] });
+      void queryClient.refetchQueries({ queryKey: ["/api/admin/servers"] });
+      toast({ title: enabled ? "Server enabled" : "Server disabled" });
+    },
+    onError: (error) => {
+      toast({ title: "Failed to update server", description: error.message, variant: "destructive" });
     },
   });
 
@@ -376,6 +398,16 @@ export default function AdminServers() {
         />
       )}
 
+      {licenseInfo?.overLimit?.servers.isOverLimit && (
+        <Alert className="bg-red-50 border-red-200 dark:bg-red-950/20 dark:border-red-800">
+          <AlertCircle className="h-4 w-4 text-red-600 dark:text-red-400" />
+          <AlertDescription className="text-red-800 dark:text-red-200">
+            <strong>Server limit exceeded.</strong> You have {licenseInfo.overLimit.servers.enabled} enabled servers but your plan allows {licenseInfo.overLimit.servers.limit}.
+            Please disable {licenseInfo.overLimit.servers.overBy} server(s) or upgrade your plan.
+          </AlertDescription>
+        </Alert>
+      )}
+
       <Card>
         <CardHeader className="pb-4">
           <div className="flex items-center gap-4">
@@ -412,6 +444,7 @@ export default function AdminServers() {
                   <TableHead>Server</TableHead>
                   <TableHead>Environment</TableHead>
                   <TableHead>SSH Users</TableHead>
+                  <TableHead>Enabled</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
@@ -445,6 +478,15 @@ export default function AdminServers() {
                           </Badge>
                         )}
                       </div>
+                    </TableCell>
+                    <TableCell>
+                      <Switch
+                        checked={server.enabled}
+                        onCheckedChange={(enabled) =>
+                          toggleEnabledMutation.mutate({ id: server.id, enabled })
+                        }
+                        disabled={toggleEnabledMutation.isPending}
+                      />
                     </TableCell>
                     <TableCell>
                       {server.enabled ? (

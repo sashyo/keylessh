@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useParams, useSearch } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import { Terminal as XTerm } from "@xterm/xterm";
+import { api } from "@/lib/api";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
@@ -84,6 +85,13 @@ export default function Console() {
       queryKey: ["/api/servers", params.serverId],
     }
   );
+
+  const { data: sshAccessStatus } = useQuery({
+    queryKey: ["/api/ssh/access-status"],
+    queryFn: api.ssh.getAccessStatus,
+  });
+
+  const isSshBlocked = sshAccessStatus?.blocked === true;
 
   // SSH session hook
   const { connect, disconnect, send, resize, setDimensions, status, error } =
@@ -352,6 +360,38 @@ export default function Console() {
         </div>
         <div className="flex-1 terminal-surface flex items-center justify-center">
           <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+        </div>
+      </div>
+    );
+  }
+
+  if (isSshBlocked) {
+    return (
+      <div className="h-full flex flex-col">
+        <div className="h-12 px-4 flex items-center justify-between border-b border-border bg-background">
+          <div className="flex items-center gap-4">
+            <Link href="/app">
+              <Button size="icon" variant="ghost">
+                <ArrowLeft className="h-4 w-4" />
+              </Button>
+            </Link>
+            <span className="font-medium">{server?.name}</span>
+          </div>
+        </div>
+        <div className="flex-1 terminal-surface flex items-center justify-center">
+          <div className="text-center max-w-md p-6 space-y-4">
+            <WifiOff className="h-12 w-12 mx-auto text-destructive" />
+            <h2 className="text-xl font-semibold">SSH Access Disabled</h2>
+            <p className="text-muted-foreground">
+              {sshAccessStatus?.reason || "Your organization has exceeded the user limit for the current plan. Please contact an administrator to enable SSH access."}
+            </p>
+            <Link href="/app">
+              <Button variant="outline">
+                <ArrowLeft className="h-4 w-4 mr-2" />
+                Back to Dashboard
+              </Button>
+            </Link>
+          </div>
         </div>
       </div>
     );

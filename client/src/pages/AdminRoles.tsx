@@ -759,7 +759,7 @@ export default function AdminRoles() {
                           </div>
                         )}
 
-                        <p className="text-xs text-muted-foreground bg-amber-50 text-amber-800 p-2 rounded">
+                        <p className="text-xs bg-amber-50 text-amber-800 dark:bg-amber-950/30 dark:text-amber-400 p-2 rounded">
                           Updating the policy will create a new pending approval request that must be approved by admins.
                         </p>
                       </div>

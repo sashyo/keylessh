@@ -1,6 +1,12 @@
 import Stripe from 'stripe';
 import type { SubscriptionTier } from '@shared/schema';
 
+// Extended subscription type with period fields that may not be in newer Stripe type definitions
+export type SubscriptionWithPeriod = Stripe.Subscription & {
+  current_period_end?: number;
+  current_period_start?: number;
+};
+
 // Initialize Stripe with secret key from environment
 const stripeSecretKey = process.env.STRIPE_SECRET_KEY;
 
@@ -91,12 +97,61 @@ export async function createBillingPortalSession(
 /**
  * Get subscription details from Stripe
  */
-export async function getSubscription(subscriptionId: string): Promise<Stripe.Subscription> {
+export async function getSubscription(subscriptionId: string): Promise<SubscriptionWithPeriod> {
   if (!stripe) {
     throw new Error('Stripe is not configured');
   }
 
-  return stripe.subscriptions.retrieve(subscriptionId);
+  return stripe.subscriptions.retrieve(subscriptionId) as Promise<SubscriptionWithPeriod>;
+}
+
+/**
+ * Find a Stripe customer by email (best-effort).
+ */
+export async function findCustomerByEmail(email: string): Promise<Stripe.Customer | null> {
+  if (!stripe) {
+    throw new Error("Stripe is not configured");
+  }
+
+  const customers = await stripe.customers.list({ email, limit: 1 });
+  return customers.data[0] ?? null;
+}
+
+/**
+ * Get the most relevant subscription for a customer.
+ * Prefers active/trialing/past_due subscriptions, otherwise returns the newest subscription if any.
+ */
+export async function findBestSubscriptionForCustomer(customerId: string): Promise<SubscriptionWithPeriod | null> {
+  if (!stripe) {
+    throw new Error("Stripe is not configured");
+  }
+
+  const subs = await stripe.subscriptions.list({
+    customer: customerId,
+    status: "all",
+    limit: 10,
+    expand: ["data.items.data.price"],
+  });
+
+  if (!subs.data.length) return null;
+
+  const preferred = subs.data.find(
+    (s) => s.status === "active" || s.status === "trialing" || s.status === "past_due",
+  );
+  return (preferred ?? subs.data[0] ?? null) as SubscriptionWithPeriod | null;
+}
+
+/**
+ * Get Checkout session details from Stripe
+ */
+export async function getCheckoutSession(sessionId: string): Promise<Stripe.Checkout.Session> {
+  if (!stripe) {
+    throw new Error('Stripe is not configured');
+  }
+
+  return stripe.checkout.sessions.retrieve(sessionId, {
+    expand: ["subscription", "customer"],
+  });
 }
 
 /**

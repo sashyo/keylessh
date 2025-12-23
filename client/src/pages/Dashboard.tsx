@@ -6,15 +6,18 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Server, Terminal, Clock, Activity, ArrowRight, Wifi, WifiOff, HelpCircle } from "lucide-react";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Server, Terminal, Clock, Activity, ArrowRight, Wifi, WifiOff, HelpCircle, AlertCircle } from "lucide-react";
 import { useCallback, useState } from "react";
 import type { ServerWithAccess, ActiveSession } from "@shared/schema";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 import { RefreshButton } from "@/components/RefreshButton";
+import { api } from "@/lib/api";
 
-function ServerCard({ server }: { server: ServerWithAccess }) {
+function ServerCard({ server, sshBlocked }: { server: ServerWithAccess; sshBlocked?: boolean }) {
   const [selectedUser, setSelectedUser] = useState<string>(server.allowedSshUsers[0] || "");
   const hasAnySshUser = server.allowedSshUsers.length > 0;
+  const isDisabled = !server.enabled || server.status === "offline" || !selectedUser || sshBlocked;
 
   return (
     <Card className="group" data-testid={`server-card-${server.id}`}>
@@ -87,17 +90,28 @@ function ServerCard({ server }: { server: ServerWithAccess }) {
           )}
         </div>
 
-        <Link href={`/app/console?serverId=${encodeURIComponent(server.id)}&user=${encodeURIComponent(selectedUser)}`}>
+        {isDisabled ? (
           <Button
             className="w-full gap-2"
-            disabled={!server.enabled || server.status === "offline" || !selectedUser}
+            disabled
             data-testid={`connect-button-${server.id}`}
           >
             <Terminal className="h-4 w-4" />
-            Connect
+            {sshBlocked ? "SSH Disabled" : "Connect"}
             <ArrowRight className="h-4 w-4" />
           </Button>
-        </Link>
+        ) : (
+          <Link href={`/app/console?serverId=${encodeURIComponent(server.id)}&user=${encodeURIComponent(selectedUser)}`}>
+            <Button
+              className="w-full gap-2"
+              data-testid={`connect-button-${server.id}`}
+            >
+              <Terminal className="h-4 w-4" />
+              Connect
+              <ArrowRight className="h-4 w-4" />
+            </Button>
+          </Link>
+        )}
       </CardContent>
     </Card>
   );
@@ -166,7 +180,7 @@ function SessionItem({ session }: { session: ActiveSession }) {
 
 export default function Dashboard() {
   const { user } = useAuth();
-  
+
   const { data: servers, isLoading: serversLoading, refetch: refetchServers } = useQuery<ServerWithAccess[]>({
     queryKey: ["/api/servers"],
   });
@@ -174,6 +188,13 @@ export default function Dashboard() {
   const { data: sessions, isLoading: sessionsLoading, refetch: refetchSessions } = useQuery<ActiveSession[]>({
     queryKey: ["/api/sessions"],
   });
+
+  const { data: sshAccessStatus } = useQuery({
+    queryKey: ["/api/ssh/access-status"],
+    queryFn: api.ssh.getAccessStatus,
+  });
+
+  const isSshBlocked = sshAccessStatus?.blocked === true;
 
   const isFetchingServers = useIsFetching({ queryKey: ["/api/servers"] }) > 0;
   const isFetchingSessions = useIsFetching({ queryKey: ["/api/sessions"] }) > 0;
@@ -212,6 +233,16 @@ export default function Dashboard() {
         />
       </div>
 
+      {isSshBlocked && (
+        <Alert className="bg-red-50 border-red-200 dark:bg-red-950/20 dark:border-red-800">
+          <AlertCircle className="h-4 w-4 text-red-600 dark:text-red-400" />
+          <AlertDescription className="text-red-800 dark:text-red-200">
+            <strong>SSH access disabled.</strong>{" "}
+            {sshAccessStatus?.reason || "Your organization has exceeded the user limit. Please contact an administrator."}
+          </AlertDescription>
+        </Alert>
+      )}
+
       {activeSessions.length > 0 && (
         <div className="space-y-4">
           <div className="flex items-center justify-between">
@@ -249,7 +280,7 @@ export default function Dashboard() {
         ) : servers && servers.length > 0 ? (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {servers.map((server) => (
-              <ServerCard key={server.id} server={server} />
+              <ServerCard key={server.id} server={server} sshBlocked={isSshBlocked} />
             ))}
           </div>
         ) : (

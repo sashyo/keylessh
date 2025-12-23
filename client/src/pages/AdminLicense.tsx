@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { useEffect } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -142,27 +142,55 @@ function TierCard({
 export default function AdminLicense() {
   const { toast } = useToast();
   const [location] = useLocation();
+  const queryClient = useQueryClient();
   const enterpriseContactUrl = import.meta.env.VITE_ENTERPRISE_CONTACT_URL as string | undefined;
 
   // Check for success/canceled query params
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    if (params.get("success") === "true") {
+    const success = params.get("success") === "true";
+    const canceled = params.get("canceled") === "true";
+    const sessionId = params.get("session_id");
+
+    if (!success && !canceled) return;
+
+    const run = async () => {
+      if (canceled) {
+        toast({
+          title: "Checkout canceled",
+          description: "You can try again when you're ready.",
+          variant: "destructive",
+        });
+        window.history.replaceState({}, "", "/admin/license");
+        return;
+      }
+
+      if (success && sessionId) {
+        try {
+          await api.admin.license.syncCheckout(sessionId);
+          await Promise.all([
+            queryClient.invalidateQueries({ queryKey: ["/api/admin/license"] }),
+            queryClient.invalidateQueries({ queryKey: ["/api/admin/license/billing"] }),
+          ]);
+        } catch (error) {
+          toast({
+            title: "Subscription updated in Stripe",
+            description: "Sync to the app is pending. Check your Stripe webhook configuration.",
+            variant: "destructive",
+          });
+        }
+      }
+
       toast({
         title: "Subscription updated",
         description: "Your subscription has been successfully updated.",
       });
-      // Clean up URL
+
       window.history.replaceState({}, "", "/admin/license");
-    } else if (params.get("canceled") === "true") {
-      toast({
-        title: "Checkout canceled",
-        description: "You can try again when you're ready.",
-        variant: "destructive",
-      });
-      window.history.replaceState({}, "", "/admin/license");
-    }
-  }, [toast]);
+    };
+
+    void run();
+  }, [queryClient, toast]);
 
   const { data: licenseInfo, isLoading: licenseLoading } = useQuery({
     queryKey: ["/api/admin/license"],
@@ -233,6 +261,23 @@ export default function AdminLicense() {
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>
             Stripe is not configured. Contact your administrator to enable subscription management.
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {/* Over-limit warning */}
+      {(licenseInfo?.overLimit?.users.isOverLimit || licenseInfo?.overLimit?.servers.isOverLimit) && (
+        <Alert className="bg-red-50 border-red-200 dark:bg-red-950/20 dark:border-red-800">
+          <AlertCircle className="h-4 w-4 text-red-600 dark:text-red-400" />
+          <AlertDescription className="text-red-800 dark:text-red-200">
+            <strong>Resource limit exceeded.</strong>{" "}
+            {licenseInfo?.overLimit?.users.isOverLimit && (
+              <>You have {licenseInfo.overLimit.users.enabled} enabled users but your plan allows {licenseInfo.overLimit.users.limit}. </>
+            )}
+            {licenseInfo?.overLimit?.servers.isOverLimit && (
+              <>You have {licenseInfo.overLimit.servers.enabled} enabled servers but your plan allows {licenseInfo.overLimit.servers.limit}. </>
+            )}
+            Please disable excess resources or upgrade your plan.
           </AlertDescription>
         </Alert>
       )}

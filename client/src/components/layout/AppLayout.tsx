@@ -43,7 +43,7 @@ const adminNavGroups = [
   {
     label: "Infrastructure",
     items: [
-      { title: "Dashboard", url: "/admin", icon: Shield },
+      { title: "Overview", url: "/admin", icon: Shield },
       { title: "Servers", url: "/admin/servers", icon: Server },
       { title: "Sessions", url: "/admin/sessions", icon: Activity },
     ],

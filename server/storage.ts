@@ -196,7 +196,10 @@ sqlite.exec(`
     policy_request_id TEXT NOT NULL,
     user_email TEXT NOT NULL,
     role_id TEXT,
-    details TEXT
+    details TEXT,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'committed', 'cancelled')),
+    approval_count INTEGER NOT NULL DEFAULT 0,
+    threshold INTEGER NOT NULL DEFAULT 1
   );
   CREATE INDEX IF NOT EXISTS idx_ssh_policy_logs_timestamp ON ssh_policy_logs(timestamp DESC);
 
@@ -268,6 +271,23 @@ try {
   const hasPolicyData = policyColumns.some((c) => c.name === "policy_data");
   if (!hasPolicyData) {
     sqlite.prepare(`ALTER TABLE ssh_policies ADD COLUMN policy_data TEXT`).run();
+  }
+} catch {
+  // Ignore migration errors; queries will surface issues.
+}
+
+// Migration: Add users_over_limit and servers_over_limit columns to subscriptions for SSH access control
+try {
+  const subColumns = sqlite
+    .prepare(`PRAGMA table_info(subscriptions)`)
+    .all() as Array<{ name: string }>;
+  const hasUsersOverLimit = subColumns.some((c) => c.name === "users_over_limit");
+  if (!hasUsersOverLimit) {
+    sqlite.prepare(`ALTER TABLE subscriptions ADD COLUMN users_over_limit INTEGER DEFAULT 0`).run();
+  }
+  const hasServersOverLimit = subColumns.some((c) => c.name === "servers_over_limit");
+  if (!hasServersOverLimit) {
+    sqlite.prepare(`ALTER TABLE subscriptions ADD COLUMN servers_over_limit INTEGER DEFAULT 0`).run();
   }
 } catch {
   // Ignore migration errors; queries will surface issues.
@@ -788,11 +808,12 @@ export class PendingPolicyStorage {
       VALUES (?, ?, ?, ?, ?, ?)
     `).run(policy.id, policy.roleId, policy.requestedBy, policy.requestedByEmail || null, policy.policyRequestData, policy.threshold || 1);
 
-    // Log the creation
+    // Log the creation with approval_count=0 at time of creation
+    const threshold = policy.threshold || 1;
     sqlite.prepare(`
-      INSERT INTO ssh_policy_logs (type, policy_request_id, user_email, role_id, details)
-      VALUES ('created', ?, ?, ?, ?)
-    `).run(policy.id, policy.requestedByEmail || policy.requestedBy, policy.roleId, JSON.stringify({ threshold: policy.threshold || 1 }));
+      INSERT INTO ssh_policy_logs (type, policy_request_id, user_email, role_id, details, status, approval_count, threshold)
+      VALUES ('created', ?, ?, ?, ?, 'pending', 0, ?)
+    `).run(policy.id, policy.requestedByEmail || policy.requestedBy, policy.roleId, JSON.stringify({ threshold }), threshold);
 
     return {
       ...policy,
@@ -905,18 +926,24 @@ export class PendingPolicyStorage {
       ON CONFLICT(policy_request_id, user_vuid) DO UPDATE SET decision = excluded.decision, created_at = strftime('%s', 'now')
     `).run(decision.policyRequestId, decision.userVuid, decision.userEmail, decision.decision);
 
-    // Log the decision
-    const logType = decision.decision === 1 ? "approved" : "denied";
+    // Refetch to get updated counts after this decision
     const policy = await this.getPendingPolicy(decision.policyRequestId);
-    sqlite.prepare(`
-      INSERT INTO ssh_policy_logs (type, policy_request_id, user_email, role_id)
-      VALUES (?, ?, ?, ?)
-    `).run(logType, decision.policyRequestId, decision.userEmail, policy?.roleId || null);
+    const logType = decision.decision === 1 ? "approved" : "denied";
+    const approvalCount = policy?.approvalCount || 0;
+    const threshold = policy?.threshold || 1;
 
-    // Check if threshold is met
-    if (policy && policy.approvalCount && policy.approvalCount + 1 >= policy.threshold) {
+    // Calculate what status will be after this action
+    let statusAfterAction = "pending";
+    if (decision.decision === 1 && approvalCount >= threshold) {
+      statusAfterAction = "approved";
       await this.updateStatus(decision.policyRequestId, "approved");
     }
+
+    // Log the decision with status and counts at time of action
+    sqlite.prepare(`
+      INSERT INTO ssh_policy_logs (type, policy_request_id, user_email, role_id, status, approval_count, threshold)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(logType, decision.policyRequestId, decision.userEmail, policy?.roleId || null, statusAfterAction, approvalCount, threshold);
   }
 
   // Update policy status
@@ -980,11 +1007,11 @@ export class PendingPolicyStorage {
 
     await this.updateStatus(id, "committed");
 
-    // Log the commit
+    // Log the commit with status and counts at time of action
     sqlite.prepare(`
-      INSERT INTO ssh_policy_logs (type, policy_request_id, user_email, role_id)
-      VALUES ('committed', ?, ?, ?)
-    `).run(id, userEmail, policy.roleId);
+      INSERT INTO ssh_policy_logs (type, policy_request_id, user_email, role_id, status, approval_count, threshold)
+      VALUES ('committed', ?, ?, ?, 'committed', ?, ?)
+    `).run(id, userEmail, policy.roleId, policy.approvalCount || 0, policy.threshold);
   }
 
   // Cancel a pending policy
@@ -994,18 +1021,25 @@ export class PendingPolicyStorage {
 
     await this.updateStatus(id, "cancelled");
 
-    // Log the cancellation
+    // Log the cancellation with status and counts at time of action
     sqlite.prepare(`
-      INSERT INTO ssh_policy_logs (type, policy_request_id, user_email, role_id)
-      VALUES ('cancelled', ?, ?, ?)
-    `).run(id, userEmail, policy.roleId);
+      INSERT INTO ssh_policy_logs (type, policy_request_id, user_email, role_id, status, approval_count, threshold)
+      VALUES ('cancelled', ?, ?, ?, 'cancelled', ?, ?)
+    `).run(id, userEmail, policy.roleId, policy.approvalCount || 0, policy.threshold);
   }
 
-  // Get policy logs
-  async getLogs(limit: number = 100): Promise<any[]> {
+  // Get policy logs (full audit trail showing all actions)
+  async getLogs(limit: number = 100, offset: number = 0): Promise<any[]> {
     const rows = sqlite.prepare(`
-      SELECT * FROM ssh_policy_logs ORDER BY timestamp DESC LIMIT ?
-    `).all(limit) as any[];
+      SELECT
+        l.*,
+        p.created_at as policy_created_at,
+        p.requested_by_email as policy_requested_by
+      FROM ssh_policy_logs l
+      LEFT JOIN pending_ssh_policies p ON l.policy_request_id = p.id
+      ORDER BY l.timestamp DESC
+      LIMIT ? OFFSET ?
+    `).all(limit, offset) as any[];
 
     return rows.map(row => ({
       id: row.id,
@@ -1015,6 +1049,11 @@ export class PendingPolicyStorage {
       userEmail: row.user_email,
       roleId: row.role_id,
       details: row.details,
+      policyStatus: row.status,
+      policyThreshold: row.threshold,
+      policyCreatedAt: row.policy_created_at,
+      policyRequestedBy: row.policy_requested_by,
+      approvalCount: row.approval_count || 0,
     }));
   }
 }
@@ -1354,6 +1393,25 @@ export class SubscriptionStorage {
     return result.count;
   }
 
+  // Get enabled server count
+  async getEnabledServerCount(): Promise<number> {
+    const result = sqlite.prepare(`
+      SELECT COUNT(*) as count FROM servers WHERE enabled = 1
+    `).get() as { count: number };
+    return result.count;
+  }
+
+  // Get server counts (total and enabled)
+  async getServerCounts(): Promise<{ total: number; enabled: number }> {
+    const result = sqlite.prepare(`
+      SELECT
+        COUNT(*) as total,
+        SUM(CASE WHEN enabled = 1 THEN 1 ELSE 0 END) as enabled
+      FROM servers
+    `).get() as { total: number; enabled: number };
+    return { total: result.total, enabled: result.enabled || 0 };
+  }
+
   // Check if can add a resource (user or server)
   async checkCanAdd(resource: 'user' | 'server', currentCount: number): Promise<LimitCheck> {
     const subscription = await this.getSubscription();
@@ -1374,22 +1432,104 @@ export class SubscriptionStorage {
   }
 
   // Get full license info
-  async getLicenseInfo(userCount: number): Promise<LicenseInfo> {
+  async getLicenseInfo(
+    userCounts: { total: number; enabled: number }
+  ): Promise<LicenseInfo> {
     const subscription = await this.getSubscription();
     const tier: SubscriptionTier = (subscription?.tier as SubscriptionTier) || 'free';
     const tierConfig = subscriptionTiers[tier];
-    const serverCount = await this.getServerCount();
+    const serverCounts = await this.getServerCounts();
+
+    const userLimit = tierConfig.maxUsers === -1 ? Infinity : tierConfig.maxUsers;
+    const serverLimit = tierConfig.maxServers === -1 ? Infinity : tierConfig.maxServers;
+
+    // Calculate over-limit status
+    const userOverBy = userLimit === Infinity ? 0 : Math.max(0, userCounts.enabled - userLimit);
+    const serverOverBy = serverLimit === Infinity ? 0 : Math.max(0, serverCounts.enabled - serverLimit);
 
     return {
       subscription,
-      usage: { users: userCount, servers: serverCount },
+      usage: { users: userCounts.total, servers: serverCounts.total },
       limits: {
-        maxUsers: tierConfig.maxUsers === -1 ? Infinity : tierConfig.maxUsers,
-        maxServers: tierConfig.maxServers === -1 ? Infinity : tierConfig.maxServers,
+        maxUsers: userLimit,
+        maxServers: serverLimit,
       },
       tier,
       tierName: tierConfig.name,
+      overLimit: {
+        users: {
+          isOverLimit: userOverBy > 0,
+          enabled: userCounts.enabled,
+          total: userCounts.total,
+          limit: userLimit === Infinity ? -1 : userLimit,
+          overBy: userOverBy,
+        },
+        servers: {
+          isOverLimit: serverOverBy > 0,
+          enabled: serverCounts.enabled,
+          total: serverCounts.total,
+          limit: serverLimit === Infinity ? -1 : serverLimit,
+          overBy: serverOverBy,
+        },
+      },
     };
+  }
+
+  // Update the cached over-limit status for SSH access control
+  async updateOverLimitStatus(usersOverLimit: boolean, serversOverLimit: boolean): Promise<void> {
+    const subscription = await this.getSubscription();
+    if (!subscription) return;
+
+    sqlite.prepare(`
+      UPDATE subscriptions SET users_over_limit = ?, servers_over_limit = ? WHERE id = ?
+    `).run(usersOverLimit ? 1 : 0, serversOverLimit ? 1 : 0, subscription.id);
+  }
+
+  // Check if SSH access is blocked due to being over limit
+  async isSshBlocked(): Promise<{ blocked: boolean; reason?: string }> {
+    const subscription = await this.getSubscription();
+    if (!subscription) {
+      return { blocked: false };
+    }
+
+    // Get the tier limits
+    const tier: SubscriptionTier = (subscription.tier as SubscriptionTier) || 'free';
+    const tierConfig = subscriptionTiers[tier];
+    const serverLimit = tierConfig.maxServers;
+
+    // Real-time check for servers (we have this data locally)
+    const serverCounts = await this.getServerCounts();
+    const serversOverLimit = serverLimit !== -1 && serverCounts.enabled > serverLimit;
+
+    // Check the cached users_over_limit status (users require TideCloak API)
+    const row = sqlite.prepare(`
+      SELECT users_over_limit FROM subscriptions WHERE id = ?
+    `).get(subscription.id) as { users_over_limit: number } | undefined;
+
+    const usersOverLimit = row?.users_over_limit === 1;
+
+    if (usersOverLimit && serversOverLimit) {
+      return {
+        blocked: true,
+        reason: "Your organization has exceeded both user and server limits. Please contact an administrator to enable SSH access.",
+      };
+    }
+
+    if (usersOverLimit) {
+      return {
+        blocked: true,
+        reason: "Your organization has exceeded the user limit for the current plan. Please contact an administrator to enable SSH access.",
+      };
+    }
+
+    if (serversOverLimit) {
+      return {
+        blocked: true,
+        reason: "Your organization has exceeded the server limit for the current plan. Please contact an administrator to enable SSH access.",
+      };
+    }
+
+    return { blocked: false };
   }
 
   // Add a billing history record

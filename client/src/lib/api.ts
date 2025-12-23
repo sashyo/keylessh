@@ -81,6 +81,13 @@ export const api = {
     getByRole: (roleId: string) =>
       apiRequest<CommittedPolicyResult>(`/api/ssh-policies/committed/${encodeURIComponent(roleId)}`),
   },
+  ssh: {
+    /**
+     * Check if SSH access is blocked due to over-limit
+     */
+    getAccessStatus: () =>
+      apiRequest<{ blocked: boolean; reason?: string }>("/api/ssh/access-status"),
+  },
   servers: {
     list: () => apiRequest<ServerWithAccess[]>("/api/servers"),
     get: (id: string) => apiRequest<ServerWithAccess>(`/api/servers/${id}`),
@@ -136,6 +143,11 @@ export const api = {
         apiRequest<{ linkUrl: string }>(
           `/api/admin/users/tide?userId=${userId}${redirectUri ? `&redirect_uri=${encodeURIComponent(redirectUri)}` : ""}`
         ),
+      setEnabled: (userId: string, enabled: boolean) =>
+        apiRequest<{ success: boolean; enabled: boolean }>(`/api/admin/users/${userId}/enabled`, {
+          method: "PUT",
+          body: JSON.stringify({ enabled }),
+        }),
     },
     roles: {
       list: () => apiRequest<{ roles: AdminRole[] }>("/api/admin/roles"),
@@ -302,12 +314,22 @@ export const api = {
           method: "POST",
           body: JSON.stringify({ priceId }),
         }),
+      syncCheckout: (sessionId: string) =>
+        apiRequest<{ success: boolean; tier?: SubscriptionTier }>("/api/admin/license/sync", {
+          method: "POST",
+          body: JSON.stringify({ sessionId }),
+        }),
       createPortal: () =>
         apiRequest<{ url: string }>("/api/admin/license/portal", {
           method: "POST",
         }),
       getBillingHistory: () => apiRequest<BillingHistoryItem[]>("/api/admin/license/billing"),
       getPrices: () => apiRequest<PricingInfo>("/api/admin/license/prices"),
+      syncManual: (params: { subscriptionId?: string; customerId?: string }) =>
+        apiRequest<{ success: boolean; tier: SubscriptionTier; status: string }>("/api/admin/license/sync-manual", {
+          method: "POST",
+          body: JSON.stringify(params),
+        }),
     },
   },
 };
@@ -372,6 +394,12 @@ export interface SshPolicyLog {
   performedByEmail?: string;
   details?: string;
   createdAt: number;
+  policyStatus?: string;
+  policyThreshold?: number;
+  policyCreatedAt?: number;
+  policyRequestedBy?: string;
+  approvalCount?: number;
+  rejectionCount?: number;
 }
 
 // Approval types
@@ -442,12 +470,30 @@ export interface Subscription {
   updatedAt?: number;
 }
 
+export interface OverLimitStatus {
+  users: {
+    isOverLimit: boolean;
+    enabled: number;
+    total: number;
+    limit: number;
+    overBy: number;
+  };
+  servers: {
+    isOverLimit: boolean;
+    enabled: number;
+    total: number;
+    limit: number;
+    overBy: number;
+  };
+}
+
 export interface LicenseInfo {
   subscription: Subscription | null;
   usage: { users: number; servers: number };
   limits: { maxUsers: number; maxServers: number };
   tier: SubscriptionTier;
   tierName: string;
+  overLimit?: OverLimitStatus;
 }
 
 export interface LimitCheck {
