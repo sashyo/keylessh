@@ -9,113 +9,8 @@ import type { ServerWithAccess, ActiveSession, ServerStatus, Server as ServerTyp
 import { createRequire } from "module";
 import { fileURLToPath } from "url";
 import { getHomeOrkUrl } from "./lib/auth/tidecloakConfig";
-import { spawn } from "child_process";
+import { CompileForsetiContract } from "./lib/tidecloakApi";
 import { createConnection } from "net";
-
-// Forseti compiler configuration from environment
-// COMPILER_IMAGE: Published Docker image (default: ghcr.io/tide-foundation/forseti-compiler:latest)
-// COMPILER_CONTAINER: Local container name (e.g., "Ork-1") - overrides COMPILER_IMAGE if set
-const COMPILER_IMAGE = process.env.COMPILER_IMAGE || "ghcr.io/tide-foundation/forseti-compiler:latest";
-const COMPILER_CONTAINER = process.env.COMPILER_CONTAINER;
-
-/**
- * Compiles Forseti contract source code using the forseti-compile Docker image.
- * Uses published image by default, or local container if COMPILER_CONTAINER is set.
- */
-async function compileForsetiContract(
-  source: string,
-  options: { validate?: boolean; entryType?: string } = {}
-): Promise<{ success: boolean; contractId?: string; sdkVersion?: string; error?: string; validated?: boolean }> {
-  const startTime = Date.now();
-
-  logForseti("▶ Compile Start", {
-    entryType: options.entryType || "auto",
-    validate: options.validate ?? false,
-    sourceLen: source.length,
-    compiler: COMPILER_CONTAINER || COMPILER_IMAGE,
-  });
-
-  return new Promise((resolve) => {
-    // Build args for the compiler
-    const compilerArgs = ["--json"];
-    if (options.validate) {
-      compilerArgs.push("--validate");
-    }
-    if (options.entryType) {
-      compilerArgs.push("--entry-type", options.entryType);
-    }
-
-    // Use local container if specified, otherwise use published image
-    const dockerArgs = COMPILER_CONTAINER
-      ? ["exec", "-i", COMPILER_CONTAINER, "dotnet", "/opt/forseti-compile/ContractCompiler.dll", ...compilerArgs]
-      : ["run", "-i", "--rm", COMPILER_IMAGE, ...compilerArgs];
-
-    const proc = spawn("docker", dockerArgs, {
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-
-    let stdout = "";
-    let stderr = "";
-
-    // Write source to stdin and close it
-    proc.stdin.write(source);
-    proc.stdin.end();
-
-    proc.stdout.on("data", (data) => {
-      stdout += data.toString();
-    });
-
-    proc.stderr.on("data", (data) => {
-      stderr += data.toString();
-    });
-
-    proc.on("close", (code) => {
-      const elapsed = Date.now() - startTime;
-
-      try {
-        // Parse JSON output from the tool (handles both PascalCase and camelCase)
-        const raw = JSON.parse(stdout.trim());
-        const result = {
-          success: raw.Success ?? raw.success,
-          contractId: raw.ContractId ?? raw.contractId,
-          sdkVersion: raw.SdkVersion ?? raw.sdkVersion ?? "1.0.0",
-          error: raw.Error ?? raw.error,
-          validated: raw.Validated ?? raw.validated ?? false,
-        };
-
-        if (!result.success) {
-          logForseti("✗ Compile Failed", { error: result.error, elapsed: `${elapsed}ms` });
-          resolve({ success: false, error: result.error });
-          return;
-        }
-
-        logForseti("✓ Compile Success", {
-          contractId: result.contractId?.substring(0, 16) + "...",
-          sdkVersion: result.sdkVersion,
-          validated: result.validated,
-          elapsed: `${elapsed}ms`,
-        });
-
-        resolve({
-          success: true,
-          contractId: result.contractId,
-          sdkVersion: result.sdkVersion,
-          validated: result.validated,
-        });
-      } catch (parseError) {
-        const errorMsg = stderr || stdout || `Exit code ${code}`;
-        logForseti("✗ Compile Failed", { error: errorMsg, elapsed: `${elapsed}ms` });
-        resolve({ success: false, error: `Compiler error: ${errorMsg}` });
-      }
-    });
-
-    proc.on("error", (error) => {
-      const elapsed = Date.now() - startTime;
-      logForseti("✗ Compile Failed", { error: error.message, elapsed: `${elapsed}ms` });
-      resolve({ success: false, error: `Failed to run forseti-compile in Docker: ${error.message}` });
-    });
-  });
-}
 
 // Use createRequire for heimdall-tide (CJS module with broken ESM exports)
 const require = createRequire(import.meta.url || fileURLToPath(new URL(".", import.meta.url)));
@@ -2234,25 +2129,37 @@ export async function registerRoutes(
   // Forseti Contract Compilation
   // ============================================
 
-  // POST /api/forseti/compile - Compile contract and get hash
+  // POST /api/forseti/compile - Compile contract and get hash via TideCloak
   app.post(
     "/api/forseti/compile",
     authenticate,
     async (req: AuthenticatedRequest, res) => {
       try {
         const { source, validate = true, entryType } = req.body;
+        const token = req.accessToken;
+
+        if (!token) {
+          res.status(401).json({ error: "Authentication required" });
+          return;
+        }
 
         if (!source || typeof source !== "string") {
           res.status(400).json({ error: "source is required and must be a string" });
           return;
         }
 
-        log(`Compiling Forseti contract (validate=${validate}, entryType=${entryType || "auto"})`);
+        logForseti("▶ Compile Start", {
+          entryType: entryType || "auto",
+          validate,
+          sourceLen: source.length,
+        });
 
-        const result = await compileForsetiContract(source, { validate, entryType });
+        const startTime = Date.now();
+        const result = await CompileForsetiContract(source, token, { validate, entryType });
+        const elapsed = Date.now() - startTime;
 
         if (!result.success) {
-          log(`Contract compilation failed: ${result.error}`);
+          logForseti("✗ Compile Failed", { error: result.error, elapsed: `${elapsed}ms` });
           res.status(400).json({
             success: false,
             error: result.error,
@@ -2260,7 +2167,13 @@ export async function registerRoutes(
           return;
         }
 
-        log(`Contract compiled successfully: ${result.contractId?.substring(0, 16)}...`);
+        logForseti("✓ Compile Success", {
+          contractId: result.contractId?.substring(0, 16) + "...",
+          sdkVersion: result.sdkVersion,
+          validated: result.validated,
+          elapsed: `${elapsed}ms`,
+        });
+
         res.json({
           success: true,
           contractId: result.contractId,
