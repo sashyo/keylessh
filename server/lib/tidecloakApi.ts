@@ -771,3 +771,49 @@ export const AddApprovalWithSignedRequest = async (
   }
   return;
 };
+
+// ============================================
+// Forseti Contract Compilation API
+// ============================================
+
+export interface ForsetiCompileResult {
+  success: boolean;
+  contractId?: string;
+  sdkVersion?: string;
+  error?: string;
+  validated?: boolean;
+}
+
+/**
+ * Compiles a Forseti contract using the TideCloak Forseti compiler endpoint.
+ * Requires admin authentication.
+ */
+export const CompileForsetiContract = async (
+  source: string,
+  token: string,
+  options?: { validate?: boolean; entryType?: string }
+): Promise<ForsetiCompileResult> => {
+  const response = await fetch(`${getTcUrl()}/forseti/compile`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({
+      source,
+      validate: options?.validate,
+      entryType: options?.entryType,
+    }),
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.text();
+    console.error(`Error compiling Forseti contract: ${response.statusText}`);
+    return {
+      success: false,
+      error: `Compiler error: ${response.status} ${errorBody}`,
+    };
+  }
+
+  return await response.json();
+};
