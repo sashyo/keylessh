@@ -19,6 +19,9 @@ export const servers = sqliteTable("servers", {
   tags: text("tags", { mode: "json" }).$type<string[]>().notNull().default([]),
   enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
   sshUsers: text("ssh_users", { mode: "json" }).$type<string[]>().notNull().default([]),
+  // Session recording settings
+  recordingEnabled: integer("recording_enabled", { mode: "boolean" }).notNull().default(false),
+  recordedUsers: text("recorded_users", { mode: "json" }).$type<string[]>().notNull().default([]), // Empty = all users when enabled
 });
 
 export const sessions = sqliteTable("sessions", {
@@ -31,6 +34,46 @@ export const sessions = sqliteTable("sessions", {
   status: text("status").notNull().default("active"),
   startedAt: integer("started_at", { mode: "timestamp" }).notNull(),
   endedAt: integer("ended_at", { mode: "timestamp" }),
+  recordingId: text("recording_id"), // Link to recording if session was recorded
+});
+
+// File operations log - tracks SFTP/SCP file transfers
+export const fileOperations = sqliteTable("file_operations", {
+  id: text("id").primaryKey(),
+  sessionId: text("session_id").notNull(),
+  serverId: text("server_id").notNull(),
+  userId: text("user_id").notNull(),
+  userEmail: text("user_email"),
+  sshUser: text("ssh_user").notNull(),
+  operation: text("operation").notNull(), // "upload" | "download" | "delete" | "mkdir" | "rename" | "chmod"
+  path: text("path").notNull(),
+  targetPath: text("target_path"), // For rename operations
+  fileSize: integer("file_size"), // Size in bytes (for upload/download)
+  mode: text("mode").notNull(), // "sftp" | "scp"
+  status: text("status").notNull(), // "success" | "error"
+  errorMessage: text("error_message"),
+  timestamp: integer("timestamp", { mode: "timestamp" }).notNull(),
+});
+
+// Session recordings table - stores terminal I/O for playback
+export const recordings = sqliteTable("recordings", {
+  id: text("id").primaryKey(),
+  sessionId: text("session_id").notNull(),
+  serverId: text("server_id").notNull(),
+  serverName: text("server_name").notNull(),
+  userId: text("user_id").notNull(),
+  userEmail: text("user_email").notNull(),
+  sshUser: text("ssh_user").notNull(),
+  startedAt: integer("started_at", { mode: "timestamp" }).notNull(),
+  endedAt: integer("ended_at", { mode: "timestamp" }),
+  duration: integer("duration"), // Duration in seconds
+  terminalWidth: integer("terminal_width").notNull().default(80),
+  terminalHeight: integer("terminal_height").notNull().default(24),
+  // Recording data in asciicast v2 format (JSON lines)
+  data: text("data").notNull().default(""),
+  // Searchable text content (all output concatenated)
+  textContent: text("text_content").notNull().default(""),
+  fileSize: integer("file_size").notNull().default(0), // Size in bytes
 });
 
 // Subscription tier definitions
@@ -85,8 +128,14 @@ export type InsertBillingHistory = z.infer<typeof insertBillingHistorySchema>;
 export type User = typeof users.$inferSelect;
 export type Server = typeof servers.$inferSelect;
 export type Session = typeof sessions.$inferSelect;
+export type FileOperation = typeof fileOperations.$inferSelect;
 export type Subscription = typeof subscriptions.$inferSelect;
 export type BillingHistory = typeof billingHistory.$inferSelect;
+
+// File operation types for API
+export type FileOperationType = "upload" | "download" | "delete" | "mkdir" | "rename" | "chmod";
+export type FileOperationMode = "sftp" | "scp";
+export type FileOperationStatus = "success" | "error";
 
 // Over-limit status for resources
 export interface OverLimitStatus {

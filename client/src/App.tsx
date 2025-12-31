@@ -20,6 +20,7 @@ import AdminApprovals from "@/pages/AdminApprovals";
 import AdminSessions from "@/pages/AdminSessions";
 import AdminLogs from "@/pages/AdminLogs";
 import AdminLicense from "@/pages/AdminLicense";
+import AdminRecordings from "@/pages/AdminRecordings";
 import NotFound from "@/pages/not-found";
 import { Loader2, Terminal } from "lucide-react";
 import type { ReactNode } from "react";
@@ -247,6 +248,12 @@ function Router() {
       <Route path="/admin/license">
         <AdminRoute>
           <AdminLicense />
+        </AdminRoute>
+      </Route>
+
+      <Route path="/admin/recordings">
+        <AdminRoute>
+          <AdminRecordings />
         </AdminRoute>
       </Route>
 

@@ -1,6 +1,8 @@
 import { useState, useCallback } from "react";
 import type { SftpClient, SftpFileInfo } from "@/lib/sftp";
-import { useSftp } from "@/hooks/useSftp";
+import type { ScpClient } from "@/lib/scp";
+import type { SshClientSession } from "@microsoft/dev-tunnels-ssh";
+import { useFileOps, type FileOpLogEvent } from "@/hooks/useFileOps";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { PathBreadcrumb } from "./PathBreadcrumb";
 import { FileToolbar } from "./FileToolbar";
@@ -10,17 +12,25 @@ import { RenameDialog } from "./RenameDialog";
 import { PropertiesDialog } from "./PropertiesDialog";
 import { DeleteConfirmDialog } from "./DeleteConfirmDialog";
 import { cn } from "@/lib/utils";
-import { AlertCircle } from "lucide-react";
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import { AlertCircle, Terminal } from "lucide-react";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 
 interface FileBrowserProps {
-  client: SftpClient | null;
+  // SFTP mode (preferred)
+  client?: SftpClient | null;
+  // SCP fallback mode
+  scpClient?: ScpClient | null;
+  session?: SshClientSession | null;
+  // Common options
   initialPath?: string;
   className?: string;
+  // Optional callback for logging file operations
+  onFileOp?: (event: FileOpLogEvent) => void;
 }
 
-export function FileBrowser({ client, initialPath = "~", className }: FileBrowserProps) {
+export function FileBrowser({ client, scpClient, session, initialPath = "~", className, onFileOp }: FileBrowserProps) {
   const {
+    mode,
     currentPath,
     entries,
     loading,
@@ -36,7 +46,7 @@ export function FileBrowser({ client, initialPath = "~", className }: FileBrowse
     selectedPaths,
     toggleSelection,
     clearSelection,
-  } = useSftp({ client, initialPath });
+  } = useFileOps({ sftpClient: client, scpClient, session, initialPath, onFileOp });
 
   // Dialog states
   const [newFolderOpen, setNewFolderOpen] = useState(false);
@@ -172,6 +182,17 @@ export function FileBrowser({ client, initialPath = "~", className }: FileBrowse
         onNavigate={navigateTo}
         className="px-2 py-1 border-b bg-muted/30"
       />
+
+      {/* SCP mode indicator */}
+      {mode === "scp" && (
+        <Alert className="m-2">
+          <Terminal className="h-4 w-4" />
+          <AlertTitle>SCP Mode</AlertTitle>
+          <AlertDescription>
+            SFTP not available. Using SCP for file transfers.
+          </AlertDescription>
+        </Alert>
+      )}
 
       {/* Error alert */}
       {error && (

@@ -35,7 +35,7 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { queryClient, apiRequest } from "@/lib/queryClient";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
-import { Plus, Pencil, Trash2, Server, Search, AlertCircle } from "lucide-react";
+import { Plus, Pencil, Trash2, Server, Search, AlertCircle, Video } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import type { Server as ServerType, ServerStatus } from "@shared/schema";
 import { api } from "@/lib/api";
@@ -50,6 +50,8 @@ interface ServerFormData {
   tags: string;
   sshUsers: string;
   enabled: boolean;
+  recordingEnabled: boolean;
+  recordedUsers: string;
 }
 
 const defaultFormData: ServerFormData = {
@@ -60,6 +62,8 @@ const defaultFormData: ServerFormData = {
   tags: "",
   sshUsers: "root",
   enabled: true,
+  recordingEnabled: false,
+  recordedUsers: "",
 };
 
 function ServerForm({
@@ -169,6 +173,42 @@ function ServerForm({
         />
       </div>
 
+      <div className="border-t pt-4 mt-4 space-y-4">
+        <div className="flex items-center gap-2">
+          <Video className="h-4 w-4 text-muted-foreground" />
+          <h4 className="font-medium">Session Recording</h4>
+        </div>
+
+        <div className="flex items-center justify-between">
+          <div>
+            <Label htmlFor="recordingEnabled">Enable Recording</Label>
+            <p className="text-xs text-muted-foreground">Record SSH sessions for compliance audits</p>
+          </div>
+          <Switch
+            id="recordingEnabled"
+            checked={formData.recordingEnabled}
+            onCheckedChange={(checked) => setFormData({ ...formData, recordingEnabled: checked })}
+            data-testid="switch-recording-enabled"
+          />
+        </div>
+
+        {formData.recordingEnabled && (
+          <div className="space-y-2">
+            <Label htmlFor="recordedUsers">Recorded Users (comma-separated)</Label>
+            <Input
+              id="recordedUsers"
+              value={formData.recordedUsers}
+              onChange={(e) => setFormData({ ...formData, recordedUsers: e.target.value })}
+              placeholder="Leave empty to record all users"
+              data-testid="input-recorded-users"
+            />
+            <p className="text-xs text-muted-foreground">
+              Specify which SSH users to record. Leave empty to record all sessions.
+            </p>
+          </div>
+        )}
+      </div>
+
       <DialogFooter>
         <Button type="button" variant="outline" onClick={onCancel}>
           Cancel
@@ -224,6 +264,8 @@ export default function AdminServers() {
         tags: data.tags.split(",").map((t) => t.trim()).filter(Boolean),
         sshUsers: data.sshUsers.split(",").map((u) => u.trim()).filter(Boolean),
         enabled: data.enabled,
+        recordingEnabled: data.recordingEnabled,
+        recordedUsers: data.recordedUsers.split(",").map((u) => u.trim()).filter(Boolean),
       };
       return apiRequest("POST", "/api/admin/servers", serverData);
     },
@@ -250,6 +292,8 @@ export default function AdminServers() {
         tags: data.tags.split(",").map((t) => t.trim()).filter(Boolean),
         sshUsers: data.sshUsers.split(",").map((u) => u.trim()).filter(Boolean),
         enabled: data.enabled,
+        recordingEnabled: data.recordingEnabled,
+        recordedUsers: data.recordedUsers.split(",").map((u) => u.trim()).filter(Boolean),
       };
       return apiRequest("PATCH", `/api/admin/servers/${id}`, serverData);
     },
@@ -378,6 +422,8 @@ export default function AdminServers() {
                       tags: editingServer.tags?.join(", ") || "",
                       sshUsers: editingServer.sshUsers?.join(", ") || "",
                       enabled: editingServer.enabled,
+                      recordingEnabled: editingServer.recordingEnabled || false,
+                      recordedUsers: editingServer.recordedUsers?.join(", ") || "",
                     }
                   : undefined
               }
@@ -444,6 +490,7 @@ export default function AdminServers() {
                   <TableHead>Server</TableHead>
                   <TableHead>Environment</TableHead>
                   <TableHead>SSH Users</TableHead>
+                  <TableHead>Recording</TableHead>
                   <TableHead>Enabled</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
@@ -478,6 +525,20 @@ export default function AdminServers() {
                           </Badge>
                         )}
                       </div>
+                    </TableCell>
+                    <TableCell>
+                      {server.recordingEnabled ? (
+                        <Badge variant="default" className="gap-1 text-xs">
+                          <Video className="h-3 w-3" />
+                          {server.recordedUsers && server.recordedUsers.length > 0
+                            ? `${server.recordedUsers.length} user${server.recordedUsers.length > 1 ? "s" : ""}`
+                            : "All"}
+                        </Badge>
+                      ) : (
+                        <Badge variant="outline" className="text-xs text-muted-foreground">
+                          Off
+                        </Badge>
+                      )}
                     </TableCell>
                     <TableCell>
                       <Switch

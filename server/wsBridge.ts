@@ -3,7 +3,7 @@ import { createConnection, Socket } from "net";
 import type { Server, IncomingMessage } from "http";
 import type { Duplex } from "stream";
 import { log } from "./logger";
-import { storage, subscriptionStorage } from "./storage";
+import { storage, subscriptionStorage, recordingStorage, fileOperationStorage } from "./storage";
 import { verifyTideCloakToken, type TokenPayload } from "./lib/auth/tideJWT";
 import { getAllowedSshUsersFromToken } from "./lib/auth/sshUsers";
 import { tidecloakAdmin } from "./auth";
@@ -22,6 +22,26 @@ interface ConnectionInfo {
   serverId: string;
   userId: string;
   sessionId: string;
+  // Recording state
+  recordingId: string | null;
+  recordingStartTime: number | null;
+}
+
+// Asciicast v2 format helpers
+// Header: {"version": 2, "width": 80, "height": 24, "timestamp": 1234567890}
+// Events: [time, "o", "data"] for output, [time, "i", "data"] for input
+function createAsciicastHeader(width: number, height: number, timestamp: number): string {
+  return JSON.stringify({ version: 2, width, height, timestamp }) + "\n";
+}
+
+function createAsciicastEvent(relativeTime: number, eventType: "o" | "i", data: string): string {
+  return JSON.stringify([relativeTime, eventType, data]) + "\n";
+}
+
+// Strip ANSI codes for searchable text content
+function stripAnsi(str: string): string {
+  // eslint-disable-next-line no-control-regex
+  return str.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "");
 }
 
 const connections = new Map<WebSocket, ConnectionInfo>();
@@ -70,6 +90,15 @@ function cleanupConnection(ws: WebSocket, reason?: string) {
   const remainingSockets = socketsBySessionId.get(conn.sessionId);
   if (!remainingSockets || remainingSockets.size === 0) {
     void storage.endSession(conn.sessionId);
+
+    // Finalize recording if one was active
+    if (conn.recordingId) {
+      void recordingStorage.finalizeRecording(conn.recordingId).then(() => {
+        log(`Finalized recording ${conn.recordingId} for session ${conn.sessionId}`);
+      }).catch(err => {
+        log(`Error finalizing recording: ${err.message}`);
+      });
+    }
   }
 
   if (reason) {
@@ -227,6 +256,46 @@ export function setupWSBridge(httpServer: Server): WebSocketServer {
         return;
       }
 
+      // Check if recording is enabled for this server/user combination
+      let recordingId: string | null = null;
+      let recordingStartTime: number | null = null;
+
+      if (configuredServer.recordingEnabled) {
+        const recordedUsers = configuredServer.recordedUsers || [];
+        // Empty recordedUsers array means record ALL users on this server
+        const shouldRecord = recordedUsers.length === 0 || recordedUsers.includes(session.sshUser);
+
+        if (shouldRecord) {
+          try {
+            const userEmail = session.userEmail || payload.email || "";
+            const recording = await recordingStorage.createRecording({
+              sessionId,
+              serverId,
+              serverName: configuredServer.name,
+              userId,
+              userEmail,
+              sshUser: session.sshUser,
+              terminalWidth: 80,  // Default, will be updated if client sends resize
+              terminalHeight: 24,
+            });
+            recordingId = recording.id;
+            recordingStartTime = Date.now();
+
+            // Write asciicast header
+            const header = createAsciicastHeader(80, 24, Math.floor(recordingStartTime / 1000));
+            await recordingStorage.appendData(recordingId, header);
+
+            // Link recording to session
+            await storage.updateSession(sessionId, { recordingId: recording.id });
+
+            log(`Started recording ${recordingId} for session ${sessionId} (server: ${configuredServer.name}, sshUser: ${session.sshUser})`);
+          } catch (err) {
+            log(`Failed to start recording for session ${sessionId}: ${(err as Error).message}`);
+            // Continue without recording - don't block the session
+          }
+        }
+      }
+
       trackSessionSocket(sessionId, ws);
       log(`WebSocket TCP bridge: connecting to ${host}:${port} for user ${userId} session ${sessionId}`);
 
@@ -246,7 +315,7 @@ export function setupWSBridge(httpServer: Server): WebSocketServer {
         const remoteWs = new WebSocket(bridgeWsUrl);
 
         // Store connection info
-        connections.set(ws, { ws, tcp: null, remoteWs, host, port, serverId, userId, sessionId });
+        connections.set(ws, { ws, tcp: null, remoteWs, host, port, serverId, userId, sessionId, recordingId, recordingStartTime });
 
         remoteWs.on("open", () => {
           log(`Connected to external bridge for ${host}:${port}`);
@@ -254,6 +323,9 @@ export function setupWSBridge(httpServer: Server): WebSocketServer {
 
         remoteWs.on("message", (data, isBinary) => {
           if (ws.readyState !== WebSocket.OPEN) return;
+
+          // Note: Recording is now done via browser-side events (decrypted data)
+          // The data here is encrypted SSH protocol, not suitable for recording
 
           // Preserve text frames as text for the browser. If we forward a Buffer that
           // represents a text frame, the browser receives it as binary and won't
@@ -290,7 +362,64 @@ export function setupWSBridge(httpServer: Server): WebSocketServer {
         // Forward client messages to bridge
         ws.on("message", (data: Buffer | string) => {
           const conn = connections.get(ws);
-          if (conn?.remoteWs && conn.remoteWs.readyState === WebSocket.OPEN) {
+          if (!conn) return;
+
+          // Check if it's a JSON control message (text frame starting with '{')
+          // WS library sends text frames as Buffer in Node.js, so check first byte
+          const firstByte = Buffer.isBuffer(data) ? data[0] : (data.length > 0 ? data.charCodeAt(0) : 0);
+          if (firstByte === 0x7B) { // '{' character
+            try {
+              const dataStr = Buffer.isBuffer(data) ? data.toString("utf-8") : data;
+              const msg = JSON.parse(dataStr);
+              // Handle recording events from browser (decrypted terminal I/O)
+              if (msg.type === "record" && conn.recordingId) {
+                void (async () => {
+                  try {
+                    const event = createAsciicastEvent(msg.time, msg.eventType, msg.data);
+                    await recordingStorage.appendData(conn.recordingId!, event);
+                    if (msg.eventType === "o") {
+                      await recordingStorage.appendTextContent(conn.recordingId!, stripAnsi(msg.data));
+                    }
+                  } catch {
+                    // Ignore recording errors
+                  }
+                })();
+                return; // Don't forward recording messages to bridge
+              }
+              // Handle file operation events from browser
+              if (msg.type === "file_op") {
+                void (async () => {
+                  try {
+                    const session = await storage.getSession(conn.sessionId);
+                    await fileOperationStorage.logOperation({
+                      sessionId: conn.sessionId,
+                      serverId: conn.serverId,
+                      userId: conn.userId,
+                      userEmail: session?.userEmail || undefined,
+                      sshUser: session?.sshUser || "unknown",
+                      operation: msg.operation,
+                      path: msg.path,
+                      targetPath: msg.targetPath,
+                      fileSize: msg.fileSize,
+                      mode: msg.mode,
+                      status: msg.status,
+                      errorMessage: msg.errorMessage,
+                    });
+                    log(`File op: ${msg.operation} ${msg.path} (${msg.mode}, ${msg.status}) - session ${conn.sessionId}`);
+                  } catch (err) {
+                    log(`Error logging file op: ${(err as Error).message}`);
+                  }
+                })();
+                return; // Don't forward file op messages to bridge
+              }
+              // Other JSON control messages - don't forward to bridge
+              return;
+            } catch {
+              // Not valid JSON despite starting with '{', forward to bridge
+            }
+          }
+
+          if (conn.remoteWs && conn.remoteWs.readyState === WebSocket.OPEN) {
             conn.remoteWs.send(data);
           }
         });
@@ -314,11 +443,13 @@ export function setupWSBridge(httpServer: Server): WebSocketServer {
         });
 
         // Store connection info
-        connections.set(ws, { ws, tcp, remoteWs: null, host, port, serverId, userId, sessionId });
+        connections.set(ws, { ws, tcp, remoteWs: null, host, port, serverId, userId, sessionId, recordingId, recordingStartTime });
 
         // Handle TCP data -> WebSocket
         tcp.on("data", (data: Buffer) => {
           if (ws.readyState === WebSocket.OPEN) {
+            // Note: Recording is now done via browser-side events (decrypted data)
+            // The data here is encrypted SSH protocol, not suitable for recording
             ws.send(data);
           }
         });
@@ -344,24 +475,71 @@ export function setupWSBridge(httpServer: Server): WebSocketServer {
         // Handle WebSocket messages -> TCP
         ws.on("message", (data: Buffer | string) => {
           const conn = connections.get(ws);
-          if (conn?.tcp && !conn.tcp.destroyed) {
-            // Forward binary data to TCP
-            if (Buffer.isBuffer(data)) {
-              conn.tcp.write(data);
-            } else if (typeof data === "string") {
-              // Check if it's a control message (JSON)
-              try {
-                const msg = JSON.parse(data);
-                // Handle control messages if needed
-                if (msg.type === "ping") {
-                  ws.send(JSON.stringify({ type: "pong" }));
-                  return;
-                }
-              } catch {
-                // Not JSON, treat as raw data
+          if (!conn) return;
+
+          // Check if it's a JSON control message (text frame starting with '{')
+          // WS library sends text frames as Buffer in Node.js, so check first byte
+          const firstByte = Buffer.isBuffer(data) ? data[0] : (data.length > 0 ? data.charCodeAt(0) : 0);
+          if (firstByte === 0x7B) { // '{' character
+            try {
+              const dataStr = Buffer.isBuffer(data) ? data.toString("utf-8") : data;
+              const msg = JSON.parse(dataStr);
+              // Handle ping/pong
+              if (msg.type === "ping") {
+                ws.send(JSON.stringify({ type: "pong" }));
+                return;
               }
-              conn.tcp.write(data);
+              // Handle recording events from browser (decrypted terminal I/O)
+              if (msg.type === "record" && conn.recordingId) {
+                void (async () => {
+                  try {
+                    const event = createAsciicastEvent(msg.time, msg.eventType, msg.data);
+                    await recordingStorage.appendData(conn.recordingId!, event);
+                    if (msg.eventType === "o") {
+                      await recordingStorage.appendTextContent(conn.recordingId!, stripAnsi(msg.data));
+                    }
+                  } catch {
+                    // Ignore recording errors
+                  }
+                })();
+                return; // Don't forward recording messages to TCP
+              }
+              // Handle file operation events from browser
+              if (msg.type === "file_op") {
+                void (async () => {
+                  try {
+                    const session = await storage.getSession(conn.sessionId);
+                    await fileOperationStorage.logOperation({
+                      sessionId: conn.sessionId,
+                      serverId: conn.serverId,
+                      userId: conn.userId,
+                      userEmail: session?.userEmail || undefined,
+                      sshUser: session?.sshUser || "unknown",
+                      operation: msg.operation,
+                      path: msg.path,
+                      targetPath: msg.targetPath,
+                      fileSize: msg.fileSize,
+                      mode: msg.mode,
+                      status: msg.status,
+                      errorMessage: msg.errorMessage,
+                    });
+                    log(`File op: ${msg.operation} ${msg.path} (${msg.mode}, ${msg.status}) - session ${conn.sessionId}`);
+                  } catch (err) {
+                    log(`Error logging file op: ${(err as Error).message}`);
+                  }
+                })();
+                return; // Don't forward file op messages to TCP
+              }
+              // Unknown JSON message - don't forward to TCP (it would corrupt SSH protocol)
+              return;
+            } catch {
+              // Not valid JSON despite starting with '{', forward to TCP
             }
+          }
+
+          // Forward binary/raw data to TCP
+          if (conn.tcp && !conn.tcp.destroyed) {
+            conn.tcp.write(Buffer.isBuffer(data) ? data : Buffer.from(data));
           }
         });
 

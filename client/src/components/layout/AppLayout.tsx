@@ -24,7 +24,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Terminal, Server, Users, Activity, LogOut, Shield, ChevronDown, Layers, ScrollText, KeyRound, CheckSquare, RefreshCw, FileCode, CreditCard, Sun, Moon } from "lucide-react";
+import { Terminal, Server, Users, Activity, LogOut, Shield, ChevronDown, Layers, ScrollText, KeyRound, CheckSquare, RefreshCw, FileCode, CreditCard, Sun, Moon, Video } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { useToast } from "@/hooks/use-toast";
 import { queryClient } from "@/lib/queryClient";
@@ -60,6 +60,7 @@ const adminNavGroups = [
     label: "Security",
     items: [
       { title: "Approvals", url: "/admin/approvals", icon: CheckSquare },
+      { title: "Recordings", url: "/admin/recordings", icon: Video },
       { title: "Audit Logs", url: "/admin/logs", icon: ScrollText },
     ],
   },

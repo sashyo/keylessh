@@ -23,15 +23,140 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Activity, Search, Clock, Server, Ban } from "lucide-react";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import {
+  Activity,
+  Search,
+  Clock,
+  Server,
+  Ban,
+  ChevronDown,
+  ChevronRight,
+  Upload,
+  Download,
+  Trash2,
+  FolderPlus,
+  ArrowRightLeft,
+  Lock,
+  FolderOpen,
+  FileText,
+} from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ActiveSession } from "@shared/schema";
-import { api } from "@/lib/api";
+import { api, type FileOperationLog } from "@/lib/api";
 import { queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 import { RefreshButton } from "@/components/RefreshButton";
+
+// File operation icon helper
+function getFileOpIcon(operation: string) {
+  switch (operation) {
+    case "upload":
+      return <Upload className="h-3 w-3" />;
+    case "download":
+      return <Download className="h-3 w-3" />;
+    case "delete":
+      return <Trash2 className="h-3 w-3" />;
+    case "mkdir":
+      return <FolderPlus className="h-3 w-3" />;
+    case "rename":
+      return <ArrowRightLeft className="h-3 w-3" />;
+    case "chmod":
+      return <Lock className="h-3 w-3" />;
+    default:
+      return <FolderOpen className="h-3 w-3" />;
+  }
+}
+
+// File operation color helper
+function getFileOpColor(operation: string) {
+  switch (operation) {
+    case "upload":
+      return "text-green-600";
+    case "download":
+      return "text-blue-600";
+    case "delete":
+      return "text-red-600";
+    case "mkdir":
+      return "text-yellow-600";
+    case "rename":
+      return "text-purple-600";
+    case "chmod":
+      return "text-orange-600";
+    default:
+      return "text-muted-foreground";
+  }
+}
+
+// Component to show file operations for a session
+function SessionFileOps({ sessionId }: { sessionId: string }) {
+  const { data, isLoading } = useQuery({
+    queryKey: ["/api/admin/sessions", sessionId, "file-operations"],
+    queryFn: () => api.admin.sessions.getFileOperations(sessionId),
+  });
+
+  if (isLoading) {
+    return (
+      <div className="py-2 px-4">
+        <Skeleton className="h-4 w-48" />
+      </div>
+    );
+  }
+
+  const operations = data?.operations || [];
+
+  if (operations.length === 0) {
+    return (
+      <div className="py-2 px-4 text-sm text-muted-foreground">
+        No file operations recorded
+      </div>
+    );
+  }
+
+  return (
+    <div className="py-2 px-4 space-y-1">
+      {operations.map((op) => (
+        <div
+          key={op.id}
+          className="flex items-center gap-2 text-xs py-1 px-2 rounded bg-muted/50"
+        >
+          <span className={cn("flex-shrink-0", getFileOpColor(op.operation))}>
+            {getFileOpIcon(op.operation)}
+          </span>
+          <Badge variant="outline" className="text-[10px] px-1 py-0">
+            {op.operation}
+          </Badge>
+          <span className="font-mono truncate flex-1" title={op.path}>
+            {op.path}
+          </span>
+          {op.targetPath && (
+            <>
+              <span className="text-muted-foreground">→</span>
+              <span className="font-mono truncate" title={op.targetPath}>
+                {op.targetPath}
+              </span>
+            </>
+          )}
+          <Badge
+            variant={op.status === "success" ? "default" : "destructive"}
+            className="text-[10px] px-1 py-0"
+          >
+            {op.status}
+          </Badge>
+          <span className="text-muted-foreground text-[10px]">
+            {new Date(op.timestamp).toLocaleTimeString()}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 type PageSizeMode = "auto" | "manual";
 
@@ -292,6 +417,19 @@ export function AdminSessionHistoryContent({ embedded = false }: { embedded?: bo
   const [historyPageSizeMode, setHistoryPageSizeMode] = useState<PageSizeMode>("auto");
   const [historyPageSize, setHistoryPageSize] = useState(25);
   const historyTableViewportRef = useRef<HTMLDivElement>(null);
+  const [expandedSessions, setExpandedSessions] = useState<Set<string>>(new Set());
+
+  const toggleSessionExpanded = (sessionId: string) => {
+    setExpandedSessions((prev) => {
+      const next = new Set(prev);
+      if (next.has(sessionId)) {
+        next.delete(sessionId);
+      } else {
+        next.add(sessionId);
+      }
+      return next;
+    });
+  };
 
   const { data: sessions, isLoading } = useQuery<ActiveSession[]>({
     queryKey: ["/api/admin/sessions"],
@@ -422,6 +560,7 @@ export function AdminSessionHistoryContent({ embedded = false }: { embedded?: bo
               <Table>
                 <TableHeader>
                   <TableRow>
+                    <TableHead className="w-[40px]"></TableHead>
                     <TableHead>Server</TableHead>
                     <TableHead>User</TableHead>
                     <TableHead>SSH User</TableHead>
@@ -432,52 +571,92 @@ export function AdminSessionHistoryContent({ embedded = false }: { embedded?: bo
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {pagedHistorySessions.map((session) => (
-                    <TableRow key={session.id} data-testid={`session-${session.id}`}>
-                      <TableCell>
-                        <div className="flex items-center gap-3">
-                          <div className="flex h-8 w-8 items-center justify-center rounded-md bg-muted">
-                            <Server className="h-4 w-4 text-muted-foreground" />
-                          </div>
-                          <div>
-                            <p className="font-medium">{session.serverName}</p>
-                            <p className="text-xs text-muted-foreground font-mono">
-                              {session.serverHost}
-                            </p>
-                          </div>
-                        </div>
-                      </TableCell>
-                      <TableCell>
-                        <div className="space-y-0.5">
-                          <div className="text-sm font-medium">
-                            {session.userUsername || "Unknown"}
-                          </div>
-                          <div className="text-xs font-mono text-muted-foreground">
-                            {session.userId}
-                          </div>
-                        </div>
-                      </TableCell>
-                      <TableCell>
-                        <Badge variant="outline" className="font-mono">
-                          {session.sshUser}
-                        </Badge>
-                      </TableCell>
-                      <TableCell className="text-sm">
-                        {formatDate(session.startedAt)}
-                      </TableCell>
-                      <TableCell className="text-sm">
-                        {formatDate(session.endedAt)}
-                      </TableCell>
-                      <TableCell className="text-sm font-mono">
-                        {formatDuration(session.startedAt, session.endedAt)}
-                      </TableCell>
-                      <TableCell>
-                        <Badge variant={session.status === "active" ? "default" : "secondary"}>
-                          {session.status === "active" ? "Active" : "Completed"}
-                        </Badge>
-                      </TableCell>
-                    </TableRow>
-                  ))}
+                  {pagedHistorySessions.map((session) => {
+                    const isExpanded = expandedSessions.has(session.id);
+                    return (
+                      <>
+                        <TableRow
+                          key={session.id}
+                          data-testid={`session-${session.id}`}
+                          className="cursor-pointer hover:bg-muted/50"
+                          onClick={() => toggleSessionExpanded(session.id)}
+                        >
+                          <TableCell className="w-[40px]">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-6 w-6 p-0"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                toggleSessionExpanded(session.id);
+                              }}
+                            >
+                              {isExpanded ? (
+                                <ChevronDown className="h-4 w-4" />
+                              ) : (
+                                <ChevronRight className="h-4 w-4" />
+                              )}
+                            </Button>
+                          </TableCell>
+                          <TableCell>
+                            <div className="flex items-center gap-3">
+                              <div className="flex h-8 w-8 items-center justify-center rounded-md bg-muted">
+                                <Server className="h-4 w-4 text-muted-foreground" />
+                              </div>
+                              <div>
+                                <p className="font-medium">{session.serverName}</p>
+                                <p className="text-xs text-muted-foreground font-mono">
+                                  {session.serverHost}
+                                </p>
+                              </div>
+                            </div>
+                          </TableCell>
+                          <TableCell>
+                            <div className="space-y-0.5">
+                              <div className="text-sm font-medium">
+                                {session.userUsername || "Unknown"}
+                              </div>
+                              <div className="text-xs font-mono text-muted-foreground">
+                                {session.userId}
+                              </div>
+                            </div>
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant="outline" className="font-mono">
+                              {session.sshUser}
+                            </Badge>
+                          </TableCell>
+                          <TableCell className="text-sm">
+                            {formatDate(session.startedAt)}
+                          </TableCell>
+                          <TableCell className="text-sm">
+                            {formatDate(session.endedAt)}
+                          </TableCell>
+                          <TableCell className="text-sm font-mono">
+                            {formatDuration(session.startedAt, session.endedAt)}
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant={session.status === "active" ? "default" : "secondary"}>
+                              {session.status === "active" ? "Active" : "Completed"}
+                            </Badge>
+                          </TableCell>
+                        </TableRow>
+                        {isExpanded && (
+                          <TableRow key={`${session.id}-fileops`} className="bg-muted/30">
+                            <TableCell colSpan={8} className="p-0">
+                              <div className="border-l-4 border-primary/20">
+                                <div className="flex items-center gap-2 px-4 py-2 bg-muted/50 border-b">
+                                  <FileText className="h-4 w-4 text-muted-foreground" />
+                                  <span className="text-sm font-medium">File Operations</span>
+                                </div>
+                                <SessionFileOps sessionId={session.id} />
+                              </div>
+                            </TableCell>
+                          </TableRow>
+                        )}
+                      </>
+                    );
+                  })}
                 </TableBody>
               </Table>
             </div>

@@ -12,6 +12,7 @@ import type { KeyPair } from "@microsoft/dev-tunnels-ssh";
 import type { Signer } from "@microsoft/dev-tunnels-ssh";
 import type { Verifier } from "@microsoft/dev-tunnels-ssh";
 import { SftpClient } from "./sftp";
+import { ScpClient } from "./scp";
 
 function sshWriteString(value: Buffer): Buffer {
   const len = Buffer.alloc(4);
@@ -336,6 +337,7 @@ export class BrowserSSHClient {
   private channel: SshChannel | null = null;
   private sftpChannel: SshChannel | null = null;
   private sftpClient: SftpClient | null = null;
+  private scpClient: ScpClient | null = null;
   private websocket: WebSocket | null = null;
   private options: SSHClientOptions;
   private cols: number = 80;
@@ -343,9 +345,60 @@ export class BrowserSSHClient {
   private sessionId: string | null = null;
   private sessionEnded = false;
   private isCleaningUp = false;
+  private recordingStartTime: number | null = null;
 
   constructor(options: SSHClientOptions) {
     this.options = options;
+  }
+
+  /**
+   * Send a recording event through the WebSocket to the server.
+   * This sends decrypted terminal I/O for server-side recording.
+   */
+  private sendRecordingEvent(eventType: "i" | "o", data: string): void {
+    if (!this.websocket || this.websocket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    if (!this.recordingStartTime) {
+      return;
+    }
+    try {
+      const relativeTime = (Date.now() - this.recordingStartTime) / 1000;
+      this.websocket.send(JSON.stringify({
+        type: "record",
+        eventType,
+        time: relativeTime,
+        data,
+      }));
+    } catch {
+      // Ignore recording errors - don't break the connection
+    }
+  }
+
+  /**
+   * Send a file operation event through the WebSocket to the server.
+   * This logs SFTP/SCP file operations for audit purposes.
+   */
+  sendFileOpEvent(event: {
+    operation: "upload" | "download" | "delete" | "mkdir" | "rename" | "chmod";
+    path: string;
+    targetPath?: string;
+    fileSize?: number;
+    mode: "sftp" | "scp";
+    status: "success" | "error";
+    errorMessage?: string;
+  }): void {
+    if (!this.websocket || this.websocket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    try {
+      this.websocket.send(JSON.stringify({
+        type: "file_op",
+        ...event,
+      }));
+    } catch {
+      // Ignore logging errors - don't break the connection
+    }
   }
 
   async connect(auth: SSHAuth): Promise<void> {
@@ -655,12 +708,17 @@ export class BrowserSSHClient {
 
     console.log("[SSH] Shell opened successfully, setting up data handler");
 
+    // Start recording timer - server will decide if recording is enabled
+    this.recordingStartTime = Date.now();
+
     // Handle incoming data
     this.channel.onDataReceived((data: Buffer) => {
       console.log("[SSH] Data received:", data.length, "bytes");
       this.options.onData(new Uint8Array(data));
       // Adjust window to allow more data
       this.channel?.adjustWindow(data.length);
+      // Send decrypted output to server for recording
+      this.sendRecordingEvent("o", data.toString("utf-8"));
     });
 
     // Handle channel close
@@ -680,6 +738,8 @@ export class BrowserSSHClient {
       this.channel.send(buffer).catch((err) => {
         console.error("Failed to send data:", err);
       });
+      // Send decrypted input to server for recording
+      this.sendRecordingEvent("i", data);
     }
   }
 
@@ -775,6 +835,50 @@ export class BrowserSSHClient {
   }
 
   /**
+   * Open an SCP client for file transfers.
+   * This is a fallback for servers that don't support SFTP.
+   * Unlike SFTP, SCP uses exec channels for each transfer operation.
+   */
+  openScp(): ScpClient {
+    if (!this.session) {
+      throw new Error("SSH session not connected");
+    }
+
+    if (this.scpClient) {
+      return this.scpClient;
+    }
+
+    console.log("[SSH] Creating SCP client");
+    this.scpClient = new ScpClient(this.session);
+    return this.scpClient;
+  }
+
+  /**
+   * Close the SCP client
+   */
+  closeScp(): void {
+    if (this.scpClient) {
+      this.scpClient.dispose();
+      this.scpClient = null;
+    }
+  }
+
+  /**
+   * Check if SCP client exists
+   */
+  get hasScp(): boolean {
+    return this.scpClient !== null;
+  }
+
+  /**
+   * Get the raw SSH session for advanced operations.
+   * Use with caution - prefer openSftp() or openScp() for file operations.
+   */
+  getSession(): SshClientSession | null {
+    return this.session;
+  }
+
+  /**
    * Disconnect from the SSH server
    */
   disconnect(): void {
@@ -788,8 +892,9 @@ export class BrowserSSHClient {
 
     void this.endSessionRecordOnce();
 
-    // Close SFTP first
+    // Close SFTP and SCP first
     this.closeSftp();
+    this.closeScp();
 
     if (this.channel) {
       try {

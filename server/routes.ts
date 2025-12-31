@@ -1,6 +1,6 @@
 import type { Express } from "express";
 import type { Server } from "http";
-import { storage, approvalStorage, policyStorage, pendingPolicyStorage, templateStorage, subscriptionStorage, type ApprovalType } from "./storage";
+import { storage, approvalStorage, policyStorage, pendingPolicyStorage, templateStorage, subscriptionStorage, recordingStorage, fileOperationStorage, type ApprovalType } from "./storage";
 import { subscriptionTiers, type SubscriptionTier } from "@shared/schema";
 import * as stripeLib from "./lib/stripe";
 import { log, logForseti, logError } from "./logger";
@@ -1561,6 +1561,23 @@ export async function registerRoutes(
     }
   );
 
+  // GET /api/admin/sessions/:id/file-operations - Get file operations for a session
+  app.get(
+    "/api/admin/sessions/:id/file-operations",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const sessionId = req.params.id;
+        const operations = await fileOperationStorage.getOperationsBySession(sessionId);
+        res.json({ operations });
+      } catch (error) {
+        log(`Failed to fetch session file operations: ${error}`);
+        res.status(500).json({ message: "Failed to fetch session file operations" });
+      }
+    }
+  );
+
   // ============================================
   // Admin Approvals Routes
   // ============================================
@@ -1927,6 +1944,37 @@ export async function registerRoutes(
       } catch (error) {
         log(`Failed to fetch access logs: ${error}`);
         res.status(500).json({ message: "Failed to fetch access logs" });
+      }
+    }
+  );
+
+  // GET /api/admin/logs/file-operations - Get file operation logs
+  app.get(
+    "/api/admin/logs/file-operations",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const limit = parseInt(req.query.limit as string) || 100;
+        const offset = parseInt(req.query.offset as string) || 0;
+        const operations = await fileOperationStorage.getOperations(limit, offset);
+        const total = await fileOperationStorage.getOperationCount();
+
+        // Enrich operations with server names
+        const serverIds = Array.from(new Set(operations.map((op) => op.serverId)));
+        const servers = await storage.getServersByIds(serverIds);
+        const serverMap = new Map(servers.map((s) => [s.id, s]));
+
+        const enrichedOperations = operations.map((op) => ({
+          ...op,
+          serverName: serverMap.get(op.serverId)?.name || "Unknown",
+          serverHost: serverMap.get(op.serverId)?.host || op.serverId,
+        }));
+
+        res.json({ operations: enrichedOperations, total });
+      } catch (error) {
+        log(`Failed to fetch file operation logs: ${error}`);
+        res.status(500).json({ message: "Failed to fetch file operation logs" });
       }
     }
   );
@@ -2606,5 +2654,223 @@ export async function registerRoutes(
     }
   );
 
+  // ============================================
+  // Session Recording Endpoints (Admin only)
+  // ============================================
+
+  // GET /api/admin/recordings - List all recordings
+  app.get(
+    "/api/admin/recordings",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const limit = parseInt(req.query.limit as string) || 50;
+        const offset = parseInt(req.query.offset as string) || 0;
+        const serverId = req.query.serverId as string | undefined;
+        const userId = req.query.userId as string | undefined;
+        const search = req.query.search as string | undefined;
+
+        let recordings;
+        if (search) {
+          recordings = await recordingStorage.searchRecordings(search, limit);
+        } else if (serverId) {
+          recordings = await recordingStorage.getRecordingsByServer(serverId, limit);
+        } else if (userId) {
+          recordings = await recordingStorage.getRecordingsByUser(userId, limit);
+        } else {
+          recordings = await recordingStorage.getRecordings(limit, offset);
+        }
+
+        // Get total count and storage usage
+        const totalCount = await recordingStorage.getRecordingCount();
+        const totalStorage = await recordingStorage.getTotalStorageBytes();
+
+        res.json({
+          recordings: recordings.map(r => ({
+            id: r.id,
+            sessionId: r.sessionId,
+            serverId: r.serverId,
+            serverName: r.serverName,
+            userId: r.userId,
+            userEmail: r.userEmail,
+            sshUser: r.sshUser,
+            startedAt: r.startedAt.toISOString(),
+            endedAt: r.endedAt?.toISOString() || null,
+            duration: r.duration,
+            terminalWidth: r.terminalWidth,
+            terminalHeight: r.terminalHeight,
+            fileSize: r.fileSize,
+            // Don't include full data in list response
+          })),
+          totalCount,
+          totalStorage,
+        });
+      } catch (error) {
+        log(`Failed to list recordings: ${error}`);
+        res.status(500).json({ error: "Internal Server Error" });
+      }
+    }
+  );
+
+  // GET /api/admin/recordings/:id - Get a specific recording with full data
+  app.get(
+    "/api/admin/recordings/:id",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const recording = await recordingStorage.getRecording(req.params.id);
+        if (!recording) {
+          res.status(404).json({ error: "Recording not found" });
+          return;
+        }
+
+        res.json({
+          id: recording.id,
+          sessionId: recording.sessionId,
+          serverId: recording.serverId,
+          serverName: recording.serverName,
+          userId: recording.userId,
+          userEmail: recording.userEmail,
+          sshUser: recording.sshUser,
+          startedAt: recording.startedAt.toISOString(),
+          endedAt: recording.endedAt?.toISOString() || null,
+          duration: recording.duration,
+          terminalWidth: recording.terminalWidth,
+          terminalHeight: recording.terminalHeight,
+          fileSize: recording.fileSize,
+          data: recording.data, // Full asciicast data for playback
+        });
+      } catch (error) {
+        log(`Failed to get recording: ${error}`);
+        res.status(500).json({ error: "Internal Server Error" });
+      }
+    }
+  );
+
+  // GET /api/admin/recordings/:id/download - Download recording as asciicast file
+  app.get(
+    "/api/admin/recordings/:id/download",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const recording = await recordingStorage.getRecording(req.params.id);
+        if (!recording) {
+          res.status(404).json({ error: "Recording not found" });
+          return;
+        }
+
+        const filename = `recording-${recording.id}-${recording.serverName}-${recording.startedAt.toISOString().split('T')[0]}.cast`;
+
+        res.setHeader("Content-Type", "application/x-asciicast");
+        res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+        res.send(recording.data);
+      } catch (error) {
+        log(`Failed to download recording: ${error}`);
+        res.status(500).json({ error: "Internal Server Error" });
+      }
+    }
+  );
+
+  // GET /api/admin/recordings/:id/search - Search within a recording's text content
+  app.get(
+    "/api/admin/recordings/:id/search",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const recording = await recordingStorage.getRecording(req.params.id);
+        if (!recording) {
+          res.status(404).json({ error: "Recording not found" });
+          return;
+        }
+
+        const query = req.query.q as string;
+        if (!query) {
+          res.status(400).json({ error: "Query parameter 'q' is required" });
+          return;
+        }
+
+        // Find all occurrences in text content
+        const textContent = recording.textContent;
+        const matches: { index: number; context: string }[] = [];
+        let searchIndex = 0;
+
+        while (true) {
+          const index = textContent.toLowerCase().indexOf(query.toLowerCase(), searchIndex);
+          if (index === -1) break;
+
+          // Get surrounding context (50 chars before and after)
+          const start = Math.max(0, index - 50);
+          const end = Math.min(textContent.length, index + query.length + 50);
+          const context = textContent.slice(start, end);
+
+          matches.push({ index, context });
+          searchIndex = index + 1;
+        }
+
+        res.json({ matches, total: matches.length });
+      } catch (error) {
+        log(`Failed to search recording: ${error}`);
+        res.status(500).json({ error: "Internal Server Error" });
+      }
+    }
+  );
+
+  // DELETE /api/admin/recordings/:id - Delete a recording
+  app.delete(
+    "/api/admin/recordings/:id",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const deleted = await recordingStorage.deleteRecording(req.params.id);
+        if (!deleted) {
+          res.status(404).json({ error: "Recording not found" });
+          return;
+        }
+
+        log(`Recording ${req.params.id} deleted by ${req.user?.email}`);
+        res.json({ success: true });
+      } catch (error) {
+        log(`Failed to delete recording: ${error}`);
+        res.status(500).json({ error: "Internal Server Error" });
+      }
+    }
+  );
+
+  // GET /api/admin/recordings/stats - Get recording statistics
+  app.get(
+    "/api/admin/recordings/stats",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const totalCount = await recordingStorage.getRecordingCount();
+        const totalStorage = await recordingStorage.getTotalStorageBytes();
+
+        res.json({
+          totalCount,
+          totalStorage,
+          totalStorageFormatted: formatBytes(totalStorage),
+        });
+      } catch (error) {
+        log(`Failed to get recording stats: ${error}`);
+        res.status(500).json({ error: "Internal Server Error" });
+      }
+    }
+  );
+
   return httpServer;
+}
+
+// Helper function to format bytes
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return "0 B";
+  const k = 1024;
+  const sizes = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
 }

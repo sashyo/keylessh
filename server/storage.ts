@@ -8,6 +8,8 @@ import {
   users,
   servers,
   sessions,
+  recordings,
+  fileOperations,
   subscriptions,
   billingHistory,
   subscriptionTiers,
@@ -17,6 +19,10 @@ import {
   type InsertServer,
   type Session,
   type InsertSession,
+  type FileOperation,
+  type FileOperationType,
+  type FileOperationMode,
+  type FileOperationStatus,
   type PolicyTemplate,
   type InsertPolicyTemplate,
   type TemplateParameter,
@@ -243,6 +249,51 @@ sqlite.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_billing_history_subscription ON billing_history(subscription_id);
   CREATE INDEX IF NOT EXISTS idx_billing_history_created ON billing_history(created_at DESC);
+
+  -- Session recordings table
+  CREATE TABLE IF NOT EXISTS recordings (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    server_id TEXT NOT NULL,
+    server_name TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    user_email TEXT NOT NULL,
+    ssh_user TEXT NOT NULL,
+    started_at INTEGER NOT NULL,
+    ended_at INTEGER,
+    duration INTEGER,
+    terminal_width INTEGER NOT NULL DEFAULT 80,
+    terminal_height INTEGER NOT NULL DEFAULT 24,
+    data TEXT NOT NULL DEFAULT '',
+    text_content TEXT NOT NULL DEFAULT '',
+    file_size INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE INDEX IF NOT EXISTS idx_recordings_session ON recordings(session_id);
+  CREATE INDEX IF NOT EXISTS idx_recordings_server ON recordings(server_id);
+  CREATE INDEX IF NOT EXISTS idx_recordings_user ON recordings(user_id);
+  CREATE INDEX IF NOT EXISTS idx_recordings_started ON recordings(started_at DESC);
+
+  -- File operations log table
+  CREATE TABLE IF NOT EXISTS file_operations (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    server_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    user_email TEXT,
+    ssh_user TEXT NOT NULL,
+    operation TEXT NOT NULL,
+    path TEXT NOT NULL,
+    target_path TEXT,
+    file_size INTEGER,
+    mode TEXT NOT NULL,
+    status TEXT NOT NULL,
+    error_message TEXT,
+    timestamp INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_file_ops_session ON file_operations(session_id);
+  CREATE INDEX IF NOT EXISTS idx_file_ops_server ON file_operations(server_id);
+  CREATE INDEX IF NOT EXISTS idx_file_ops_user ON file_operations(user_id);
+  CREATE INDEX IF NOT EXISTS idx_file_ops_timestamp ON file_operations(timestamp DESC);
 `);
 
 // Lightweight migrations for existing DBs (CREATE TABLE IF NOT EXISTS doesn't alter).
@@ -288,6 +339,36 @@ try {
   const hasServersOverLimit = subColumns.some((c) => c.name === "servers_over_limit");
   if (!hasServersOverLimit) {
     sqlite.prepare(`ALTER TABLE subscriptions ADD COLUMN servers_over_limit INTEGER DEFAULT 0`).run();
+  }
+} catch {
+  // Ignore migration errors; queries will surface issues.
+}
+
+// Migration: Add recording columns to servers table
+try {
+  const serverColumns = sqlite
+    .prepare(`PRAGMA table_info(servers)`)
+    .all() as Array<{ name: string }>;
+  const hasRecordingEnabled = serverColumns.some((c) => c.name === "recording_enabled");
+  if (!hasRecordingEnabled) {
+    sqlite.prepare(`ALTER TABLE servers ADD COLUMN recording_enabled INTEGER NOT NULL DEFAULT 0`).run();
+  }
+  const hasRecordedUsers = serverColumns.some((c) => c.name === "recorded_users");
+  if (!hasRecordedUsers) {
+    sqlite.prepare(`ALTER TABLE servers ADD COLUMN recorded_users TEXT NOT NULL DEFAULT '[]'`).run();
+  }
+} catch {
+  // Ignore migration errors; queries will surface issues.
+}
+
+// Migration: Add recording_id column to sessions table
+try {
+  const sessionColumns = sqlite
+    .prepare(`PRAGMA table_info(sessions)`)
+    .all() as Array<{ name: string }>;
+  const hasRecordingId = sessionColumns.some((c) => c.name === "recording_id");
+  if (!hasRecordingId) {
+    sqlite.prepare(`ALTER TABLE sessions ADD COLUMN recording_id TEXT`).run();
   }
 } catch {
   // Ignore migration errors; queries will surface issues.
@@ -355,6 +436,8 @@ export class SQLiteStorage implements IStorage {
       tags: (insertServer.tags ?? []) as string[],
       enabled: insertServer.enabled ?? true,
       sshUsers: (insertServer.sshUsers ?? []) as string[],
+      recordingEnabled: insertServer.recordingEnabled ?? false,
+      recordedUsers: (insertServer.recordedUsers ?? []) as string[],
     };
     db.insert(servers).values(server).run();
     return server;
@@ -404,6 +487,7 @@ export class SQLiteStorage implements IStorage {
       status: insertSession.status ?? "active",
       startedAt: new Date(),
       endedAt: null,
+      recordingId: insertSession.recordingId ?? null,
     };
     db.insert(sessions).values(session).run();
     return session;
@@ -1583,9 +1667,361 @@ export class SubscriptionStorage {
   }
 }
 
+// Recording types
+export interface Recording {
+  id: string;
+  sessionId: string;
+  serverId: string;
+  serverName: string;
+  userId: string;
+  userEmail: string;
+  sshUser: string;
+  startedAt: Date;
+  endedAt?: Date | null;
+  duration?: number | null;
+  terminalWidth: number;
+  terminalHeight: number;
+  data: string;
+  textContent: string;
+  fileSize: number;
+}
+
+export interface InsertRecording {
+  sessionId: string;
+  serverId: string;
+  serverName: string;
+  userId: string;
+  userEmail: string;
+  sshUser: string;
+  terminalWidth?: number;
+  terminalHeight?: number;
+}
+
+// Recording storage class for session recordings
+export class RecordingStorage {
+  // Create a new recording
+  async createRecording(data: InsertRecording): Promise<Recording> {
+    const id = randomUUID();
+    const now = Math.floor(Date.now() / 1000);
+
+    sqlite.prepare(`
+      INSERT INTO recordings (id, session_id, server_id, server_name, user_id, user_email, ssh_user, started_at, terminal_width, terminal_height)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      data.sessionId,
+      data.serverId,
+      data.serverName,
+      data.userId,
+      data.userEmail,
+      data.sshUser,
+      now,
+      data.terminalWidth || 80,
+      data.terminalHeight || 24
+    );
+
+    return {
+      id,
+      sessionId: data.sessionId,
+      serverId: data.serverId,
+      serverName: data.serverName,
+      userId: data.userId,
+      userEmail: data.userEmail,
+      sshUser: data.sshUser,
+      startedAt: new Date(now * 1000),
+      endedAt: null,
+      duration: null,
+      terminalWidth: data.terminalWidth || 80,
+      terminalHeight: data.terminalHeight || 24,
+      data: "",
+      textContent: "",
+      fileSize: 0,
+    };
+  }
+
+  // Append data to a recording (asciicast v2 format - JSON lines)
+  async appendData(id: string, eventData: string): Promise<void> {
+    sqlite.prepare(`
+      UPDATE recordings SET data = data || ?, file_size = file_size + ? WHERE id = ?
+    `).run(eventData, Buffer.byteLength(eventData, 'utf8'), id);
+  }
+
+  // Append text content for searchability
+  async appendTextContent(id: string, text: string): Promise<void> {
+    sqlite.prepare(`
+      UPDATE recordings SET text_content = text_content || ? WHERE id = ?
+    `).run(text, id);
+  }
+
+  // Finalize a recording (set end time and calculate duration)
+  async finalizeRecording(id: string): Promise<void> {
+    const now = Math.floor(Date.now() / 1000);
+
+    // Get start time to calculate duration
+    const row = sqlite.prepare(`
+      SELECT started_at FROM recordings WHERE id = ?
+    `).get(id) as { started_at: number } | undefined;
+
+    if (row) {
+      const duration = now - row.started_at;
+      sqlite.prepare(`
+        UPDATE recordings SET ended_at = ?, duration = ? WHERE id = ?
+      `).run(now, duration, id);
+    }
+  }
+
+  // Get recording by ID
+  async getRecording(id: string): Promise<Recording | undefined> {
+    const row = sqlite.prepare(`
+      SELECT * FROM recordings WHERE id = ?
+    `).get(id) as any | undefined;
+
+    if (!row) return undefined;
+
+    return this.mapRow(row);
+  }
+
+  // Get recording by session ID
+  async getRecordingBySessionId(sessionId: string): Promise<Recording | undefined> {
+    const row = sqlite.prepare(`
+      SELECT * FROM recordings WHERE session_id = ?
+    `).get(sessionId) as any | undefined;
+
+    if (!row) return undefined;
+
+    return this.mapRow(row);
+  }
+
+  // Get all recordings (paginated)
+  async getRecordings(limit: number = 50, offset: number = 0): Promise<Recording[]> {
+    const rows = sqlite.prepare(`
+      SELECT * FROM recordings ORDER BY started_at DESC LIMIT ? OFFSET ?
+    `).all(limit, offset) as any[];
+
+    return rows.map(row => this.mapRow(row));
+  }
+
+  // Get recordings by server ID
+  async getRecordingsByServer(serverId: string, limit: number = 50): Promise<Recording[]> {
+    const rows = sqlite.prepare(`
+      SELECT * FROM recordings WHERE server_id = ? ORDER BY started_at DESC LIMIT ?
+    `).all(serverId, limit) as any[];
+
+    return rows.map(row => this.mapRow(row));
+  }
+
+  // Get recordings by user ID
+  async getRecordingsByUser(userId: string, limit: number = 50): Promise<Recording[]> {
+    const rows = sqlite.prepare(`
+      SELECT * FROM recordings WHERE user_id = ? ORDER BY started_at DESC LIMIT ?
+    `).all(userId, limit) as any[];
+
+    return rows.map(row => this.mapRow(row));
+  }
+
+  // Search recordings by text content
+  async searchRecordings(query: string, limit: number = 50): Promise<Recording[]> {
+    const rows = sqlite.prepare(`
+      SELECT * FROM recordings WHERE text_content LIKE ? ORDER BY started_at DESC LIMIT ?
+    `).all(`%${query}%`, limit) as any[];
+
+    return rows.map(row => this.mapRow(row));
+  }
+
+  // Get recording count
+  async getRecordingCount(): Promise<number> {
+    const row = sqlite.prepare(`
+      SELECT COUNT(*) as count FROM recordings
+    `).get() as { count: number };
+    return row.count;
+  }
+
+  // Get total storage used by recordings
+  async getTotalStorageBytes(): Promise<number> {
+    const row = sqlite.prepare(`
+      SELECT SUM(file_size) as total FROM recordings
+    `).get() as { total: number | null };
+    return row.total || 0;
+  }
+
+  // Delete a recording
+  async deleteRecording(id: string): Promise<boolean> {
+    const result = sqlite.prepare(`
+      DELETE FROM recordings WHERE id = ?
+    `).run(id);
+    return result.changes > 0;
+  }
+
+  // Delete recordings older than a certain date
+  async deleteRecordingsOlderThan(date: Date): Promise<number> {
+    const timestamp = Math.floor(date.getTime() / 1000);
+    const result = sqlite.prepare(`
+      DELETE FROM recordings WHERE started_at < ?
+    `).run(timestamp);
+    return result.changes;
+  }
+
+  // Map database row to Recording type
+  private mapRow(row: any): Recording {
+    return {
+      id: row.id,
+      sessionId: row.session_id,
+      serverId: row.server_id,
+      serverName: row.server_name,
+      userId: row.user_id,
+      userEmail: row.user_email,
+      sshUser: row.ssh_user,
+      startedAt: new Date(row.started_at * 1000),
+      endedAt: row.ended_at ? new Date(row.ended_at * 1000) : null,
+      duration: row.duration,
+      terminalWidth: row.terminal_width,
+      terminalHeight: row.terminal_height,
+      data: row.data,
+      textContent: row.text_content,
+      fileSize: row.file_size,
+    };
+  }
+}
+
+// File operation storage class
+export interface InsertFileOperation {
+  sessionId: string;
+  serverId: string;
+  userId: string;
+  userEmail?: string;
+  sshUser: string;
+  operation: FileOperationType;
+  path: string;
+  targetPath?: string;
+  fileSize?: number;
+  mode: FileOperationMode;
+  status: FileOperationStatus;
+  errorMessage?: string;
+}
+
+export class FileOperationStorage {
+  // Log a file operation
+  async logOperation(data: InsertFileOperation): Promise<FileOperation> {
+    const id = randomUUID();
+    const now = Math.floor(Date.now() / 1000);
+
+    sqlite.prepare(`
+      INSERT INTO file_operations (id, session_id, server_id, user_id, user_email, ssh_user, operation, path, target_path, file_size, mode, status, error_message, timestamp)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      data.sessionId,
+      data.serverId,
+      data.userId,
+      data.userEmail || null,
+      data.sshUser,
+      data.operation,
+      data.path,
+      data.targetPath || null,
+      data.fileSize || null,
+      data.mode,
+      data.status,
+      data.errorMessage || null,
+      now
+    );
+
+    return {
+      id,
+      sessionId: data.sessionId,
+      serverId: data.serverId,
+      userId: data.userId,
+      userEmail: data.userEmail || null,
+      sshUser: data.sshUser,
+      operation: data.operation,
+      path: data.path,
+      targetPath: data.targetPath || null,
+      fileSize: data.fileSize || null,
+      mode: data.mode,
+      status: data.status,
+      errorMessage: data.errorMessage || null,
+      timestamp: new Date(now * 1000),
+    };
+  }
+
+  // Get file operations by session ID
+  async getOperationsBySession(sessionId: string): Promise<FileOperation[]> {
+    const rows = sqlite.prepare(`
+      SELECT * FROM file_operations WHERE session_id = ? ORDER BY timestamp DESC
+    `).all(sessionId) as any[];
+
+    return rows.map(row => this.mapRow(row));
+  }
+
+  // Get file operations by server ID
+  async getOperationsByServer(serverId: string, limit: number = 100): Promise<FileOperation[]> {
+    const rows = sqlite.prepare(`
+      SELECT * FROM file_operations WHERE server_id = ? ORDER BY timestamp DESC LIMIT ?
+    `).all(serverId, limit) as any[];
+
+    return rows.map(row => this.mapRow(row));
+  }
+
+  // Get file operations by user ID
+  async getOperationsByUser(userId: string, limit: number = 100): Promise<FileOperation[]> {
+    const rows = sqlite.prepare(`
+      SELECT * FROM file_operations WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?
+    `).all(userId, limit) as any[];
+
+    return rows.map(row => this.mapRow(row));
+  }
+
+  // Get all file operations (paginated)
+  async getOperations(limit: number = 100, offset: number = 0): Promise<FileOperation[]> {
+    const rows = sqlite.prepare(`
+      SELECT * FROM file_operations ORDER BY timestamp DESC LIMIT ? OFFSET ?
+    `).all(limit, offset) as any[];
+
+    return rows.map(row => this.mapRow(row));
+  }
+
+  // Get operation count
+  async getOperationCount(): Promise<number> {
+    const row = sqlite.prepare(`
+      SELECT COUNT(*) as count FROM file_operations
+    `).get() as { count: number };
+    return row.count;
+  }
+
+  // Delete operations older than a certain date
+  async deleteOperationsOlderThan(date: Date): Promise<number> {
+    const timestamp = Math.floor(date.getTime() / 1000);
+    const result = sqlite.prepare(`
+      DELETE FROM file_operations WHERE timestamp < ?
+    `).run(timestamp);
+    return result.changes;
+  }
+
+  // Map database row to FileOperation type
+  private mapRow(row: any): FileOperation {
+    return {
+      id: row.id,
+      sessionId: row.session_id,
+      serverId: row.server_id,
+      userId: row.user_id,
+      userEmail: row.user_email,
+      sshUser: row.ssh_user,
+      operation: row.operation as FileOperationType,
+      path: row.path,
+      targetPath: row.target_path,
+      fileSize: row.file_size,
+      mode: row.mode as FileOperationMode,
+      status: row.status as FileOperationStatus,
+      errorMessage: row.error_message,
+      timestamp: new Date(row.timestamp * 1000),
+    };
+  }
+}
+
 export const storage = new SQLiteStorage();
 export const approvalStorage = new ApprovalStorage();
 export const policyStorage = new PolicyStorage();
 export const pendingPolicyStorage = new PendingPolicyStorage();
 export const templateStorage = new TemplateStorage();
 export const subscriptionStorage = new SubscriptionStorage();
+export const recordingStorage = new RecordingStorage();
+export const fileOperationStorage = new FileOperationStorage();

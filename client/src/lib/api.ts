@@ -179,6 +179,10 @@ export const api = {
           `/api/admin/sessions/${id}/terminate`,
           { method: "POST" }
         ),
+      getFileOperations: (sessionId: string) =>
+        apiRequest<{ operations: FileOperationLog[] }>(
+          `/api/admin/sessions/${sessionId}/file-operations`
+        ),
     },
     approvals: {
       list: () => apiRequest<PendingApproval[]>("/api/admin/approvals"),
@@ -214,6 +218,10 @@ export const api = {
       access: (limit?: number, offset?: number) =>
         apiRequest<TidecloakEvent[]>(
           `/api/admin/logs/access?limit=${limit || 100}&offset=${offset || 0}`
+        ),
+      fileOperations: (limit?: number, offset?: number) =>
+        apiRequest<{ operations: FileOperationLog[]; total: number }>(
+          `/api/admin/logs/file-operations?limit=${limit || 100}&offset=${offset || 0}`
         ),
     },
     accessApprovals: {
@@ -304,6 +312,27 @@ export const api = {
           method: "POST",
           body: JSON.stringify({ params }),
         }),
+    },
+    recordings: {
+      list: (params?: { limit?: number; offset?: number; serverId?: string; userId?: string; search?: string }) => {
+        const searchParams = new URLSearchParams();
+        if (params?.limit) searchParams.set("limit", String(params.limit));
+        if (params?.offset) searchParams.set("offset", String(params.offset));
+        if (params?.serverId) searchParams.set("serverId", params.serverId);
+        if (params?.userId) searchParams.set("userId", params.userId);
+        if (params?.search) searchParams.set("search", params.search);
+        const query = searchParams.toString();
+        return apiRequest<RecordingsListResponse>(`/api/admin/recordings${query ? `?${query}` : ""}`);
+      },
+      get: (id: string) => apiRequest<RecordingDetails>(`/api/admin/recordings/${id}`),
+      getStats: () => apiRequest<RecordingStats>("/api/admin/recordings/stats"),
+      search: (id: string, query: string) =>
+        apiRequest<{ matches: { index: number; context: string }[]; total: number }>(
+          `/api/admin/recordings/${id}/search?q=${encodeURIComponent(query)}`
+        ),
+      delete: (id: string) =>
+        apiRequest<{ success: boolean }>(`/api/admin/recordings/${id}`, { method: "DELETE" }),
+      getDownloadUrl: (id: string) => `/api/admin/recordings/${id}/download`,
     },
     license: {
       get: () => apiRequest<LicenseInfo>("/api/admin/license"),
@@ -430,6 +459,25 @@ export interface TidecloakEvent {
   details?: Record<string, any>;
 }
 
+export interface FileOperationLog {
+  id: string;
+  sessionId: string;
+  serverId: string;
+  serverName: string;
+  serverHost: string;
+  userId: string;
+  userEmail: string | null;
+  sshUser: string;
+  operation: "upload" | "download" | "delete" | "mkdir" | "rename" | "chmod";
+  path: string;
+  targetPath: string | null;
+  fileSize: number | null;
+  mode: "sftp" | "scp";
+  status: "success" | "error";
+  errorMessage: string | null;
+  timestamp: string; // ISO date string
+}
+
 // TideCloak Change Set Types
 export interface ChangeSetRequest {
   changeSetId: string;
@@ -530,4 +578,37 @@ export interface PricingInfo {
     enterprise: TierInfo;
   };
   stripeConfigured: boolean;
+}
+
+// Recording types
+export interface RecordingSummary {
+  id: string;
+  sessionId: string;
+  serverId: string;
+  serverName: string;
+  userId: string;
+  userEmail: string;
+  sshUser: string;
+  startedAt: string;
+  endedAt: string | null;
+  duration: number | null;
+  terminalWidth: number;
+  terminalHeight: number;
+  fileSize: number;
+}
+
+export interface RecordingDetails extends RecordingSummary {
+  data: string; // Full asciicast data for playback
+}
+
+export interface RecordingsListResponse {
+  recordings: RecordingSummary[];
+  totalCount: number;
+  totalStorage: number;
+}
+
+export interface RecordingStats {
+  totalCount: number;
+  totalStorage: number;
+  totalStorageFormatted: string;
 }

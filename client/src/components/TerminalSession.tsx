@@ -8,6 +8,12 @@ import "@xterm/xterm/css/xterm.css";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { useToast } from "@/hooks/use-toast";
 import { PrivateKeyInput } from "@/components/PrivateKeyInput";
 import { useSSHSession } from "@/hooks/useSSHSession";
@@ -31,6 +37,8 @@ import {
   X,
   FolderOpen,
   PanelLeftClose,
+  Terminal,
+  ChevronDown,
 } from "lucide-react";
 import {
   ResizablePanelGroup,
@@ -96,7 +104,7 @@ export function TerminalSession({
   const serverIsDisabled = server ? !server.enabled : false;
   const serverIsOffline = server ? server.status === "offline" : false;
 
-  const { connect, disconnect, send, resize, setDimensions, status, error, openSftp, closeSftp, sftpClient } = useSSHSession({
+  const { connect, disconnect, send, resize, setDimensions, status, error, openSftp, closeSftp, sftpClient, openScp, closeScp, scpClient, getSession, sendFileOpEvent } = useSSHSession({
     host: server?.host || "",
     port: server?.port || 22,
     serverId,
@@ -106,6 +114,7 @@ export function TerminalSession({
 
   const [showFileBrowser, setShowFileBrowser] = useState(false);
   const [sftpLoading, setSftpLoading] = useState(false);
+  const [fileTransferMode, setFileTransferMode] = useState<"sftp" | "scp" | null>(null);
 
   const prevStatusRef = useRef<SSHConnectionStatus>("disconnected");
   const disconnectedWithReason = status === "disconnected" && !!error;
@@ -172,9 +181,11 @@ export function TerminalSession({
   const handleDisconnect = useCallback(() => {
     userInitiatedDisconnectRef.current = true;
     setShowFileBrowser(false);
+    setFileTransferMode(null);
     closeSftp();
+    closeScp();
     disconnect();
-  }, [closeSftp, disconnect]);
+  }, [closeSftp, closeScp, disconnect]);
 
   const toggleFileBrowser = useCallback(async () => {
     if (showFileBrowser) {
@@ -182,24 +193,77 @@ export function TerminalSession({
       return;
     }
 
-    if (!sftpClient) {
-      setSftpLoading(true);
-      try {
-        await openSftp();
-      } catch (err) {
-        console.error("Failed to open SFTP:", err);
-        toast({
-          title: "SFTP Error",
-          description: err instanceof Error ? err.message : "Failed to open SFTP session",
-          variant: "destructive",
-        });
-        setSftpLoading(false);
-        return;
-      }
+    // If we already have a file transfer mode, just show the browser
+    if (fileTransferMode) {
+      setShowFileBrowser(true);
+      return;
+    }
+
+    setSftpLoading(true);
+
+    // Try SFTP first
+    try {
+      await openSftp();
+      setFileTransferMode("sftp");
+      setSftpLoading(false);
+      setShowFileBrowser(true);
+      return;
+    } catch (sftpErr) {
+      console.warn("SFTP not available, trying SCP fallback:", sftpErr);
+    }
+
+    // Fallback to SCP + exec
+    try {
+      openScp();
+      setFileTransferMode("scp");
+      setSftpLoading(false);
+      setShowFileBrowser(true);
+      toast({
+        title: "Using SCP mode",
+        description: "SFTP not available, using SCP for file transfers",
+      });
+    } catch (scpErr) {
+      console.error("Failed to open SCP:", scpErr);
+      toast({
+        title: "File Browser Error",
+        description: "Neither SFTP nor SCP is available on this server",
+        variant: "destructive",
+      });
       setSftpLoading(false);
     }
-    setShowFileBrowser(true);
-  }, [showFileBrowser, sftpClient, openSftp, toast]);
+  }, [showFileBrowser, fileTransferMode, openSftp, openScp, toast]);
+
+  const forceScpMode = useCallback(() => {
+    // Close any existing file transfer sessions
+    if (sftpClient) {
+      closeSftp();
+    }
+    if (scpClient) {
+      closeScp();
+    }
+    setFileTransferMode(null);
+
+    // Open SCP directly
+    setSftpLoading(true);
+    try {
+      openScp();
+      setFileTransferMode("scp");
+      setSftpLoading(false);
+      setShowFileBrowser(true);
+      toast({
+        title: "SCP Mode (Forced)",
+        description: "Using SCP for file transfers",
+      });
+    } catch (err) {
+      console.error("Failed to open SCP:", err);
+      toast({
+        title: "SCP Error",
+        description: err instanceof Error ? err.message : "Failed to open SCP",
+        variant: "destructive",
+      });
+      setSftpLoading(false);
+    }
+  }, [sftpClient, scpClient, closeSftp, closeScp, openScp, toast]);
 
   const handleCopy = useCallback(() => {
     const selection = xtermRef.current?.getSelection();
@@ -392,21 +456,46 @@ export function TerminalSession({
               Close tab
             </Button>
           )}
-          <Button
-            variant={showFileBrowser ? "secondary" : "outline"}
-            size="sm"
-            onClick={toggleFileBrowser}
-            disabled={status !== "connected" || sftpLoading}
-          >
-            {sftpLoading ? (
-              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-            ) : showFileBrowser ? (
-              <PanelLeftClose className="h-4 w-4 mr-2" />
-            ) : (
-              <FolderOpen className="h-4 w-4 mr-2" />
-            )}
-            {showFileBrowser ? "Hide Files" : "Files"}
-          </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant={showFileBrowser ? "secondary" : "outline"}
+                size="sm"
+                disabled={status !== "connected" || sftpLoading}
+              >
+                {sftpLoading ? (
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                ) : showFileBrowser ? (
+                  <PanelLeftClose className="h-4 w-4 mr-2" />
+                ) : (
+                  <FolderOpen className="h-4 w-4 mr-2" />
+                )}
+                {showFileBrowser ? `Files (${fileTransferMode?.toUpperCase() || "..."})` : "Files"}
+                <ChevronDown className="h-3 w-3 ml-1" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              {showFileBrowser ? (
+                <DropdownMenuItem onClick={() => setShowFileBrowser(false)}>
+                  <PanelLeftClose className="h-4 w-4 mr-2" />
+                  Hide Files
+                </DropdownMenuItem>
+              ) : (
+                <>
+                  <DropdownMenuItem onClick={toggleFileBrowser}>
+                    <FolderOpen className="h-4 w-4 mr-2" />
+                    Open Files (SFTP)
+                  </DropdownMenuItem>
+                  {import.meta.env.VITE_ENABLE_SCP_DEBUG === "true" && (
+                    <DropdownMenuItem onClick={forceScpMode}>
+                      <Terminal className="h-4 w-4 mr-2" />
+                      Force SCP Mode
+                    </DropdownMenuItem>
+                  )}
+                </>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
           <Button variant="outline" size="sm" onClick={handleCopy} disabled={status !== "connected"}>
             <Copy className="h-4 w-4 mr-2" />
             Copy
@@ -430,10 +519,16 @@ export function TerminalSession({
       </div>
 
       <ResizablePanelGroup direction="horizontal" className="flex-1 min-h-[420px] w-full rounded-xl overflow-hidden">
-        {showFileBrowser && sftpClient && (
+        {showFileBrowser && (sftpClient || (scpClient && getSession())) && (
           <>
             <ResizablePanel defaultSize={25} minSize={15} maxSize={50} className="border rounded-l-xl bg-background">
-              <FileBrowser client={sftpClient} initialPath="~" />
+              <FileBrowser
+                client={sftpClient}
+                scpClient={scpClient}
+                session={getSession()}
+                initialPath="~"
+                onFileOp={sendFileOpEvent}
+              />
             </ResizablePanel>
             <ResizableHandle withHandle />
           </>

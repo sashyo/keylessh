@@ -58,14 +58,20 @@ export async function authenticate(
   res: Response,
   next: NextFunction
 ) {
+  // Check Authorization header first, then query param (for downloads via window.open)
   const authHeader = req.headers.authorization;
+  let token: string | null = null;
 
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+  if (authHeader?.startsWith("Bearer ")) {
+    token = authHeader.substring(7);
+  } else if (typeof req.query.token === "string" && req.query.token) {
+    token = req.query.token;
+  }
+
+  if (!token) {
     res.status(401).json({ message: "Authentication required" });
     return;
   }
-
-  const token = authHeader.substring(7);
 
   try {
     // Use TideCloak JWT verification with JWKS

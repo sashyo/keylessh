@@ -1,6 +1,8 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { BrowserSSHClient, SSHConnectionStatus, type SSHSigner, type SSHAuth } from "@/lib/sshClient";
 import type { SftpClient } from "@/lib/sftp";
+import type { ScpClient } from "@/lib/scp";
+import type { SshClientSession } from "@microsoft/dev-tunnels-ssh";
 
 interface UseSSHSessionOptions {
   host: string;
@@ -10,6 +12,16 @@ interface UseSSHSessionOptions {
   onData: (data: Uint8Array) => void;
   signer?: SSHSigner;
 }
+
+export type FileOpEvent = {
+  operation: "upload" | "download" | "delete" | "mkdir" | "rename" | "chmod";
+  path: string;
+  targetPath?: string;
+  fileSize?: number;
+  mode: "sftp" | "scp";
+  status: "success" | "error";
+  errorMessage?: string;
+};
 
 interface UseSSHSessionReturn {
   connect: (auth: SSHAuth, signerOverride?: SSHSigner) => Promise<void>;
@@ -23,6 +35,14 @@ interface UseSSHSessionReturn {
   openSftp: () => Promise<SftpClient>;
   closeSftp: () => void;
   sftpClient: SftpClient | null;
+  // SCP (fallback for servers without SFTP)
+  openScp: () => ScpClient;
+  closeScp: () => void;
+  scpClient: ScpClient | null;
+  // Raw session for exec commands
+  getSession: () => SshClientSession | null;
+  // File operation logging
+  sendFileOpEvent: (event: FileOpEvent) => void;
 }
 
 export function useSSHSession({
@@ -36,6 +56,7 @@ export function useSSHSession({
   const [status, setStatus] = useState<SSHConnectionStatus>("disconnected");
   const [error, setError] = useState<string | null>(null);
   const [sftpClient, setSftpClient] = useState<SftpClient | null>(null);
+  const [scpClient, setScpClient] = useState<ScpClient | null>(null);
   const clientRef = useRef<BrowserSSHClient | null>(null);
   const initialColsRef = useRef<number>(80);
   const initialRowsRef = useRef<number>(24);
@@ -159,6 +180,32 @@ export function useSSHSession({
     setSftpClient(null);
   }, []);
 
+  const openScp = useCallback((): ScpClient => {
+    if (!clientRef.current) {
+      throw new Error("SSH not connected");
+    }
+    const client = clientRef.current.openScp();
+    setScpClient(client);
+    return client;
+  }, []);
+
+  const closeScp = useCallback(() => {
+    if (clientRef.current) {
+      clientRef.current.closeScp();
+    }
+    setScpClient(null);
+  }, []);
+
+  const getSession = useCallback((): SshClientSession | null => {
+    return clientRef.current?.getSession() ?? null;
+  }, []);
+
+  const sendFileOpEvent = useCallback((event: FileOpEvent) => {
+    if (clientRef.current) {
+      clientRef.current.sendFileOpEvent(event);
+    }
+  }, []);
+
   return {
     connect,
     disconnect,
@@ -170,5 +217,10 @@ export function useSSHSession({
     openSftp,
     closeSftp,
     sftpClient,
+    openScp,
+    closeScp,
+    scpClient,
+    getSession,
+    sendFileOpEvent,
   };
 }

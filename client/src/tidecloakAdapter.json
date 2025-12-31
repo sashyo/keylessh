@@ -1,23 +1,25 @@
 {
   "realm": "keylessh",
-  "auth-server-url": "https://staging.dauth.me",
+  "auth-server-url": "http://localhost:8080",
   "ssl-required": "external",
-  "resource": "keylessh",
+  "resource": "ssh",
   "public-client": true,
+  "verify-token-audience": true,
+  "use-resource-role-mappings": true,
   "confidential-port": 0,
   "jwk": {
     "keys": [
       {
-        "kid": "5opYXX7-oXXs_cnqOGihSffmk4ScRB60FAwgs9LG0Lk",
+        "kid": "VGOP9E3B3Vg5BOWNfSX1oyMrXtWtt9EPobI6HDS5gKM",
         "kty": "OKP",
         "alg": "EdDSA",
         "use": "sig",
         "crv": "Ed25519",
-        "x": "BKW0pMLoxXxVDjLfqLBNMbT6_OR-OjSNs5ynfHJiB2s"
+        "x": "OY1dVDuzaFYLTGbaQrg0lY3EZlFE6gW2aSHIdmU71MQ"
       }
     ]
   },
-  "vendorId": "2851288777968914823306014435508099356347218633814933427151162349857414668086",
-  "homeOrkUrl": "https://sork1.tideprotocol.com",
-  "client-origin-auth-http://localhost:3000": "VzZlZolNKlGihZWl3DQiufGSLn8zCgrAvJ8QbYYIOPpamNscnlA5zTjR0r55DWq45l8lI0fJhWTtckbc6OLmDg=="
+  "vendorId": "2201280253561883402109377690053655012515671141010181876947030686763248416714",
+  "homeOrkUrl": "http://localhost:1001",
+  "client-origin-auth-http://localhost:3000": "9f91xT9UfO6u468RGpWvb8DbwIZei/5UGT2T9XKoWUWMbHOs2kBOHD2Ymn1o3oOoWJKA3n8WDpSnANAVSDtOCQ=="
 }
