@@ -5,6 +5,10 @@
   <p>The world's first web SSH client where private keys don't exist - not on servers, not in browsers, not even in memory. Powered by Tide's decentralised threshold cryptography.</p>
 </div>
 
+<p align="center">
+  <img src="docs/demo.gif" alt="KeyleSSH Demo" width="800" />
+</p>
+
 ## What Makes KeyleSSH Different
 
 Traditional web SSH clients have a fundamental problem: private keys. Whether stored on a server, uploaded by users, or generated in the browser, private keys are always a liability - they can be stolen, leaked, or compromised.
