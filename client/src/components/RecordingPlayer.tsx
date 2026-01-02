@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
 import { Play, Pause, RotateCcw, FastForward } from "lucide-react";
@@ -21,6 +21,255 @@ interface RecordingPlayerProps {
   recording: RecordingDetails;
 }
 
+// ANSI color code to CSS color mapping
+const ANSI_COLORS: Record<number, string> = {
+  30: "#000000", // Black
+  31: "#cc0000", // Red
+  32: "#4e9a06", // Green
+  33: "#c4a000", // Yellow
+  34: "#3465a4", // Blue
+  35: "#75507b", // Magenta
+  36: "#06989a", // Cyan
+  37: "#d3d7cf", // White
+  90: "#555753", // Bright Black
+  91: "#ef2929", // Bright Red
+  92: "#8ae234", // Bright Green
+  93: "#fce94f", // Bright Yellow
+  94: "#729fcf", // Bright Blue
+  95: "#ad7fa8", // Bright Magenta
+  96: "#34e2e2", // Bright Cyan
+  97: "#eeeeec", // Bright White
+};
+
+const ANSI_BG_COLORS: Record<number, string> = {
+  40: "#000000",
+  41: "#cc0000",
+  42: "#4e9a06",
+  43: "#c4a000",
+  44: "#3465a4",
+  45: "#75507b",
+  46: "#06989a",
+  47: "#d3d7cf",
+  100: "#555753",
+  101: "#ef2929",
+  102: "#8ae234",
+  103: "#fce94f",
+  104: "#729fcf",
+  105: "#ad7fa8",
+  106: "#34e2e2",
+  107: "#eeeeec",
+};
+
+interface TextStyle {
+  color?: string;
+  backgroundColor?: string;
+  bold?: boolean;
+  dim?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+}
+
+interface StyledSegment {
+  text: string;
+  style: TextStyle;
+}
+
+// Parse ANSI escape sequences and return styled segments
+function parseAnsiToSegments(input: string): StyledSegment[] {
+  const segments: StyledSegment[] = [];
+  let currentStyle: TextStyle = {};
+  let currentText = "";
+  let i = 0;
+
+  // First, process backspaces and line clearing in the raw text
+  let processedInput = processControlChars(input);
+
+  while (i < processedInput.length) {
+    // Check for escape sequence
+    if (processedInput[i] === "\x1b" || processedInput[i] === "\u001b") {
+      // Save current text if any
+      if (currentText) {
+        segments.push({ text: currentText, style: { ...currentStyle } });
+        currentText = "";
+      }
+
+      // Check what type of escape sequence
+      if (processedInput[i + 1] === "[") {
+        // CSI sequence (Control Sequence Introducer)
+        let j = i + 2;
+        let params = "";
+
+        // Collect parameters until we hit a letter
+        while (j < processedInput.length && !/[A-Za-z]/.test(processedInput[j])) {
+          params += processedInput[j];
+          j++;
+        }
+
+        const command = processedInput[j];
+
+        if (command === "m") {
+          // SGR (Select Graphic Rendition) - color/style codes
+          const codes = params ? params.split(";").map(Number) : [0];
+          currentStyle = applyAnsiCodes(codes, currentStyle);
+        }
+        // Skip other CSI sequences (cursor movement, etc.)
+
+        i = j + 1;
+        continue;
+      } else if (processedInput[i + 1] === "]") {
+        // OSC sequence (Operating System Command) - window title, etc.
+        // Skip until BEL (\x07) or ST (\x1b\\)
+        let j = i + 2;
+        while (j < processedInput.length) {
+          if (processedInput[j] === "\x07" || processedInput[j] === "\u0007") {
+            j++;
+            break;
+          }
+          if (processedInput[j] === "\x1b" && processedInput[j + 1] === "\\") {
+            j += 2;
+            break;
+          }
+          j++;
+        }
+        i = j;
+        continue;
+      } else {
+        // Unknown escape sequence, skip the escape character
+        i++;
+        continue;
+      }
+    }
+
+    // Skip bell character
+    if (processedInput[i] === "\x07" || processedInput[i] === "\u0007") {
+      i++;
+      continue;
+    }
+
+    // Regular character
+    currentText += processedInput[i];
+    i++;
+  }
+
+  // Add remaining text
+  if (currentText) {
+    segments.push({ text: currentText, style: { ...currentStyle } });
+  }
+
+  return segments;
+}
+
+// Process control characters like backspace and erase
+function processControlChars(input: string): string {
+  let result = "";
+  let i = 0;
+
+  while (i < input.length) {
+    const char = input[i];
+
+    // Handle backspace
+    if (char === "\b" || char === "\x08") {
+      // Remove last character from result
+      if (result.length > 0 && result[result.length - 1] !== "\n") {
+        result = result.slice(0, -1);
+      }
+      i++;
+      continue;
+    }
+
+    // Handle carriage return (move to start of line)
+    if (char === "\r") {
+      // If followed by \n, it's a newline
+      if (input[i + 1] === "\n") {
+        result += "\r\n";
+        i += 2;
+        continue;
+      }
+      // Otherwise, move to start of current line (overwrite mode)
+      const lastNewline = result.lastIndexOf("\n");
+      if (lastNewline >= 0) {
+        result = result.slice(0, lastNewline + 1);
+      } else {
+        result = "";
+      }
+      i++;
+      continue;
+    }
+
+    result += char;
+    i++;
+  }
+
+  return result;
+}
+
+// Apply ANSI SGR codes to style
+function applyAnsiCodes(codes: number[], currentStyle: TextStyle): TextStyle {
+  const style = { ...currentStyle };
+
+  for (const code of codes) {
+    if (code === 0) {
+      // Reset
+      return {};
+    } else if (code === 1) {
+      style.bold = true;
+    } else if (code === 2) {
+      style.dim = true;
+    } else if (code === 3) {
+      style.italic = true;
+    } else if (code === 4) {
+      style.underline = true;
+    } else if (code === 22) {
+      style.bold = false;
+      style.dim = false;
+    } else if (code === 23) {
+      style.italic = false;
+    } else if (code === 24) {
+      style.underline = false;
+    } else if (code >= 30 && code <= 37) {
+      style.color = ANSI_COLORS[code];
+    } else if (code >= 90 && code <= 97) {
+      style.color = ANSI_COLORS[code];
+    } else if (code === 39) {
+      delete style.color;
+    } else if (code >= 40 && code <= 47) {
+      style.backgroundColor = ANSI_BG_COLORS[code];
+    } else if (code >= 100 && code <= 107) {
+      style.backgroundColor = ANSI_BG_COLORS[code];
+    } else if (code === 49) {
+      delete style.backgroundColor;
+    }
+  }
+
+  return style;
+}
+
+// Convert style to CSS
+function styleToCss(style: TextStyle): React.CSSProperties {
+  const css: React.CSSProperties = {};
+
+  if (style.color) {
+    css.color = style.color;
+  }
+  if (style.backgroundColor) {
+    css.backgroundColor = style.backgroundColor;
+  }
+  if (style.bold) {
+    css.fontWeight = "bold";
+  }
+  if (style.dim) {
+    css.opacity = 0.5;
+  }
+  if (style.italic) {
+    css.fontStyle = "italic";
+  }
+  if (style.underline) {
+    css.textDecoration = "underline";
+  }
+
+  return css;
+}
+
 export function RecordingPlayer({ recording }: RecordingPlayerProps) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -32,7 +281,10 @@ export function RecordingPlayer({ recording }: RecordingPlayerProps) {
   const pausedAtRef = useRef<number>(0);
 
   // Parse asciicast v2 data
-  const { header, events, duration } = parseAsciicast(recording.data);
+  const { header, events, duration } = useMemo(
+    () => parseAsciicast(recording.data),
+    [recording.data]
+  );
 
   // Get terminal content up to a specific time
   const getContentAtTime = useCallback(
@@ -48,6 +300,27 @@ export function RecordingPlayer({ recording }: RecordingPlayerProps) {
     },
     [events]
   );
+
+  // Render terminal content with ANSI colors
+  const renderedContent = useMemo(() => {
+    if (!terminalContent) return null;
+
+    const segments = parseAnsiToSegments(terminalContent);
+
+    return segments.map((segment, index) => {
+      const css = styleToCss(segment.style);
+      const hasStyle = Object.keys(css).length > 0;
+
+      if (hasStyle) {
+        return (
+          <span key={index} style={css}>
+            {segment.text}
+          </span>
+        );
+      }
+      return segment.text;
+    });
+  }, [terminalContent]);
 
   // Start/stop playback
   useEffect(() => {
@@ -148,13 +421,13 @@ export function RecordingPlayer({ recording }: RecordingPlayerProps) {
         </div>
         <pre
           ref={terminalRef}
-          className="p-4 text-green-400 font-mono text-sm overflow-auto whitespace-pre-wrap"
+          className="p-4 text-gray-300 font-mono text-sm overflow-auto whitespace-pre-wrap"
           style={{
             height: `${Math.min(header.height * 18, 400)}px`,
             backgroundColor: "#1a1a1a",
           }}
         >
-          {terminalContent || <span className="text-gray-500">Press play to start...</span>}
+          {renderedContent || <span className="text-gray-500">Press play to start...</span>}
         </pre>
       </div>
 

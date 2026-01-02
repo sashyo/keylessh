@@ -100,6 +100,26 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full flow diagram.
 
 See [docs/DEVELOPERS.md](docs/DEVELOPERS.md).
 
+## Deployment Options
+
+KeyleSSH is **open source** and designed for flexible deployment:
+
+### Self-Hosted (No Limits)
+Deploy KeyleSSH for your organization with **no usage restrictions**. By default, there are no limits on users, servers, or features. Perfect for:
+- Enterprise internal deployments
+- Development teams
+- Personal/homelab use
+
+Just follow the [Deployment Guide](docs/DEPLOYMENT.md) - no licensing configuration needed.
+
+### SaaS Mode (Tiered Billing)
+If you want to offer KeyleSSH as a commercial service with subscription tiers, configure Stripe billing:
+- Free tier: 5 users, 2 servers
+- Pro tier: 25 users, 10 servers
+- Enterprise tier: Unlimited
+
+See [SaaS Configuration](docs/DEPLOYMENT.md#saas-mode-stripe-billing) in the deployment guide.
+
 ## License
 
 MIT

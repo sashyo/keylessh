@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Server, Terminal, Clock, Activity, ArrowRight, Wifi, WifiOff, HelpCircle, AlertCircle } from "lucide-react";
+import { Server, Terminal, Clock, Activity, ArrowRight, HelpCircle, AlertCircle } from "lucide-react";
 import { useCallback, useState } from "react";
 import type { ServerWithAccess, ActiveSession } from "@shared/schema";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
@@ -20,12 +20,12 @@ function ServerCard({ server, sshBlocked }: { server: ServerWithAccess; sshBlock
   const isDisabled = !server.enabled || server.status === "offline" || !selectedUser || sshBlocked;
 
   return (
-    <Card className="group" data-testid={`server-card-${server.id}`}>
+    <Card className="group cyber-card hover-neon-glow" data-testid={`server-card-${server.id}`}>
       <CardHeader className="pb-3">
         <div className="flex items-start justify-between gap-4">
           <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/10">
-              <Server className="h-5 w-5 text-primary" />
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-[hsl(var(--neon-cyan)/0.15)] border border-[hsl(var(--neon-cyan)/0.3)] group-hover:border-[hsl(var(--neon-cyan)/0.5)] transition-colors">
+              <Server className="h-5 w-5 text-[hsl(var(--neon-cyan))]" />
             </div>
             <div>
               <CardTitle className="text-base">{server.name}</CardTitle>
@@ -37,12 +37,12 @@ function ServerCard({ server, sshBlocked }: { server: ServerWithAccess; sshBlock
           <div className="flex items-center gap-2">
             {server.status === "online" ? (
               <Badge variant="outline" className="gap-1.5 label-success">
-                <Wifi className="h-3 w-3" />
+                <span className="h-2 w-2 rounded-full bg-[hsl(var(--neon-green))] animate-pulse" />
                 Online
               </Badge>
             ) : server.status === "offline" ? (
               <Badge variant="outline" className="gap-1.5 label-danger">
-                <WifiOff className="h-3 w-3" />
+                <span className="h-2 w-2 rounded-full bg-[hsl(var(--neon-red))]" />
                 Offline
               </Badge>
             ) : (
@@ -103,7 +103,7 @@ function ServerCard({ server, sshBlocked }: { server: ServerWithAccess; sshBlock
         ) : (
           <Link href={`/app/console?serverId=${encodeURIComponent(server.id)}&user=${encodeURIComponent(selectedUser)}`}>
             <Button
-              className="w-full gap-2"
+              className="w-full gap-2 btn-primary-glow"
               data-testid={`connect-button-${server.id}`}
             >
               <Terminal className="h-4 w-4" />
@@ -149,10 +149,10 @@ function ServerCardSkeleton() {
 
 function SessionItem({ session }: { session: ActiveSession }) {
   return (
-    <div className="flex items-center justify-between py-3 px-4 hover-elevate rounded-md" data-testid={`session-${session.id}`}>
+    <div className="flex items-center justify-between py-3 px-4 hover-elevate rounded-md group" data-testid={`session-${session.id}`}>
       <div className="flex items-center gap-3">
-        <div className="flex h-8 w-8 items-center justify-center rounded-md bg-chart-2/10">
-          <Activity className="h-4 w-4 text-chart-2" />
+        <div className="flex h-8 w-8 items-center justify-center rounded-md bg-[hsl(var(--neon-green)/0.15)] border border-[hsl(var(--neon-green)/0.3)]">
+          <Activity className="h-4 w-4 text-[hsl(var(--neon-green))]" />
         </div>
         <div>
           <p className="text-sm font-medium">{session.serverName}</p>
@@ -163,13 +163,13 @@ function SessionItem({ session }: { session: ActiveSession }) {
       </div>
       <div className="flex items-center gap-3">
         <div className="text-right">
-          <Badge variant="outline" className="text-xs gap-1">
-            <span className="h-1.5 w-1.5 rounded-full bg-chart-2 animate-pulse" />
+          <Badge variant="outline" className="text-xs gap-1 label-success">
+            <span className="h-1.5 w-1.5 rounded-full bg-[hsl(var(--neon-green))] animate-pulse" />
             Active
           </Badge>
         </div>
         <Link href={`/app/console?serverId=${encodeURIComponent(session.serverId)}&user=${encodeURIComponent(session.sshUser)}`}>
-          <Button size="sm" variant="ghost" data-testid={`reconnect-session-${session.id}`}>
+          <Button size="sm" variant="ghost" className="group-hover:text-[hsl(var(--neon-cyan))]" data-testid={`reconnect-session-${session.id}`}>
             Reconnect
           </Button>
         </Link>
@@ -247,10 +247,10 @@ export default function Dashboard() {
         <div className="space-y-4">
           <div className="flex items-center justify-between">
             <h2 className="text-lg font-medium flex items-center gap-2">
-              <Activity className="h-5 w-5 text-chart-2" />
+              <Activity className="h-5 w-5 text-[hsl(var(--neon-green))]" />
               Active Sessions
             </h2>
-            <Badge variant="secondary">{activeSessions.length}</Badge>
+            <Badge variant="secondary" className="label-info">{activeSessions.length}</Badge>
           </div>
           <Card>
             <CardContent className="p-0 divide-y divide-border">
@@ -265,10 +265,10 @@ export default function Dashboard() {
       <div className="space-y-4">
         <div className="flex items-center justify-between">
           <h2 className="text-lg font-medium flex items-center gap-2">
-            <Server className="h-5 w-5" />
+            <Server className="h-5 w-5 text-[hsl(var(--neon-cyan))]" />
             Available Servers
           </h2>
-          {servers && <Badge variant="secondary">{servers.length}</Badge>}
+          {servers && <Badge variant="secondary" className="label-info">{servers.length}</Badge>}
         </div>
         
         {serversLoading ? (
@@ -299,7 +299,7 @@ export default function Dashboard() {
       {recentSessions.length > 0 && (
         <div className="space-y-4">
           <h2 className="text-lg font-medium flex items-center gap-2">
-            <Clock className="h-5 w-5" />
+            <Clock className="h-5 w-5 text-[hsl(var(--neon-purple))]" />
             Recent Connections
           </h2>
           <Card>

@@ -542,6 +542,7 @@ export interface LicenseInfo {
   tier: SubscriptionTier;
   tierName: string;
   overLimit?: OverLimitStatus;
+  stripeConfigured?: boolean;
 }
 
 export interface LimitCheck {

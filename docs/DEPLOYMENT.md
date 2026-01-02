@@ -444,3 +444,75 @@ curl -s -X POST http://localhost:8080/Forseti/Compile/preview \
 ```
 
 Both should return identical `contractId` values.
+
+## SaaS Mode (Stripe Billing)
+
+KeyleSSH can be offered as a commercial SaaS with tiered subscriptions. By default, KeyleSSH runs with **no usage limits** - this section only applies if you want to monetize your deployment.
+
+### How It Works
+
+When Stripe is **not configured**:
+- No usage limits (unlimited users, servers)
+- License page hidden from admin navigation
+- All tier-based restrictions disabled
+
+When Stripe **is configured**:
+- License page appears in admin settings
+- Tier-based limits enforced:
+  - **Free**: 5 users, 2 servers
+  - **Pro**: 25 users, 10 servers
+  - **Enterprise**: Unlimited
+- Users can upgrade via Stripe Checkout
+- Subscription webhooks update tier automatically
+
+### Stripe Configuration
+
+1. Create a Stripe account and get your API keys from [dashboard.stripe.com](https://dashboard.stripe.com)
+
+2. Create subscription products and prices in Stripe:
+   - Create a "Pro" product with a recurring price
+   - Create an "Enterprise" product with a recurring price (or use contact-only)
+
+3. Set up a webhook endpoint in Stripe Dashboard:
+   - URL: `https://your-domain.com/api/webhooks/stripe`
+   - Events: `checkout.session.completed`, `customer.subscription.updated`, `customer.subscription.deleted`
+
+4. Configure environment variables:
+
+```env
+# Required for SaaS mode
+STRIPE_SECRET_KEY=sk_live_...
+
+# Webhook signing secret (from Stripe Dashboard)
+STRIPE_WEBHOOK_SECRET=whsec_...
+
+# Price IDs (must be price_*, not prod_*)
+STRIPE_PRICE_ID_PRO=price_...
+STRIPE_PRICE_ID_ENTERPRISE=price_...
+
+# Base URL for Stripe redirect URLs
+APP_URL=https://your-domain.com
+
+# Optional: Enterprise contact page (if not using Stripe for Enterprise)
+VITE_ENTERPRISE_CONTACT_URL=https://your-company.com/contact
+```
+
+### Testing with Stripe Test Mode
+
+For development, use Stripe test keys (`sk_test_...`) and test card numbers:
+- `4242 4242 4242 4242` - Successful payment
+- `4000 0000 0000 0002` - Card declined
+
+Use the Stripe CLI to forward webhooks locally:
+
+```bash
+stripe listen --forward-to localhost:3000/api/webhooks/stripe
+```
+
+### Subscription Lifecycle
+
+1. **New user signs up**: Starts on Free tier
+2. **User clicks upgrade**: Redirected to Stripe Checkout
+3. **Payment succeeds**: Webhook updates user's tier in database
+4. **Subscription changes**: Webhook updates tier (upgrade/downgrade/cancel)
+5. **Subscription ends**: User reverts to Free tier

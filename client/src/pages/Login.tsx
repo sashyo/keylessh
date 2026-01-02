@@ -5,6 +5,33 @@ import { Terminal, Shield, Server, Key, ArrowRight } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useLocation } from "wouter";
 
+function KeyleSSHLogo({ className = "" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 36 36" className={className} xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <linearGradient id="loginLogoGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stopColor="#ffffff"/>
+          <stop offset="100%" stopColor="#a0a0a8"/>
+        </linearGradient>
+        <filter id="loginLogoGlow" x="-50%" y="-50%" width="200%" height="200%">
+          <feGaussianBlur stdDeviation="1.5" result="coloredBlur"/>
+          <feMerge>
+            <feMergeNode in="coloredBlur"/>
+            <feMergeNode in="SourceGraphic"/>
+          </feMerge>
+        </filter>
+      </defs>
+      <rect width="36" height="36" rx="8" fill="hsl(120 15% 8%)"/>
+      <g filter="url(#loginLogoGlow)">
+        <path d="M10 8 L10 28" stroke="url(#loginLogoGrad)" strokeWidth="3" strokeLinecap="round" fill="none"/>
+        <path d="M11 18 L21 8" stroke="#ffffff" strokeWidth="3" strokeLinecap="round" fill="none"/>
+        <path d="M11 18 L21 28" stroke="#a0a0a8" strokeWidth="3" strokeLinecap="round" fill="none"/>
+      </g>
+      <rect x="25" y="21" width="5" height="7" rx="1" fill="#e0e0e0"/>
+    </svg>
+  );
+}
+
 export default function Login() {
   const { login, isAuthenticated, isLoading } = useAuth();
   const [, setLocation] = useLocation();
@@ -55,10 +82,8 @@ export default function Login() {
     <div className="min-h-screen bg-background flex flex-col">
       <header className="border-b border-border">
         <div className="container mx-auto px-6 py-4 flex items-center gap-3">
-          <div className="flex h-9 w-9 items-center justify-center rounded-md bg-primary">
-            <Terminal className="h-5 w-5 text-primary-foreground" />
-          </div>
-          <span className="font-semibold text-lg">KeyleSSH</span>
+          <KeyleSSHLogo className="h-9 w-9" />
+          <span className="font-semibold text-lg text-[hsl(0_0%_90%)]">KeyleSSH</span>
         </div>
       </header>
 

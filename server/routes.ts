@@ -2382,7 +2382,7 @@ export async function registerRoutes(
         const isServersOverLimit = licenseInfo.overLimit?.servers.isOverLimit || false;
         await subscriptionStorage.updateOverLimitStatus(isUsersOverLimit, isServersOverLimit);
 
-        res.json(licenseInfo);
+        res.json({ ...licenseInfo, stripeConfigured: stripeLib.isStripeConfigured() });
       } catch (error) {
         log(`Failed to fetch license info: ${error}`);
         res.status(500).json({ error: "Failed to fetch license info" });

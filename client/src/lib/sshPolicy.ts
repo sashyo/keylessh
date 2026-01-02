@@ -65,11 +65,75 @@ export const SSH_FORSETI_CONTRACT = `using Ork.Forseti.Sdk;
 
 /// <summary>
 /// SSH Challenge Signing Policy for Keyle-SSH.
-/// Validates SSH signing requests based on policy parameters.
+/// Implements the 3-method IAccessPolicy interface:
+/// - ValidateData: ALWAYS called (validates policy parameters)
+/// - ValidateApprovers: Called if approvalType == EXPLICIT (validates approver dokens)
+/// - ValidateExecutor: Called if executorType == PRIVATE (validates executor doken)
 /// </summary>
 public class SshPolicy : IAccessPolicy
 {
-    public PolicyDecision Authorize(AccessContext ctx)
+    /// <summary>
+    /// Validate the request data. Always called.
+    /// Checks that required policy parameters (role, resource) are present.
+    /// </summary>
+    public PolicyDecision ValidateData(DataContext ctx)
+    {
+        var policy = ctx.Policy;
+
+        if (policy == null)
+            return PolicyDecision.Deny("No policy provided");
+
+        // Get required parameters from policy
+        if (!policy.Params.TryGetParameter<string>("role", out var requiredRole) || string.IsNullOrEmpty(requiredRole))
+            return PolicyDecision.Deny("Policy missing required 'role' parameter");
+
+        if (!policy.Params.TryGetParameter<string>("resource", out var resource) || string.IsNullOrEmpty(resource))
+            return PolicyDecision.Deny("Policy missing required 'resource' parameter");
+
+        ForsetiSdk.Log($"ValidateData: policy validated for role '{requiredRole}' on resource '{resource}'");
+        return PolicyDecision.Allow();
+    }
+
+    /// <summary>
+    /// Validate approvers when policy.approvalType == EXPLICIT.
+    /// Checks that at least one approver has the required role for the resource.
+    /// </summary>
+    public PolicyDecision ValidateApprovers(ApproversContext ctx)
+    {
+        var policy = ctx.Policy;
+        var dokens = ctx.Dokens;
+
+        if (policy == null)
+            return PolicyDecision.Deny("No policy provided");
+
+        if (dokens == null || dokens.Count == 0)
+            return PolicyDecision.Deny("No approver dokens provided");
+
+        // Get required parameters
+        if (!policy.Params.TryGetParameter<string>("role", out var requiredRole) || string.IsNullOrEmpty(requiredRole))
+            return PolicyDecision.Deny("Policy missing required 'role' parameter");
+
+        if (!policy.Params.TryGetParameter<string>("resource", out var resource) || string.IsNullOrEmpty(resource))
+            return PolicyDecision.Deny("Policy missing required 'resource' parameter");
+
+        // Check if any approver has the required role
+        foreach (var doken in dokens)
+        {
+            if (doken.Payload.ResourceAccessRoleExists(resource, requiredRole))
+            {
+                ForsetiSdk.Log($"ValidateApprovers: approver has role '{requiredRole}' for resource '{resource}'");
+                return PolicyDecision.Allow();
+            }
+        }
+
+        return PolicyDecision.Deny($"No approver has the required role '{requiredRole}' for resource '{resource}'");
+    }
+
+    /// <summary>
+    /// Validate executor when policy.executorType == PRIVATE.
+    /// Checks that the executor (from Authorization header) has the required role.
+    /// </summary>
+    public PolicyDecision ValidateExecutor(ExecutorContext ctx)
     {
         var policy = ctx.Policy;
         var doken = ctx.Doken;
@@ -78,29 +142,20 @@ public class SshPolicy : IAccessPolicy
             return PolicyDecision.Deny("No policy provided");
 
         if (doken == null)
-            return PolicyDecision.Deny("No doken provided");
+            return PolicyDecision.Deny("No executor doken provided");
 
-        // Get required parameters from policy
-        if (!policy.TryGetParameter<string>("role", out var requiredRole) || string.IsNullOrEmpty(requiredRole))
+        // Get required parameters
+        if (!policy.Params.TryGetParameter<string>("role", out var requiredRole) || string.IsNullOrEmpty(requiredRole))
             return PolicyDecision.Deny("Policy missing required 'role' parameter");
 
-        if (!policy.TryGetParameter<string>("resource", out var resource) || string.IsNullOrEmpty(resource))
+        if (!policy.Params.TryGetParameter<string>("resource", out var resource) || string.IsNullOrEmpty(resource))
             return PolicyDecision.Deny("Policy missing required 'resource' parameter");
 
-        // Verify that the user's doken contains the required role for this resource
+        // Verify that the executor's doken contains the required role
         if (!doken.Payload.ResourceAccessRoleExists(resource, requiredRole))
-            return PolicyDecision.Deny($"User does not have the required role '{requiredRole}' for resource '{resource}'");
+            return PolicyDecision.Deny($"Executor does not have the required role '{requiredRole}' for resource '{resource}'");
 
-        // Get optional parameters with defaults
-        policy.TryGetParameter<string>("approval_type", out var approvalType);
-        approvalType = approvalType ?? "implicit";
-
-        policy.TryGetParameter<string>("execution_type", out var executionType);
-        executionType = executionType ?? "private";
-
-        // Log the authorization attempt
-        ForsetiSdk.Log($"SSH signing authorized for role '{requiredRole}' (approval: {approvalType}, execution: {executionType})");
-
+        ForsetiSdk.Log($"ValidateExecutor: executor has role '{requiredRole}' for resource '{resource}'");
         return PolicyDecision.Allow();
     }
 }`;

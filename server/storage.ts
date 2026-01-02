@@ -35,6 +35,7 @@ import {
   type LimitCheck,
 } from "@shared/schema";
 import { getAdminPolicy } from "./lib/tidecloakApi";
+import { isStripeConfigured } from "./lib/stripe";
 import { createRequire } from "module";
 import { fileURLToPath } from "url";
 
@@ -1273,16 +1274,80 @@ export class TemplateStorage {
 // Default SSH policy template
 const DEFAULT_SSH_TEMPLATE = {
   name: "SSH Access Policy",
-  description: "Standard SSH access policy with role-based authorization. Configure approval and execution types for SSH challenge signing.",
+  description: "Standard SSH access policy with role-based authorization. Implements the 3-method IAccessPolicy interface for ValidateData, ValidateApprovers, and ValidateExecutor.",
   csCode: `using Ork.Forseti.Sdk;
 
 /// <summary>
 /// SSH Challenge Signing Policy for Keyle-SSH.
-/// Validates SSH signing requests based on policy parameters.
+/// Implements the 3-method IAccessPolicy interface:
+/// - ValidateData: ALWAYS called (validates policy parameters)
+/// - ValidateApprovers: Called if approvalType == EXPLICIT (validates approver dokens)
+/// - ValidateExecutor: Called if executorType == PRIVATE (validates executor doken)
 /// </summary>
 public class SshPolicy : IAccessPolicy
 {
-    public PolicyDecision Authorize(AccessContext ctx)
+    /// <summary>
+    /// Validate the request data. Always called.
+    /// Checks that required policy parameters (role, resource) are present.
+    /// </summary>
+    public PolicyDecision ValidateData(DataContext ctx)
+    {
+        var policy = ctx.Policy;
+
+        if (policy == null)
+            return PolicyDecision.Deny("No policy provided");
+
+        // Get required parameters from policy
+        if (!policy.Params.TryGetParameter<string>("role", out var requiredRole) || string.IsNullOrEmpty(requiredRole))
+            return PolicyDecision.Deny("Policy missing required 'role' parameter");
+
+        if (!policy.Params.TryGetParameter<string>("resource", out var resource) || string.IsNullOrEmpty(resource))
+            return PolicyDecision.Deny("Policy missing required 'resource' parameter");
+
+        ForsetiSdk.Log($"ValidateData: policy validated for role '{requiredRole}' on resource '{resource}'");
+        return PolicyDecision.Allow();
+    }
+
+    /// <summary>
+    /// Validate approvers when policy.approvalType == EXPLICIT.
+    /// Checks that at least one approver has the required role for the resource.
+    /// </summary>
+    public PolicyDecision ValidateApprovers(ApproversContext ctx)
+    {
+        var policy = ctx.Policy;
+        var dokens = ctx.Dokens;
+
+        if (policy == null)
+            return PolicyDecision.Deny("No policy provided");
+
+        if (dokens == null || dokens.Count == 0)
+            return PolicyDecision.Deny("No approver dokens provided");
+
+        // Get required parameters
+        if (!policy.Params.TryGetParameter<string>("role", out var requiredRole) || string.IsNullOrEmpty(requiredRole))
+            return PolicyDecision.Deny("Policy missing required 'role' parameter");
+
+        if (!policy.Params.TryGetParameter<string>("resource", out var resource) || string.IsNullOrEmpty(resource))
+            return PolicyDecision.Deny("Policy missing required 'resource' parameter");
+
+        // Check if any approver has the required role
+        foreach (var doken in dokens)
+        {
+            if (doken.Payload.ResourceAccessRoleExists(resource, requiredRole))
+            {
+                ForsetiSdk.Log($"ValidateApprovers: approver has role '{requiredRole}' for resource '{resource}'");
+                return PolicyDecision.Allow();
+            }
+        }
+
+        return PolicyDecision.Deny($"No approver has the required role '{requiredRole}' for resource '{resource}'");
+    }
+
+    /// <summary>
+    /// Validate executor when policy.executorType == PRIVATE.
+    /// Checks that the executor (from Authorization header) has the required role.
+    /// </summary>
+    public PolicyDecision ValidateExecutor(ExecutorContext ctx)
     {
         var policy = ctx.Policy;
         var doken = ctx.Doken;
@@ -1291,47 +1356,24 @@ public class SshPolicy : IAccessPolicy
             return PolicyDecision.Deny("No policy provided");
 
         if (doken == null)
-            return PolicyDecision.Deny("No doken provided");
+            return PolicyDecision.Deny("No executor doken provided");
 
-        // Get required parameters from policy
-        if (!policy.TryGetParameter<string>("role", out var requiredRole) || string.IsNullOrEmpty(requiredRole))
+        // Get required parameters
+        if (!policy.Params.TryGetParameter<string>("role", out var requiredRole) || string.IsNullOrEmpty(requiredRole))
             return PolicyDecision.Deny("Policy missing required 'role' parameter");
 
-        if (!policy.TryGetParameter<string>("resource", out var resource) || string.IsNullOrEmpty(resource))
+        if (!policy.Params.TryGetParameter<string>("resource", out var resource) || string.IsNullOrEmpty(resource))
             return PolicyDecision.Deny("Policy missing required 'resource' parameter");
 
-        // Verify that the user's doken contains the required role for this resource
+        // Verify that the executor's doken contains the required role
         if (!doken.Payload.ResourceAccessRoleExists(resource, requiredRole))
-            return PolicyDecision.Deny($"User does not have the required role '{requiredRole}' for resource '{resource}'");
+            return PolicyDecision.Deny($"Executor does not have the required role '{requiredRole}' for resource '{resource}'");
 
-        // Get configurable parameters
-        var approvalType = "{{APPROVAL_TYPE}}";
-        var executionType = "{{EXECUTION_TYPE}}";
-
-        // Log the authorization attempt
-        ForsetiSdk.Log($"SSH signing authorized for role '{requiredRole}' (approval: {approvalType}, execution: {executionType})");
-
+        ForsetiSdk.Log($"ValidateExecutor: executor has role '{requiredRole}' for resource '{resource}'");
         return PolicyDecision.Allow();
     }
 }`,
-  parameters: [
-    {
-      name: "APPROVAL_TYPE",
-      type: "select" as const,
-      helpText: "Determines if user approval is needed before signing. 'implicit' allows automatic signing, 'explicit' requires user confirmation.",
-      required: true,
-      defaultValue: "implicit",
-      options: ["implicit", "explicit"]
-    },
-    {
-      name: "EXECUTION_TYPE",
-      type: "select" as const,
-      helpText: "Controls who can execute the signing operation. 'private' restricts to role members, 'public' allows broader access.",
-      required: true,
-      defaultValue: "private",
-      options: ["public", "private"]
-    }
-  ],
+  parameters: [] as TemplateParameter[],
   createdBy: "system"
 };
 
@@ -1498,6 +1540,17 @@ export class SubscriptionStorage {
 
   // Check if can add a resource (user or server)
   async checkCanAdd(resource: 'user' | 'server', currentCount: number): Promise<LimitCheck> {
+    // If Stripe is not configured, allow unlimited resources
+    if (!isStripeConfigured()) {
+      return {
+        allowed: true,
+        current: currentCount,
+        limit: Infinity,
+        tier: 'enterprise',
+        tierName: 'Unlimited',
+      };
+    }
+
     const subscription = await this.getSubscription();
     const tier: SubscriptionTier = (subscription?.tier as SubscriptionTier) || 'free';
     const tierConfig = subscriptionTiers[tier];
@@ -1519,10 +1572,41 @@ export class SubscriptionStorage {
   async getLicenseInfo(
     userCounts: { total: number; enabled: number }
   ): Promise<LicenseInfo> {
+    const serverCounts = await this.getServerCounts();
+
+    // If Stripe is not configured, return unlimited license info
+    if (!isStripeConfigured()) {
+      return {
+        subscription: null,
+        usage: { users: userCounts.total, servers: serverCounts.total },
+        limits: {
+          maxUsers: Infinity,
+          maxServers: Infinity,
+        },
+        tier: 'enterprise',
+        tierName: 'Unlimited',
+        overLimit: {
+          users: {
+            isOverLimit: false,
+            enabled: userCounts.enabled,
+            total: userCounts.total,
+            limit: -1,
+            overBy: 0,
+          },
+          servers: {
+            isOverLimit: false,
+            enabled: serverCounts.enabled,
+            total: serverCounts.total,
+            limit: -1,
+            overBy: 0,
+          },
+        },
+      };
+    }
+
     const subscription = await this.getSubscription();
     const tier: SubscriptionTier = (subscription?.tier as SubscriptionTier) || 'free';
     const tierConfig = subscriptionTiers[tier];
-    const serverCounts = await this.getServerCounts();
 
     const userLimit = tierConfig.maxUsers === -1 ? Infinity : tierConfig.maxUsers;
     const serverLimit = tierConfig.maxServers === -1 ? Infinity : tierConfig.maxServers;
@@ -1571,6 +1655,11 @@ export class SubscriptionStorage {
 
   // Check if SSH access is blocked due to being over limit
   async isSshBlocked(): Promise<{ blocked: boolean; reason?: string }> {
+    // If Stripe is not configured, never block SSH access
+    if (!isStripeConfigured()) {
+      return { blocked: false };
+    }
+
     const subscription = await this.getSubscription();
     if (!subscription) {
       return { blocked: false };

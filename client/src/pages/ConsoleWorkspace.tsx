@@ -117,21 +117,25 @@ export default function ConsoleWorkspace() {
     <div className="h-full p-4 flex flex-col gap-4">
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2">
-          <Terminal className="h-5 w-5" />
+          <Terminal className="h-5 w-5 text-[hsl(var(--neon-cyan))]" />
           <h1 className="text-lg font-semibold">Terminal Workspace</h1>
         </div>
-        <Button variant="outline" onClick={() => setNewTabOpen(true)} data-testid="new-terminal-tab">
+        <Button variant="neon" onClick={() => setNewTabOpen(true)} data-testid="new-terminal-tab">
           <Plus className="h-4 w-4 mr-2" />
           New tab
         </Button>
       </div>
 
       {tabs.length === 0 ? (
-        <div className="flex-1 min-h-[420px] flex items-center justify-center rounded-xl border border-border bg-background">
-          <div className="text-center space-y-2 max-w-md px-4">
-            <h2 className="text-base font-medium">No terminal tabs open</h2>
+        <div className="flex-1 min-h-[420px] flex items-center justify-center rounded-xl border border-[hsl(var(--neon-cyan)/0.2)] bg-[hsl(var(--bg-surface))] relative overflow-hidden">
+          <div className="absolute inset-0 bg-gradient-to-br from-[hsl(var(--neon-cyan)/0.05)] to-transparent pointer-events-none" />
+          <div className="text-center space-y-3 max-w-md px-4 relative z-10">
+            <div className="w-16 h-16 mx-auto rounded-xl bg-[hsl(var(--neon-cyan)/0.1)] border border-[hsl(var(--neon-cyan)/0.3)] flex items-center justify-center mb-4">
+              <Terminal className="h-8 w-8 text-[hsl(var(--neon-cyan))]" />
+            </div>
+            <h2 className="text-base font-medium text-[hsl(var(--neon-cyan))]">No terminal tabs open</h2>
             <p className="text-sm text-muted-foreground">
-              Click <span className="font-medium">New tab</span>, or open a server from the dashboard to start a terminal session.
+              Click <span className="font-medium text-[hsl(var(--neon-cyan))]">New tab</span>, or open a server from the dashboard to start a terminal session.
             </p>
           </div>
         </div>
