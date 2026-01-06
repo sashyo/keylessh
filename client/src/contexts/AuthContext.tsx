@@ -2,7 +2,6 @@ import { createContext, useContext, useState, useEffect, useCallback, useRef, ty
 import { TideCloakContextProvider, useTideCloak } from "@tidecloak/react";
 import { IAMService } from "@tidecloak/js";
 import type { OIDCUser, UserRole, AuthState } from "@shared/schema";
-import adapter from "../tidecloakAdapter.json";
 
 export enum ApprovalStatus {
   approved = "approved",
@@ -24,6 +23,28 @@ interface TideApprovalResponse {
   pending?: boolean;
 }
 
+interface TidecloakConfig {
+  realm: string;
+  "auth-server-url": string;
+  "ssl-required": string;
+  resource: string;
+  "public-client": boolean;
+  "confidential-port": number;
+  jwk: {
+    keys: Array<{
+      kid: string;
+      kty: string;
+      alg: string;
+      use: string;
+      crv: string;
+      x: string;
+    }>;
+  };
+  vendorId: string;
+  homeOrkUrl: string;
+  [key: string]: any;
+}
+
 interface AuthContextValue extends AuthState {
   login: () => void;
   logout: () => void;
@@ -35,16 +56,12 @@ interface AuthContextValue extends AuthState {
   approveTideRequests: (requests: TideApprovalRequest[]) => Promise<TideApprovalResponse[]>;
   initializeTideRequest: <T extends { encode: () => Uint8Array }>(request: T) => Promise<T>;
   executeTideRequest: (request: Uint8Array) => Promise<Uint8Array[]>;
+  authConfig: TidecloakConfig | null;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
-const tidecloakConfig = {
-  ...adapter,
-  redirectUri: `${window.location.origin}/auth/redirect`,
-};
-
-function TideCloakAuthBridge({ children }: { children: ReactNode }) {
+function TideCloakAuthBridge({ children, authConfig }: { children: ReactNode; authConfig: TidecloakConfig }) {
   const tidecloak = useTideCloak();
   const [state, setState] = useState<AuthState>({
     user: null,
@@ -384,21 +401,47 @@ function TideCloakAuthBridge({ children }: { children: ReactNode }) {
   );
 
   return (
-    <AuthContext.Provider value={{ ...state, login, logout, refreshToken, getToken, hasRole, canManageTemplates, vuid, approveTideRequests, initializeTideRequest, executeTideRequest }}>
+    <AuthContext.Provider value={{ ...state, login, logout, refreshToken, getToken, hasRole, canManageTemplates, vuid, approveTideRequests, initializeTideRequest, executeTideRequest, authConfig }}>
       {children}
     </AuthContext.Provider>
   );
 }
 
-function AuthProviderWithTimeout({ children }: { children: ReactNode }) {
+function AuthProviderWithTimeout({ children, authConfig }: { children: ReactNode; authConfig: TidecloakConfig }) {
+  const tidecloakConfig = {
+    ...authConfig,
+    redirectUri: `${window.location.origin}/auth/redirect`,
+  };
+
   return (
     <TideCloakContextProvider config={tidecloakConfig}>
-      <TideCloakAuthBridge>{children}</TideCloakAuthBridge>
+      <TideCloakAuthBridge authConfig={authConfig}>{children}</TideCloakAuthBridge>
     </TideCloakContextProvider>
   );
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
+  const [authConfig, setAuthConfig] = useState<TidecloakConfig | null>(null);
+  const [configError, setConfigError] = useState<string | null>(null);
+
+  // Fetch auth config from server
+  useEffect(() => {
+    async function loadConfig() {
+      try {
+        const response = await fetch("/api/auth/config");
+        if (!response.ok) {
+          throw new Error(`Failed to load auth config: ${response.status}`);
+        }
+        const config = await response.json();
+        setAuthConfig(config);
+      } catch (err) {
+        console.error("Failed to load auth config:", err);
+        setConfigError(err instanceof Error ? err.message : "Failed to load configuration");
+      }
+    }
+    loadConfig();
+  }, []);
+
   // Clear any corrupted localStorage on mount if it looks invalid
   useEffect(() => {
     try {
@@ -417,7 +460,51 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  return <AuthProviderWithTimeout>{children}</AuthProviderWithTimeout>;
+  // Show loading state while config loads
+  if (!authConfig && !configError) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <div className="flex flex-col items-center gap-4">
+          <div className="h-12 w-12 rounded-lg bg-primary/10 flex items-center justify-center animate-pulse">
+            <svg className="h-6 w-6 text-primary" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <rect x="4" y="4" width="16" height="16" rx="2" />
+              <line x1="8" y1="12" x2="16" y2="12" />
+            </svg>
+          </div>
+          <p className="text-sm text-muted-foreground">Loading configuration...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Show error state if config failed to load
+  if (configError) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <div className="flex flex-col items-center gap-4 text-center px-4">
+          <div className="h-12 w-12 rounded-lg bg-destructive/10 flex items-center justify-center">
+            <svg className="h-6 w-6 text-destructive" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <circle cx="12" cy="12" r="10" />
+              <line x1="15" y1="9" x2="9" y2="15" />
+              <line x1="9" y1="9" x2="15" y2="15" />
+            </svg>
+          </div>
+          <div>
+            <p className="text-sm font-medium text-destructive">Configuration Error</p>
+            <p className="text-xs text-muted-foreground mt-1">{configError}</p>
+          </div>
+          <button
+            onClick={() => window.location.reload()}
+            className="text-xs text-primary hover:underline"
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return <AuthProviderWithTimeout authConfig={authConfig!}>{children}</AuthProviderWithTimeout>;
 }
 
 export function useAuth() {
@@ -426,6 +513,17 @@ export function useAuth() {
     throw new Error("useAuth must be used within AuthProvider");
   }
   return context;
+}
+
+export function useAuthConfig() {
+  const context = useContext(AuthContext);
+  if (!context) {
+    throw new Error("useAuthConfig must be used within AuthProvider");
+  }
+  if (!context.authConfig) {
+    throw new Error("Auth config not loaded");
+  }
+  return context.authConfig;
 }
 
 export { useTideCloak };

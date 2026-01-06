@@ -7,13 +7,15 @@ import { log, logForseti, logError } from "./logger";
 import { terminateSession } from "./wsBridge";
 import type { ServerWithAccess, ActiveSession, ServerStatus, Server as ServerType } from "@shared/schema";
 import { createRequire } from "module";
-import { fileURLToPath } from "url";
-import { getHomeOrkUrl } from "./lib/auth/tidecloakConfig";
+import { getHomeOrkUrl, GetConfig } from "./lib/auth/tidecloakConfig";
 import { createConnection } from "net";
 import { createHash } from "crypto";
 
 // Use createRequire for heimdall-tide (CJS module with broken ESM exports)
-const require = createRequire(import.meta.url || fileURLToPath(new URL(".", import.meta.url)));
+// In CJS bundle __filename is available; in ESM dev mode use import.meta.url
+const require = createRequire(
+  typeof __filename !== "undefined" ? __filename : import.meta.url
+);
 const { PolicySignRequest } = require("heimdall-tide");
 
 // Base64 conversion helpers for Tide request handling
@@ -248,6 +250,20 @@ export async function registerRoutes(
     } catch (error) {
       log(`Webhook error: ${error}`);
       res.status(500).json({ error: "Webhook processing failed" });
+    }
+  });
+
+  // ============================================
+  // Public Auth Config (unauthenticated)
+  // ============================================
+
+  app.get("/api/auth/config", (_req, res) => {
+    try {
+      const config = GetConfig();
+      res.json(config);
+    } catch (error) {
+      log(`Failed to load auth config: ${error}`);
+      res.status(500).json({ error: "Failed to load authentication configuration" });
     }
   });
 

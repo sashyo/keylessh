@@ -23,7 +23,7 @@ import {
   formatOpenSshEd25519PublicKey,
 } from "@/lib/sshClient";
 import { createTideSshSigner } from "@/lib/tideSsh";
-import adapter from "../tidecloakAdapter.json";
+import { useAuthConfig } from "@/contexts/AuthContext";
 import {
   RefreshCw,
   Power,
@@ -80,6 +80,7 @@ export function TerminalSession({
   onCloseTab?: () => void;
 }) {
   const { toast } = useToast();
+  const authConfig = useAuthConfig();
 
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<XTerm | null>(null);
@@ -122,14 +123,14 @@ export function TerminalSession({
 
   const tideSshPublicKey = useMemo(() => {
     try {
-      const jwkX = adapter?.jwk?.keys?.[0]?.x;
+      const jwkX = authConfig?.jwk?.keys?.[0]?.x;
       if (typeof jwkX !== "string") return null;
       const rawPublicKey = base64UrlToBytes(jwkX);
       return formatOpenSshEd25519PublicKey(rawPublicKey, `${sshUser}@keylessh`);
     } catch {
       return null;
     }
-  }, [sshUser]);
+  }, [sshUser, authConfig]);
 
   const handleConnect = useCallback(async () => {
     try {
@@ -155,9 +156,9 @@ export function TerminalSession({
         setDimensions(80, 24);
       }
 
-      const jwkX = adapter?.jwk?.keys?.[0]?.x;
+      const jwkX = authConfig?.jwk?.keys?.[0]?.x;
       if (typeof jwkX !== "string") {
-        throw new Error("Missing JWKS Ed25519 public key (adapter.jwk.keys[0].x)");
+        throw new Error("Missing JWKS Ed25519 public key (authConfig.jwk.keys[0].x)");
       }
       const rawPublicKey = base64UrlToBytes(jwkX);
       const keyPair = await createEd25519KeyPairFromRawPublicKey(rawPublicKey);
@@ -172,7 +173,7 @@ export function TerminalSession({
     } catch (err) {
       console.error("Connection failed:", err);
     }
-  }, [connect, server, serverIsDisabled, serverLoading, setDimensions, toast]);
+  }, [authConfig, connect, server, serverIsDisabled, serverLoading, setDimensions, toast]);
 
   const handleReconnect = useCallback(() => {
     setShowKeyDialog(true);

@@ -37,10 +37,12 @@ import {
 import { getAdminPolicy } from "./lib/tidecloakApi";
 import { isStripeConfigured } from "./lib/stripe";
 import { createRequire } from "module";
-import { fileURLToPath } from "url";
 
 // Use createRequire for heimdall-tide (CJS module with broken ESM exports)
-const require = createRequire(import.meta.url || fileURLToPath(new URL(".", import.meta.url)));
+// In CJS bundle __filename is available; in ESM dev mode use import.meta.url
+const require = createRequire(
+  typeof __filename !== "undefined" ? __filename : import.meta.url
+);
 const { PolicySignRequest } = require("heimdall-tide");
 
 // Base64 conversion helpers for Tide request handling

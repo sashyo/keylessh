@@ -47,11 +47,10 @@ import { queryClient } from "@/lib/queryClient";
 import { api, type PolicyTemplate, type TemplateParameter } from "@/lib/api";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 import { RefreshButton } from "@/components/RefreshButton";
-import { useAuth } from "@/contexts/AuthContext";
+import { useAuth, useAuthConfig } from "@/contexts/AuthContext";
 import { KeyRound, Pencil, Plus, Trash2, Search, Shield, FileCode } from "lucide-react";
 import type { AdminRole } from "@shared/schema";
 import { createSshPolicyRequest, createSshPolicyRequestWithCode, bytesToBase64, SSH_MODEL_IDS } from "@/lib/sshPolicy";
-import adapter from "@/tidecloakAdapter.json";
 
 // SSH signing contract types
 const SSH_CONTRACT_TYPES = {
@@ -81,6 +80,7 @@ const defaultPolicyConfig: PolicyConfig = {
 export default function AdminRoles() {
   const { toast } = useToast();
   const { initializeTideRequest } = useAuth();
+  const authConfig = useAuthConfig();
   const [search, setSearch] = useState("");
   const [editingRole, setEditingRole] = useState<AdminRole | null>(null);
   const [creatingRole, setCreatingRole] = useState(false);
@@ -270,8 +270,8 @@ export default function AdminRoles() {
             approvalType: editingPolicyConfig.approvalType,
             executionType: editingPolicyConfig.executionType,
             modelId: SSH_MODEL_IDS.BASIC,
-            resource: adapter.resource,
-            vendorId: adapter.vendorId,
+            resource: authConfig.resource,
+            vendorId: authConfig.vendorId,
             contractCode,
           });
           policyRequest = request;
@@ -283,8 +283,8 @@ export default function AdminRoles() {
             approvalType: editingPolicyConfig.approvalType,
             executionType: editingPolicyConfig.executionType,
             modelId: SSH_MODEL_IDS.BASIC,
-            resource: adapter.resource,
-            vendorId: adapter.vendorId,
+            resource: authConfig.resource,
+            vendorId: authConfig.vendorId,
           });
         }
 
@@ -356,8 +356,8 @@ export default function AdminRoles() {
             approvalType: policyConfig.approvalType,
             executionType: policyConfig.executionType,
             modelId: SSH_MODEL_IDS.BASIC,
-            resource: adapter.resource,
-            vendorId: adapter.vendorId,
+            resource: authConfig.resource,
+            vendorId: authConfig.vendorId,
             contractCode,
           });
           policyRequest = request;
@@ -369,8 +369,8 @@ export default function AdminRoles() {
             approvalType: policyConfig.approvalType,
             executionType: policyConfig.executionType,
             modelId: SSH_MODEL_IDS.BASIC,
-            resource: adapter.resource,
-            vendorId: adapter.vendorId,
+            resource: authConfig.resource,
+            vendorId: authConfig.vendorId,
           });
         }
 

@@ -17,34 +17,18 @@ export default defineConfig({
       },
     }),
   ],
-  optimizeDeps: {
-    esbuildOptions: {
-      plugins: [
-        {
-          name: "externalize-node-rsa",
-          setup(build) {
-            build.onResolve({ filter: /^node-rsa$/ }, () => ({
-              path: "node-rsa",
-              external: true,
-            }));
-          },
-        },
-      ],
-    },
-  },
   resolve: {
     alias: {
       "@": path.resolve(import.meta.dirname, "client", "src"),
       "@shared": path.resolve(import.meta.dirname, "shared"),
+      // Stub out node-rsa for browser (SSH library has fallback)
+      "node-rsa": path.resolve(import.meta.dirname, "client", "src", "lib", "node-rsa-stub.ts"),
     },
   },
   root: path.resolve(import.meta.dirname, "client"),
   build: {
     outDir: path.resolve(import.meta.dirname, "dist/public"),
     emptyOutDir: true,
-    rollupOptions: {
-      external: ["node-rsa"],
-    },
   },
   server: {
     fs: {
