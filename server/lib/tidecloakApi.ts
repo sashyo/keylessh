@@ -428,26 +428,16 @@ export const DeleteRole = async (roleName: string, token: string): Promise<Delet
     throw new Error(`Error deleting role: ${errorBody}`);
   }
 
-  // Check if response indicates an approval was created
-  // TideCloak returns 202 Accepted when a changeset is created instead of immediate deletion
-  if (response.status === 202) {
-    return { approvalCreated: true, message: "Approval request created" };
-  }
-
-  // Try to parse response body for additional info
+  // Check if the role still exists after deletion
+  // If it does, an approval was created instead of immediate deletion
   try {
-    const text = await response.text();
-    if (text) {
-      const body = JSON.parse(text);
-      if (body.changeSetId || body.draftRecordId) {
-        return { approvalCreated: true, message: "Approval request created" };
-      }
-    }
+    await getClientRoleByName(roleName, client!.id!, token);
+    // Role still exists - approval was created
+    return { approvalCreated: true, message: "Approval request created" };
   } catch {
-    // No body or not JSON - that's fine, role was deleted directly
+    // Role doesn't exist - it was deleted immediately
+    return { approvalCreated: false };
   }
-
-  return { approvalCreated: false };
 };
 
 export const UpdateRole = async (
