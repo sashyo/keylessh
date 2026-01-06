@@ -1,0 +1,89 @@
+name: Deploy to Azure App Service
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  AZURE_WEBAPP_NAME: keylessh-app    # Change this to match your App Service name
+  NODE_VERSION: '20.x'
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build application
+        run: npm run build
+
+      - name: Create deployment package
+        run: |
+          # Create a clean deployment directory
+          mkdir -p deploy
+
+          # Copy build output
+          cp -r dist deploy/
+
+          # Copy package files for production dependencies
+          cp package.json deploy/
+          cp package-lock.json deploy/
+
+          # Install production dependencies only
+          cd deploy
+          npm ci --omit=dev
+
+          # Create web.config for IIS (Azure App Service uses this)
+          cat > web.config << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <configuration>
+            <system.webServer>
+              <webSocket enabled="true" />
+              <handlers>
+                <add name="iisnode" path="dist/index.cjs" verb="*" modules="iisnode"/>
+              </handlers>
+              <rewrite>
+                <rules>
+                  <rule name="NodeInspector" patternSyntax="ECMAScript" stopProcessing="true">
+                    <match url="^dist/index.cjs\/debug[\/]?" />
+                  </rule>
+                  <rule name="StaticContent">
+                    <action type="Rewrite" url="dist/public{REQUEST_URI}"/>
+                  </rule>
+                  <rule name="DynamicContent">
+                    <conditions>
+                      <add input="{REQUEST_FILENAME}" matchType="IsFile" negate="True"/>
+                    </conditions>
+                    <action type="Rewrite" url="dist/index.cjs"/>
+                  </rule>
+                </rules>
+              </rewrite>
+              <iisnode
+                nodeProcessCommandLine="node"
+                watchedFiles="web.config;*.js"
+                loggingEnabled="true"
+                logDirectory="iisnode"
+              />
+            </system.webServer>
+          </configuration>
+          EOF
+
+      - name: Deploy to Azure Web App
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ env.AZURE_WEBAPP_NAME }}
+          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+          package: deploy
