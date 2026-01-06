@@ -1,53 +1,7 @@
 import { Policy, PolicySignRequest, TideMemory } from "heimdall-tide";
+import { ApprovalType, ExecutionType } from "asgard-tide";
 import { api } from "./api";
 
-/**
- * Creates a TideMemory-compatible byte array from an array of Uint8Arrays.
- * This matches the exact format expected by Ork's enclave Serialization.js:
- * - Bytes 0-3: version (int32 LE, always 1)
- * - For each value: 4 bytes length (int32 LE) + data bytes
- */
-function createTideMemoryBytes(datas: Uint8Array[]): Uint8Array {
-  // Calculate total length: 4 (version) + sum of (4 + data.length) for each value
-  const totalDataLength = datas.reduce((sum, d) => sum + 4 + d.length, 0);
-  const bufferLength = 4 + totalDataLength;
-  const buffer = new Uint8Array(bufferLength);
-  const view = new DataView(buffer.buffer);
-
-  // Write version at position 0
-  view.setInt32(0, 1, true); // version = 1, little-endian
-
-  let offset = 4;
-  for (const data of datas) {
-    // Write length
-    view.setInt32(offset, data.length, true);
-    offset += 4;
-    // Write data
-    buffer.set(data, offset);
-    offset += data.length;
-  }
-
-  return buffer;
-}
-
-/**
- * Reads a value at the given index from a TideMemory-formatted byte array.
- * This matches Ork's enclave Serialization.js GetValue function.
- */
-function getTideMemoryValue(buffer: Uint8Array, index: number): Uint8Array {
-  const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
-  let offset = 4; // Skip version
-
-  for (let i = 0; i < index; i++) {
-    const len = view.getInt32(offset, true);
-    offset += 4 + len;
-  }
-
-  const finalLen = view.getInt32(offset, true);
-  offset += 4;
-
-  return buffer.slice(offset, offset + finalLen);
-}
 
 // SSH Contract Model IDs
 export const SSH_MODEL_IDS = {
@@ -62,7 +16,7 @@ export type SshModelId = (typeof SSH_MODEL_IDS)[keyof typeof SSH_MODEL_IDS];
 // This C# code is compiled and executed by Ork for policy validation
 // Exported for display in the approval review dialog
 // Uses [PolicyParam] attributes and DecisionBuilder for clean, declarative policy logic
-export const SSH_FORSETI_CONTRACT = `using Forseti.Sdk;
+export const SSH_FORSETI_CONTRACT = `using Ork.Forseti.Sdk;
 
 /// <summary>
 /// SSH Challenge Signing Policy for Keyle-SSH.
@@ -172,8 +126,8 @@ export async function createSshPolicyRequest(
     modelId: config.modelId,
     contractId: contractId,
     keyId: config.vendorId,
-    approvalType: config.approvalType === "explicit" ? "EXPLICIT" : "IMPLICIT",
-    executionType: config.executionType === "private" ? "Private" : "Public",
+    approvalType: config.approvalType === "explicit" ? ApprovalType.EXPLICIT : ApprovalType.IMPLICIT,
+    executionType: config.executionType === "private" ? ExecutionType.PRIVATE : ExecutionType.PUBLIC,
     params: policyParams,
   });
 
@@ -225,8 +179,8 @@ export async function createSshPolicyRequestWithCode(
     modelId: config.modelId,
     contractId: contractId,
     keyId: config.vendorId,
-    approvalType: config.approvalType === "explicit" ? "EXPLICIT" : "IMPLICIT",
-    executionType: config.executionType === "private" ? "Private" : "Public",
+    approvalType: config.approvalType === "explicit" ? ApprovalType.EXPLICIT : ApprovalType.IMPLICIT,
+    executionType: config.executionType === "private" ? ExecutionType.PRIVATE : ExecutionType.PUBLIC,
     params: policyParams,
   });
 

@@ -2,6 +2,7 @@ import { IAMService } from "@tidecloak/js";
 import { TideMemory, BaseTideRequest } from "heimdall-tide";
 import type { SSHSigner, SSHSignatureRequest } from "@/lib/sshClient";
 import { api } from "@/lib/api";
+import { BasicCustomRequest } from "asgard-tide";
 
 /**
  * Convert base64 string to Uint8Array
@@ -100,20 +101,19 @@ export function createTideSshSigner(): SSHSigner {
     }
 
     // New pattern: BasicCustom<SSH>:BasicCustom<1>
-    // Draft contains: [human readable info, data to sign]
-    const humanReadable = createHumanReadableInfo(req);
-    const draft = TideMemory.CreateFromArray([humanReadable, req.data]);
+    // Draft contains: data to sign
+    const draft = req.data;
 
     // Use BasicCustomRequest pattern for SSH challenge signing
     // Use Policy:1 auth flow with contract validation (implicit flow - no operator signatures)
     const name = "BasicCustom<SSH>";
     const version = "BasicCustom<1>";
     console.log(`[TideSsh] Creating request with name='${name}' version='${version}' modelId='${name}:${version}'`);
-    const tideRequest = new BaseTideRequest(
+    const tideRequest = new BasicCustomRequest(
       name,                    // Name: BasicCustom<SSH>
       version,                 // Version: BasicCustom<1>
       "Policy:1",              // AuthFlow: Policy authorization with implicit flow (no popup)
-      draft,                   // Draft: [humanReadable, challengeData]
+      draft,                   // Draft: what you want to sign
       new TideMemory()         // DynamicData: empty (not needed for basic)
     );
 

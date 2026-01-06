@@ -502,7 +502,6 @@ export class BrowserSSHClient {
 
       this.options.onStatusChange("authenticating");
 
-      // Authenticate with private key
       const authenticated = await this.session.authenticate({
         username: this.options.username,
         publicKeys: [keyPair],
