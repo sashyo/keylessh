@@ -177,7 +177,7 @@ public class SshPolicy : IAccessPolicy
 }
 ```
 
-Contracts are compiled using a standalone compiler container (`ghcr.io/tide-foundation/forseti-compiler`) and IL-vetted by ORK before execution. The compiler runs in Docker on the Keyle-SSH server to ensure hash consistency with ORK's compilation. See [DEPLOYMENT.md](DEPLOYMENT.md#forseti-contract-compiler) for configuration.
+Contract IDs are computed as SHA512 hashes of the C# source code. The actual contract compilation and IL vetting happens on ORKs during policy execution.
 
 ## Security Model
 

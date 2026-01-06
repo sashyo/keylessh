@@ -45,11 +45,15 @@ SSH signing uses Tide Protocol's Policy:1 auth flow with Forseti contracts.
 - `client/src/pages/AdminPolicyTemplates.tsx`
   - UI for creating/managing SSH policy templates
 - `client/src/pages/AdminApprovals.tsx`
-  - UI for reviewing and approving pending policies
+  - UI for reviewing and approving change requests (access, roles, policies)
+  - Tabbed interface with pending counts on nav badge
 - `server/routes.ts`
   - `POST /api/admin/ssh-policies/pending`: Creates pending policy from template
   - `POST /api/admin/ssh-policies/pending/:id/approve`: Approves and commits to Ork
   - `GET /api/ssh-policies/for-user/:sshUser`: Fetches committed policy for signing
+  - `GET /api/admin/access-approvals`: User access change requests from TideCloak
+  - `GET /api/admin/role-approvals`: Role change requests from TideCloak
+  - `POST /api/admin/*/approve`, `/reject`, `/commit`, `/cancel`: Change request actions
 - `server/storage.ts`
   - `sshPolicies`: Stores pending and committed policies
   - `policyTemplates`: Stores reusable policy templates
@@ -131,7 +135,7 @@ SFTP runs over the same SSH session using a separate channel.
 - `client/src/pages/AdminSessions.tsx` (active sessions; terminate)
 - `client/src/pages/AdminLogs.tsx` (Access + Sessions logs)
 - `client/src/pages/AdminPolicyTemplates.tsx` (create/manage SSH policy templates)
-- `client/src/pages/AdminApprovals.tsx` (review pending policies, approve/reject, auto-refresh)
+- `client/src/pages/AdminApprovals.tsx` (Change Requests - tabbed UI for access, role, and policy change requests with auto-refresh)
 
 ## Contributing Workflow
 
@@ -169,7 +173,7 @@ SSH policies require a Policy:1 flow through the ORK network:
 
 1. **Create a template** - Admin creates a policy template in `AdminPolicyTemplates.tsx`
 2. **Create pending policy** - Template generates a `PolicySignRequest` with contract code
-3. **Approve policy** - Admin reviews and approves in `AdminApprovals.tsx`
+3. **Approve policy** - Admin reviews and approves in Change Requests page (Policies tab)
 4. **Commit to ORKs** - Approval commits the signed policy to the ORK network
 5. **Sign requests** - When user SSHs, `tideSsh.ts` fetches the policy and sends to ORKs
 
@@ -185,13 +189,9 @@ The SSH contract is in `client/src/lib/sshPolicy.ts` as `SSH_FORSETI_CONTRACT`.
 
 To modify:
 1. Edit the C# code in `SSH_FORSETI_CONTRACT`
-2. The contract is compiled via `POST /api/forseti/compile` on policy creation (server shells out to a standalone Forseti compiler container)
-3. Ork IL-vets the contract (blocks forbidden namespaces)
+2. Contract ID is computed via `POST /api/forseti/compile` on policy creation (SHA512 hash of source code)
+3. ORKs compile and IL-vet the contract during policy execution (blocks forbidden namespaces)
 4. Test with a new policy template to get the new contractId
-
-Notes:
-- The compile endpoint requires Docker on the server host.
-- Configure the compiler via `COMPILER_IMAGE` (recommended) or `COMPILER_CONTAINER` (for local ORK containers).
 
 ## Related Docs
 

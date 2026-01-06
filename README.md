@@ -33,7 +33,7 @@ The result: enterprise-grade SSH access control without any private keys to mana
 - OIDC login with TideCloak - no passwords, no keys — https://tide.org
 - **Policy:1 authorization** with Forseti contracts for SSH signing
 - Role-based SSH access (e.g., only `ssh:root` role holders can SSH as root)
-- Admin UX: servers, users, roles, policy templates, approvals, sessions, logs
+- Admin UX: servers, users, roles, policy templates, change requests (access, roles, policies), sessions, logs
 - Optional external `tcp-bridge/` for scalable WS↔TCP forwarding
 
 ## Documentation
