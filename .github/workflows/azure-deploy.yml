@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 env:
-  AZURE_WEBAPP_NAME: keylessh-app    # Change this to match your App Service name
+  AZURE_WEBAPP_NAME: keylessh
   NODE_VERSION: '20.x'
 
 jobs:
