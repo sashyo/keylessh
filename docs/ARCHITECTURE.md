@@ -1,48 +1,48 @@
 # Architecture
 
-KeyleSSH is a browser-based SSH console with policy-based cryptographic authorization. The browser performs the SSH protocol; the backend brokers connectivity while ORKs (Orchestrated Recluded Keys - Tide's decentralised node network) handle cryptographic signing. Private keys never exist - signing is performed collaboratively across independent ORKs using threshold cryptography.
+KeyleSSH is a browser-based SSH console with policy-based cryptographic authorization. The browser performs the SSH protocol; the backend brokers connectivity, blindly, while ORKs (Orchestrated Recluder of Keys - Tide's decentralised network nodes) handle cryptographic signing. Private keys never exist - signing is performed collaboratively across independent ORKs using decentralized cryptography.
 
 ## High-Level Diagram
 
 ```
 ┌────────────────────────── Browser ──────────────────────────┐
-│  React UI + xterm.js + SFTP FileBrowser                      │
-│  @microsoft/dev-tunnels-ssh (SSH protocol + crypto)          │
-│  heimdall-tide (Policy:1 signing via TideCloak enclave)      │
+│  React UI + xterm.js + SFTP FileBrowser                     │
+│  @microsoft/dev-tunnels-ssh (SSH protocol + crypto)         │
+│  heimdall-tide (Policy:1 signing via TideCloak enclave)     │
 │                                                             │
-│  1) OIDC login via TideCloak → JWT + Doken                   │
-│  2) POST /api/sessions (serverId + sshUser) → sessionId      │
-│  3) WS /ws/tcp?serverId=…&sessionId=…&token=JWT              │
-│  4) SSH handshake → Policy:1 signing via Ork enclave         │
-│  5) Optional: Open SFTP channel for file operations          │
+│  1) Login via TideCloak → JWT + Doken                       │
+│  2) POST /api/sessions (serverId + sshUser) → sessionId     │
+│  3) WS /ws/tcp?serverId=…&sessionId=…&token=JWT             │
+│  4) SSH handshake → Policy:1 signing via ORKs               │
+│  5) Optional: Open SFTP channel for file operations         │
 └───────────────────────────────────────┬─────────────────────┘
                                         │ encrypted SSH bytes (WS)
                                         │ (shell + SFTP channels multiplexed)
                                         ▼
-┌──────────────────────── Express Server ──────────────────────┐
-│ REST API (servers/sessions/admin/ssh-policies/*)             │
-│ JWT validation (TideCloak JWKS)                              │
-│ SSH policy management (create, approve, commit to Ork)       │
-│ WebSocket TCP bridge (/ws/tcp)                               │
-│  - validates JWT + sessionId + serverId                      │
+┌──────────────────────── Express Server ───────────────────────┐
+│ REST API (servers/sessions/admin/ssh-policies/*)              │
+│ JWT validation (TideCloak JWKS)                               │
+│ SSH policy management (create, approve, commit to Ork)        │
+│ WebSocket TCP bridge (/ws/tcp)                                │
+│  - validates JWT + sessionId + serverId                       │
 │  - enforces serverId → host/port mapping                      │
-│  - enforces sshUser allowlist (token roles/claims)           │
-│  - forwards raw bytes to SSH server                          │
-│                                                             │
-│ Optional: forward bytes to external tcp-bridge/ via BRIDGE_URL│
-└───────────────────────────────────────┬─────────────────────┘
+│  - enforces sshUser allowlist (token roles/claims)            │
+│  - forwards raw bytes to SSH server                           │
+│                                                               │
+│ Optional: forward bytes to external tcp-bridge via BRIDGE_URL │
+└───────────────────────────────────────┬───────────────────────┘
                                         │ TCP
                                         ▼
-┌────────────────────────── SSH Server ────────────────────────┐
-│ Standard SSH daemon (sshd)                                   │
-└──────────────────────────────────────────────────────────────┘
+┌────────────────────────── SSH Server ─────────────────────────┐
+│ Standard SSH daemon (sshd)                                    │
+└───────────────────────────────────────────────────────────────┘
 ```
 
 ## Components
 
 - `client/`: React app (UI, xterm.js, SSH client, SFTP browser, session UX).
 - `server/`: Express API + WebSocket bridge + SQLite storage.
-- `tcp-bridge/` (optional deployment): stateless WS↔TCP forwarder.
+- `tcp-bridge/` (optional external deployment): stateless WS↔TCP forwarder.
 - `shared/`: shared types + schema/config.
 
 ## SSH Connection Flow
@@ -51,7 +51,7 @@ KeyleSSH is a browser-based SSH console with policy-based cryptographic authoriz
 2. Client creates a session record via `POST /api/sessions` (requires JWT).
 3. Client opens a WebSocket to `/ws/tcp` including `sessionId` + JWT.
 4. Server verifies:
-   - JWT signature/issuer/expiry (local JWKS)
+   - JWT signature/issuer/expiry (local public JWKS)
    - session exists and belongs to the token user + serverId
    - requested `host:port` matches the configured server (prevents arbitrary host connections)
    - requested `sshUser` is permitted by the token (roles/claims)
@@ -67,25 +67,25 @@ KeyleSSH includes a built-in SFTP file browser that runs alongside the terminal.
 
 ```
 ┌─────────────────────── Browser ───────────────────────┐
-│                                                        │
+│                                                       │
 │  ┌─────────────────────────────────────────────────┐  │
-│  │              SSH Session                         │  │
+│  │              SSH Session                        │  │
 │  │  ┌─────────────────┐  ┌─────────────────────┐   │  │
 │  │  │  Shell Channel  │  │   SFTP Channel      │   │  │
 │  │  │  (terminal I/O) │  │   (file ops)        │   │  │
 │  │  └────────┬────────┘  └──────────┬──────────┘   │  │
 │  └───────────┼──────────────────────┼──────────────┘  │
-│              │                      │                  │
+│              │                      │                 │
 │  ┌───────────▼──────────────────────▼──────────────┐  │
-│  │            @microsoft/dev-tunnels-ssh            │  │
-│  │            (channel multiplexing)                │  │
+│  │            @microsoft/dev-tunnels-ssh           │  │
+│  │            (channel multiplexing)               │  │
 │  └────────────────────────┬────────────────────────┘  │
-└───────────────────────────┼────────────────────────────┘
+└───────────────────────────┼───────────────────────────┘
                             │ WebSocket (encrypted SSH bytes)
                             ▼
-┌─────────────────── TCP Bridge ────────────────────────┐
-│         Forwards bytes to SSH server                   │
-└────────────────────────────────────────────────────────┘
+┌──────────────── TCP Blind Bridge ─────────────────────┐
+│         Forwards bytes to SSH server                  │
+└───────────────────────────────────────────────────────┘
 ```
 
 ### How It Works
@@ -120,29 +120,29 @@ The client implements SFTP v3 (draft-ietf-secsh-filexfer-02) for maximum OpenSSH
 SSH signing uses the Tide Protocol's Policy:1 auth flow with Forseti contracts:
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                          Policy:1 Signing Flow                           │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                         │
-│  Admin Setup (one-time per role):                                       │
+┌────────────────────────────────────────────────────────────────────────┐
+│                          Policy:1 Signing Flow                         │
+├────────────────────────────────────────────────────────────────────────┤
+│                                                                        │
+│  Admin Setup (one-time per role):                                      │
 │  ┌──────────┐    ┌───────────────┐    ┌─────────────┐    ┌───────────┐ │
-│  │ Template │───▶│ PolicySign    │───▶│ Ork Commit  │───▶│ Stored    │ │
+│  │ Template │───>│ PolicySign    │───>│ Ork Commit  │───>│ Stored    │ │
 │  │ (UI)     │    │ Request       │    │ (enclave)   │    │ Policy    │ │
 │  └──────────┘    └───────────────┘    └─────────────┘    └───────────┘ │
-│                                                                         │
-│  SSH Sign (per connection):                                             │
+│                                                                        │
+│  SSH Sign (per connection):                                            │
 │  ┌──────────┐    ┌───────────────┐    ┌─────────────┐    ┌───────────┐ │
-│  │ SSH      │───▶│ Fetch Policy  │───▶│ Ork Sign    │───▶│ Signature │ │
+│  │ SSH      │───>│ Fetch Policy  │───>│ Ork Sign    │───>│ Signature │ │
 │  │ Challenge│    │ + Doken       │    │ (enclave)   │    │ Returned  │ │
 │  └──────────┘    └───────────────┘    └─────────────┘    └───────────┘ │
-│                                                                         │
-│  Ork validates:                                                         │
-│  - Doken signature and claims                                           │
-│  - Policy parameters (role, resource)                                   │
-│  - Executes Forseti contract (C# code in sandbox)                       │
-│  - Returns signature only if contract returns Allow()                   │
-│                                                                         │
-└─────────────────────────────────────────────────────────────────────────┘
+│                                                                        │
+│  ORK validates:                                                        │
+│  - Doken signature and claims                                          │
+│  - Policy parameters (role, resource)                                  │
+│  - Executes Forseti contract (C# code in sandbox)                      │
+│  - Returns signature only if contract returns Allow()                  │
+│                                                                        │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Model Patterns
