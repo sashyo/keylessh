@@ -62,7 +62,7 @@ http://localhost:8080/realms/keylessh/login-actions/action-token?key=...
 ```
 
 Open this link in your browser and either:
-- Create a new account on [Tide](https://tide.org), or
+- Create a new  tide account, or
 - Sign in with your existing Tide account
 
 ### 3. Wait for initialization
