@@ -160,7 +160,7 @@ export default function AdminRoles() {
   }, [usersData, accessApprovalsData]);
 
   const calculatedThreshold = useMemo(() => {
-    return Math.max(1, Math.ceil(activeAdminCount * 0.7));
+    return Math.max(1, Math.floor(activeAdminCount * 0.7));
   }, [activeAdminCount]);
 
   // Helper to get selected template

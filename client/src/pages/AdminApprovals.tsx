@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useQuery, useMutation, useIsFetching } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -33,7 +33,6 @@ import { api, AccessApproval, RoleApproval, PendingSshPolicy, SshPolicyDecision 
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 import { CheckSquare, X, Upload, User, Shield, FileKey, Eye, Check, Clock, CheckCircle2, XCircle, ChevronDown, ChevronRight, Code, Trash2, Undo2, Users } from "lucide-react";
 import { SSH_FORSETI_CONTRACT } from "@/lib/sshPolicy";
-import { ADMIN_ROLE_SET } from "@shared/config/roles";
 import {
   Collapsible,
   CollapsibleContent,
@@ -723,46 +722,6 @@ function PolicyApprovalsTab() {
     queryFn: api.admin.sshPolicies.listPending,
   });
 
-  // Query for admin users to calculate approval threshold
-  const { data: usersData } = useQuery({
-    queryKey: ["/api/admin/users"],
-    queryFn: api.admin.users.list,
-  });
-
-  // Query for access approvals to identify pending admin role assignments
-  const { data: accessApprovalsData } = useQuery({
-    queryKey: ["/api/admin/access-approvals"],
-    queryFn: api.admin.accessApprovals.list,
-  });
-
-  // Calculate required approval threshold: 70% of active admins (min 1)
-  // Active admins = enabled + linked + isAdmin - those with pending (not yet committed) admin role
-  const activeAdminCount = useMemo(() => {
-    if (!usersData) return 0;
-
-    // Get usernames of users with pending (not committed) admin role assignments
-    const pendingAdminUsernames = new Set(
-      (accessApprovalsData || [])
-        .filter((approval) =>
-          ADMIN_ROLE_SET.has(approval.role) &&
-          !approval.commitReady // Not yet approved/committed
-        )
-        .map((approval) => approval.username)
-    );
-
-    // Filter to get active admins, excluding those with pending admin role
-    return usersData.filter((u) =>
-      u.enabled &&
-      u.linked &&
-      u.isAdmin &&
-      !pendingAdminUsernames.has(u.username || "")
-    ).length;
-  }, [usersData, accessApprovalsData]);
-
-  const calculatedThreshold = useMemo(() => {
-    return Math.max(1, Math.ceil(activeAdminCount * 0.7));
-  }, [activeAdminCount]);
-
   const isFetchingPolicies = useIsFetching({ queryKey: ["/api/admin/ssh-policies/pending"] }) > 0;
   const { secondsRemaining, refreshNow } = useAutoRefresh({
     intervalSeconds: 15,
@@ -1161,9 +1120,6 @@ function PolicyApprovalsTab() {
                   <p className="text-muted-foreground">Threshold</p>
                   <p className="font-medium">
                     {selectedPolicy.threshold} approval(s) required
-                    <span className="text-muted-foreground text-xs ml-1">
-                      (70% of {activeAdminCount} active admin{activeAdminCount !== 1 ? "s" : ""})
-                    </span>
                   </p>
                 </div>
                 <div>
