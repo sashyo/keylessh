@@ -35,6 +35,9 @@ jobs:
           # Copy build output
           cp -r dist deploy/
 
+          # Copy data folder (contains tidecloak.json config)
+          cp -r data deploy/
+
           # Copy package files for production dependencies
           cp package.json deploy/
           cp package-lock.json deploy/
