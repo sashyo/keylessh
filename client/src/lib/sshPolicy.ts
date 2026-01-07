@@ -17,6 +17,9 @@ export type SshModelId = (typeof SSH_MODEL_IDS)[keyof typeof SSH_MODEL_IDS];
 // Exported for display in the approval review dialog
 // Uses [PolicyParam] attributes and DecisionBuilder for clean, declarative policy logic
 export const SSH_FORSETI_CONTRACT = `using Ork.Forseti.Sdk;
+using System;
+using System.Collections.Generic;
+using System.Text;
 
 /// <summary>
 /// SSH Challenge Signing Policy for Keyle-SSH.
@@ -33,17 +36,30 @@ public class SshPolicy : IAccessPolicy
 
     /// <summary>
     /// Validate the request data. Always called.
-    /// Parameters are validated automatically via [PolicyParam] attributes.
+    /// This validates ctx.Data is an SSHv2 publickey authentication "to-be-signed" payload:
+    /// string session_id || byte 50 || string user || string "ssh-connection" || string "publickey" || bool TRUE
+    /// || string alg || string key_blob
     /// </summary>
     public PolicyDecision ValidateData(DataContext ctx)
     {
+        if (ctx == null || ctx.Data == null || ctx.Data.Length == 0)
+            return PolicyDecision.Deny("No data provided for SSH challenge validation");
+
+        if (ctx.Data.Length < 24)
+            return PolicyDecision.Deny($"Data too short to be an SSH publickey challenge: {ctx.Data.Length} bytes");
+
+        if (ctx.Data.Length > 8192)
+            return PolicyDecision.Deny($"Data too large for SSH challenge: {ctx.Data.Length} bytes (maximum 8192)");
+
+        if (!SshPublicKeyChallenge.TryParse(ctx.Data, out var parsed, out var err))
+            return PolicyDecision.Deny(err);
+
+        if (parsed.PublicKeyAlgorithm != "ssh-ed25519")
+            return PolicyDecision.Deny("Only ssh-ed25519 allowed");
+
         return PolicyDecision.Allow();
     }
 
-    /// <summary>
-    /// Validate approvers when policy.approvalType == EXPLICIT.
-    /// Checks that at least one approver has the required role for the resource.
-    /// </summary>
     public PolicyDecision ValidateApprovers(ApproversContext ctx)
     {
         var approvers = DokenDto.WrapAll(ctx.Dokens);
@@ -52,16 +68,244 @@ public class SshPolicy : IAccessPolicy
             .RequireAnyWithRole(approvers, Resource, Role);
     }
 
-    /// <summary>
-    /// Validate executor when policy.executorType == PRIVATE.
-    /// Checks that the executor has the required role for the resource.
-    /// </summary>
     public PolicyDecision ValidateExecutor(ExecutorContext ctx)
     {
         var executor = new DokenDto(ctx.Doken);
         return Decision
             .RequireNotExpired(executor)
             .RequireRole(executor, Resource, Role);
+    }
+
+    internal static class SshPublicKeyChallenge
+    {
+        internal sealed class Parsed
+        {
+            public int SessionIdLength { get; set; }
+            public string Username { get; set; }
+            public string Service { get; set; }
+            public string Method { get; set; }
+            public string PublicKeyAlgorithm { get; set; }
+            public string PublicKeyBlobType { get; set; }
+            public int PublicKeyBlobLength { get; set; }
+        }
+
+        public static bool TryParse(byte[] buf, out Parsed parsed, out string error)
+        {
+            parsed = null;
+            error = "";
+
+            int off = 0;
+
+            // session_id (ssh string)
+            if (!TryReadSshString(buf, ref off, out var sessionId))
+            {
+                error = "Invalid SSH string for session_id";
+                return false;
+            }
+
+            // Common session_id lengths: 20/32/48/64
+            if (!(sessionId.Length == 20 || sessionId.Length == 32 || sessionId.Length == 48 || sessionId.Length == 64))
+            {
+                error = $"Unexpected session_id length: {sessionId.Length}";
+                return false;
+            }
+
+            // message type
+            if (!TryReadByte(buf, ref off, out byte msg))
+            {
+                error = "Missing SSH message type";
+                return false;
+            }
+
+            if (msg != 50) // SSH_MSG_USERAUTH_REQUEST
+            {
+                error = $"Not SSH userauth request (expected msg 50, got {msg})";
+                return false;
+            }
+
+            // username, service, method
+            if (!TryReadSshAscii(buf, ref off, 256, out var username, out error)) return false;
+            if (!TryReadSshAscii(buf, ref off, 64, out var service, out error)) return false;
+            if (!TryReadSshAscii(buf, ref off, 64, out var method, out error)) return false;
+
+            if (!string.Equals(service, "ssh-connection", StringComparison.Ordinal))
+            {
+                error = $"Unexpected SSH service: {service}";
+                return false;
+            }
+
+            if (!string.Equals(method, "publickey", StringComparison.Ordinal))
+            {
+                error = $"Unexpected SSH auth method: {method}";
+                return false;
+            }
+
+            // boolean TRUE
+            if (!TryReadByte(buf, ref off, out byte hasSig))
+            {
+                error = "Missing publickey boolean";
+                return false;
+            }
+
+            if (hasSig != 1)
+            {
+                error = "Expected publickey boolean TRUE (1)";
+                return false;
+            }
+
+            // algorithm
+            if (!TryReadSshAscii(buf, ref off, 128, out var alg, out error)) return false;
+
+            // Allowlist
+            var allowed = new HashSet<string>(StringComparer.Ordinal)
+            {
+                "ssh-ed25519",
+                "rsa-sha2-256",
+                "rsa-sha2-512",
+                "ecdsa-sha2-nistp256",
+                "ecdsa-sha2-nistp384",
+                "ecdsa-sha2-nistp521",
+            };
+
+            if (!allowed.Contains(alg))
+            {
+                error = $"Disallowed/unknown SSH public key algorithm: {alg}";
+                return false;
+            }
+
+            // key blob
+            if (!TryReadSshString(buf, ref off, out var keyBlob))
+            {
+                error = "Invalid SSH string for publickey blob";
+                return false;
+            }
+
+            if (keyBlob.Length < 8)
+            {
+                error = "Publickey blob too short";
+                return false;
+            }
+
+            // key blob begins with ssh string key type
+            int kbOff = 0;
+            if (!TryReadSshString(keyBlob, ref kbOff, out var keyTypeBytes))
+            {
+                error = "Invalid publickey blob (missing key type string)";
+                return false;
+            }
+
+            var keyType = AsciiString(keyTypeBytes, 64);
+            if (keyType == null)
+            {
+                error = "Invalid publickey blob key type (non-ASCII or too long)";
+                return false;
+            }
+
+            if (!IsAlgConsistentWithKeyType(alg, keyType))
+            {
+                error = $"Algorithm/key type mismatch: alg={alg}, keyType={keyType}";
+                return false;
+            }
+
+            // Strict: no trailing bytes
+            if (off != buf.Length)
+            {
+                error = $"Unexpected trailing data: {buf.Length - off} bytes";
+                return false;
+            }
+
+            parsed = new Parsed
+            {
+                SessionIdLength = sessionId.Length,
+                Username = username,
+                Service = service,
+                Method = method,
+                PublicKeyAlgorithm = alg,
+                PublicKeyBlobType = keyType,
+                PublicKeyBlobLength = keyBlob.Length
+            };
+
+            return true;
+        }
+
+        private static bool IsAlgConsistentWithKeyType(string alg, string keyType)
+        {
+            if (alg == "ssh-ed25519") return keyType == "ssh-ed25519";
+            if (alg == "rsa-sha2-256" || alg == "rsa-sha2-512") return keyType == "ssh-rsa";
+            if (alg.StartsWith("ecdsa-sha2-nistp", StringComparison.Ordinal)) return keyType == alg;
+            return false;
+        }
+
+        private static bool TryReadByte(byte[] buf, ref int off, out byte b)
+        {
+            b = 0;
+            if (off >= buf.Length) return false;
+            b = buf[off++];
+            return true;
+        }
+
+        private static bool TryReadU32(byte[] buf, ref int off, out uint v)
+        {
+            v = 0;
+            if (off + 4 > buf.Length) return false;
+            v = (uint)(buf[off] << 24 | buf[off + 1] << 16 | buf[off + 2] << 8 | buf[off + 3]);
+            off += 4;
+            return true;
+        }
+
+        // SSH "string" = uint32 len + len bytes
+        private static bool TryReadSshString(byte[] buf, ref int off, out byte[] s)
+        {
+            s = null;
+            if (!TryReadU32(buf, ref off, out var len)) return false;
+            if (len > (uint)(buf.Length - off)) return false;
+
+            s = new byte[(int)len];
+            Buffer.BlockCopy(buf, off, s, 0, (int)len);
+            off += (int)len;
+            return true;
+        }
+
+        private static bool TryReadSshAscii(byte[] buf, ref int off, int maxLen, out string value, out string error)
+        {
+            value = "";
+            error = "";
+
+            if (!TryReadSshString(buf, ref off, out var bytes))
+            {
+                error = "Invalid SSH string field";
+                return false;
+            }
+
+            if (bytes.Length == 0 || bytes.Length > maxLen)
+            {
+                error = $"Invalid field length: {bytes.Length} (max {maxLen})";
+                return false;
+            }
+
+            var s = AsciiString(bytes, maxLen);
+            if (s == null)
+            {
+                error = "Field contains non-ASCII or control characters";
+                return false;
+            }
+
+            value = s;
+            return true;
+        }
+
+        private static string AsciiString(byte[] bytes, int maxLen)
+        {
+            if (bytes.Length == 0 || bytes.Length > maxLen) return null;
+
+            for (int i = 0; i < bytes.Length; i++)
+            {
+                byte c = bytes[i];
+                if (c < 0x20 || c > 0x7E) return null;
+            }
+
+            return Encoding.ASCII.GetString(bytes);
+        }
     }
 }`;
 

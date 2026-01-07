@@ -431,6 +431,7 @@ export interface PendingSshPolicy {
   requestedBy: string;
   requestedByEmail?: string;
   policyRequestData: string;
+  contractCode?: string;
   status: SshPolicyStatus;
   threshold: number;
   createdAt: number;

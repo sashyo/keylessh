@@ -50,7 +50,7 @@ import { RefreshButton } from "@/components/RefreshButton";
 import { useAuth, useAuthConfig } from "@/contexts/AuthContext";
 import { KeyRound, Pencil, Plus, Trash2, Search, Shield, FileCode } from "lucide-react";
 import type { AdminRole } from "@shared/schema";
-import { createSshPolicyRequest, createSshPolicyRequestWithCode, bytesToBase64, SSH_MODEL_IDS } from "@/lib/sshPolicy";
+import { createSshPolicyRequest, createSshPolicyRequestWithCode, bytesToBase64, SSH_MODEL_IDS, SSH_FORSETI_CONTRACT } from "@/lib/sshPolicy";
 
 // SSH signing contract types
 const SSH_CONTRACT_TYPES = {
@@ -244,6 +244,8 @@ export default function AdminRoles() {
     setFormData({ name: "", description: "" });
     setCreateAsSshRole(true);
     setPolicyConfig(defaultPolicyConfig);
+    setSelectedTemplateId(null);
+    setTemplateParams({});
     setCreatingRole(true);
   };
 
@@ -262,13 +264,14 @@ export default function AdminRoles() {
       setIsUpdatingPolicy(true);
       try {
         let policyRequest;
+        let usedContractCode: string;
         const editSelectedTemplate = editSelectedTemplateId
           ? templates.find((t) => t.id === editSelectedTemplateId)
           : null;
 
         if (editSelectedTemplate) {
           // Generate contract code from template with placeholders replaced
-          const contractCode = replacePlaceholders(editSelectedTemplate.csCode, editTemplateParams);
+          usedContractCode = replacePlaceholders(editSelectedTemplate.csCode, editTemplateParams);
 
           // Compile and create policy request with custom contract code
           const { request } = await createSshPolicyRequestWithCode({
@@ -276,20 +279,21 @@ export default function AdminRoles() {
             threshold: editingPolicyConfig.threshold,
             approvalType: editingPolicyConfig.approvalType,
             executionType: editingPolicyConfig.executionType,
-            modelId: SSH_MODEL_IDS.BASIC,
+            modelId: editingPolicyConfig.contractType,
             resource: authConfig.resource,
             vendorId: authConfig.vendorId,
-            contractCode,
+            contractCode: usedContractCode,
           });
           policyRequest = request;
         } else {
           // Compile and create policy request with default contract
+          usedContractCode = SSH_FORSETI_CONTRACT;
           policyRequest = await createSshPolicyRequest({
             roleName: editingRole.name,
             threshold: editingPolicyConfig.threshold,
             approvalType: editingPolicyConfig.approvalType,
             executionType: editingPolicyConfig.executionType,
-            modelId: SSH_MODEL_IDS.BASIC,
+            modelId: editingPolicyConfig.contractType,
             resource: authConfig.resource,
             vendorId: authConfig.vendorId,
           });
@@ -308,6 +312,7 @@ export default function AdminRoles() {
           body: JSON.stringify({
             policyRequest: bytesToBase64(initializedRequest.encode()),
             roleName: editingRole.name,
+            contractCode: usedContractCode,
           }),
         });
 
@@ -350,11 +355,12 @@ export default function AdminRoles() {
       setIsCreatingPolicy(true);
       try {
         let policyRequest;
+        let usedContractCode: string;
 
         // Check if using a template or default
         if (selectedTemplate) {
           // Generate contract code from template with placeholders replaced
-          const contractCode = replacePlaceholders(selectedTemplate.csCode, templateParams);
+          usedContractCode = replacePlaceholders(selectedTemplate.csCode, templateParams);
 
           // Compile and create policy request with custom contract code
           const { request } = await createSshPolicyRequestWithCode({
@@ -362,20 +368,21 @@ export default function AdminRoles() {
             threshold: policyConfig.threshold,
             approvalType: policyConfig.approvalType,
             executionType: policyConfig.executionType,
-            modelId: SSH_MODEL_IDS.BASIC,
+            modelId: policyConfig.contractType,
             resource: authConfig.resource,
             vendorId: authConfig.vendorId,
-            contractCode,
+            contractCode: usedContractCode,
           });
           policyRequest = request;
         } else {
           // Compile and create policy request with default contract
+          usedContractCode = SSH_FORSETI_CONTRACT;
           policyRequest = await createSshPolicyRequest({
             roleName: name,
             threshold: policyConfig.threshold,
             approvalType: policyConfig.approvalType,
             executionType: policyConfig.executionType,
-            modelId: SSH_MODEL_IDS.BASIC,
+            modelId: policyConfig.contractType,
             resource: authConfig.resource,
             vendorId: authConfig.vendorId,
           });
@@ -394,6 +401,7 @@ export default function AdminRoles() {
           body: JSON.stringify({
             policyRequest: bytesToBase64(initializedRequest.encode()),
             roleName: name,
+            contractCode: usedContractCode,
           }),
         });
 

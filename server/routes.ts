@@ -1093,7 +1093,7 @@ export async function registerRoutes(
     requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
-        const { policyRequest, roleName, threshold } = req.body;
+        const { policyRequest, roleName, threshold, contractCode } = req.body;
 
         if (!policyRequest || !roleName) {
           res.status(400).json({ error: "policyRequest and roleName are required" });
@@ -1114,6 +1114,7 @@ export async function registerRoutes(
           requestedBy: req.tokenPayload?.vuid || req.user?.id || "unknown",
           requestedByEmail: req.user?.email,
           policyRequestData: policyRequest,
+          contractCode: contractCode || undefined,
           threshold: threshold || 1,
         });
 

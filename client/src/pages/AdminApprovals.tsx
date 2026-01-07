@@ -1166,7 +1166,7 @@ function PolicyApprovalsTab() {
                 <CollapsibleContent>
                   <div className="mt-2 border rounded-lg bg-muted/50">
                     <pre className="p-3 text-xs font-mono overflow-x-auto max-h-48 overflow-y-auto whitespace-pre-wrap">
-                      {SSH_FORSETI_CONTRACT}
+                      {selectedPolicy.contractCode || SSH_FORSETI_CONTRACT}
                     </pre>
                   </div>
                 </CollapsibleContent>
