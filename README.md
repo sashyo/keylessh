@@ -44,7 +44,39 @@ The result: enterprise-grade SSH access control without any private keys to mana
 
 ## Quickstart (Local Dev)
 
+### 1. Clone and start TideCloak
+
 ```bash
+git clone https://github.com/sashyo/keylessh.git
+cd keylessh/script/tidecloak
+./start.sh
+```
+
+### 2. Link your Tide account
+
+The script will generate an invite link:
+
+```
+🔗 INVITE LINK (use this one):
+http://localhost:8080/realms/keylessh/login-actions/action-token?key=...
+```
+
+Open this link in your browser and either:
+- Create a new  tide account, or
+- Sign in with your existing Tide account
+
+### 3. Wait for initialization
+
+The script will detect when linking is complete and continue finishing the setup:
+
+```
+🎉 Tidecloak initialization complete!
+```
+
+### 4. Start the app
+
+```bash
+cd ../..  # back to keylessh root
 npm install
 npm run dev
 ```

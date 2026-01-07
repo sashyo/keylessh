@@ -50,6 +50,7 @@ import { RefreshButton } from "@/components/RefreshButton";
 import { useAuth, useAuthConfig } from "@/contexts/AuthContext";
 import { KeyRound, Pencil, Plus, Trash2, Search, Shield, FileCode } from "lucide-react";
 import type { AdminRole } from "@shared/schema";
+import { ADMIN_ROLE_SET } from "@shared/config/roles";
 import { createSshPolicyRequest, createSshPolicyRequestWithCode, bytesToBase64, SSH_MODEL_IDS, SSH_FORSETI_CONTRACT } from "@/lib/sshPolicy";
 
 // SSH signing contract types
@@ -121,6 +122,46 @@ export default function AdminRoles() {
     queryFn: api.admin.policyTemplates.list,
   });
   const templates = templatesData?.templates || [];
+
+  // Query for admin users to calculate approval threshold
+  const { data: usersData } = useQuery({
+    queryKey: ["/api/admin/users"],
+    queryFn: api.admin.users.list,
+  });
+
+  // Query for access approvals to identify pending admin role assignments
+  const { data: accessApprovalsData } = useQuery({
+    queryKey: ["/api/admin/access-approvals"],
+    queryFn: api.admin.accessApprovals.list,
+  });
+
+  // Calculate required approval threshold: 70% of active admins (min 1)
+  // Active admins = enabled + linked + isAdmin - those with pending (not yet committed) admin role
+  const activeAdminCount = useMemo(() => {
+    if (!usersData) return 0;
+
+    // Get usernames of users with pending (not committed) admin role assignments
+    const pendingAdminUsernames = new Set(
+      (accessApprovalsData || [])
+        .filter((approval) =>
+          ADMIN_ROLE_SET.has(approval.role) &&
+          !approval.commitReady // Not yet approved/committed
+        )
+        .map((approval) => approval.username)
+    );
+
+    // Filter to get active admins, excluding those with pending admin role
+    return usersData.filter((u) =>
+      u.enabled &&
+      u.linked &&
+      u.isAdmin &&
+      !pendingAdminUsernames.has(u.username || "")
+    ).length;
+  }, [usersData, accessApprovalsData]);
+
+  const calculatedThreshold = useMemo(() => {
+    return Math.max(1, Math.ceil(activeAdminCount * 0.7));
+  }, [activeAdminCount]);
 
   // Helper to get selected template
   const selectedTemplate = selectedTemplateId
@@ -276,7 +317,7 @@ export default function AdminRoles() {
           // Compile and create policy request with custom contract code
           const { request } = await createSshPolicyRequestWithCode({
             roleName: editingRole.name,
-            threshold: editingPolicyConfig.threshold,
+            threshold: calculatedThreshold,
             approvalType: editingPolicyConfig.approvalType,
             executionType: editingPolicyConfig.executionType,
             modelId: SSH_MODEL_IDS.BASIC,
@@ -290,7 +331,7 @@ export default function AdminRoles() {
           usedContractCode = SSH_FORSETI_CONTRACT;
           policyRequest = await createSshPolicyRequest({
             roleName: editingRole.name,
-            threshold: editingPolicyConfig.threshold,
+            threshold: calculatedThreshold,
             approvalType: editingPolicyConfig.approvalType,
             executionType: editingPolicyConfig.executionType,
             modelId: SSH_MODEL_IDS.BASIC,
@@ -365,7 +406,7 @@ export default function AdminRoles() {
           // Compile and create policy request with custom contract code
           const { request } = await createSshPolicyRequestWithCode({
             roleName: name,
-            threshold: policyConfig.threshold,
+            threshold: calculatedThreshold,
             approvalType: policyConfig.approvalType,
             executionType: policyConfig.executionType,
             modelId: SSH_MODEL_IDS.BASIC,
@@ -379,7 +420,7 @@ export default function AdminRoles() {
           usedContractCode = SSH_FORSETI_CONTRACT;
           policyRequest = await createSshPolicyRequest({
             roleName: name,
-            threshold: policyConfig.threshold,
+            threshold: calculatedThreshold,
             approvalType: policyConfig.approvalType,
             executionType: policyConfig.executionType,
             modelId: SSH_MODEL_IDS.BASIC,
@@ -762,14 +803,14 @@ export default function AdminRoles() {
                         {editingPolicyConfig.approvalType === "explicit" && (
                           <div className="space-y-2">
                             <Label>Approval Threshold</Label>
-                            <Input
-                              type="number"
-                              min={1}
-                              value={editingPolicyConfig.threshold}
-                              onChange={(e) => setEditingPolicyConfig({ ...editingPolicyConfig, threshold: parseInt(e.target.value) || 1 })}
-                            />
+                            <div className="flex items-center gap-2 p-2 bg-muted rounded-md">
+                              <span className="font-medium">{calculatedThreshold}</span>
+                              <span className="text-muted-foreground text-sm">
+                                (70% of {activeAdminCount} active admin{activeAdminCount !== 1 ? "s" : ""})
+                              </span>
+                            </div>
                             <p className="text-xs text-muted-foreground">
-                              Number of approvals required before signing
+                              Automatically calculated based on active admins
                             </p>
                           </div>
                         )}
@@ -1065,15 +1106,14 @@ export default function AdminRoles() {
                     {policyConfig.approvalType === "explicit" && (
                       <div className="space-y-2">
                         <Label htmlFor="threshold">Approval Threshold</Label>
-                        <Input
-                          id="threshold"
-                          type="number"
-                          min={1}
-                          value={policyConfig.threshold}
-                          onChange={(e) => setPolicyConfig({ ...policyConfig, threshold: parseInt(e.target.value) || 1 })}
-                        />
+                        <div className="flex items-center gap-2 p-2 bg-muted rounded-md">
+                          <span className="font-medium">{calculatedThreshold}</span>
+                          <span className="text-muted-foreground text-sm">
+                            (70% of {activeAdminCount} active admin{activeAdminCount !== 1 ? "s" : ""})
+                          </span>
+                        </div>
                         <p className="text-xs text-muted-foreground">
-                          Number of approvals required before signing
+                          Automatically calculated based on active admins
                         </p>
                       </div>
                     )}
