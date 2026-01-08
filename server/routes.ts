@@ -4,7 +4,6 @@ import { storage, approvalStorage, policyStorage, pendingPolicyStorage, template
 import { subscriptionTiers, type SubscriptionTier } from "@shared/schema";
 import * as stripeLib from "./lib/stripe";
 import { log, logForseti, logError } from "./logger";
-import { terminateSession } from "./wsBridge";
 import type { ServerWithAccess, ActiveSession, ServerStatus, Server as ServerType } from "@shared/schema";
 import { createRequire } from "module";
 import { getHomeOrkUrl, GetConfig } from "./lib/auth/tidecloakConfig";
@@ -106,6 +105,7 @@ import {
 } from "./lib/tidecloakApi";
 import type { ChangeSetRequest, AccessApproval } from "./lib/auth/keycloakTypes";
 import { getAllowedSshUsersFromToken } from "./lib/auth/sshUsers";
+import { verifyTideCloakToken } from "./lib/auth/tideJWT";
 
 // SSH connections are handled via WebSocket TCP bridge
 // The browser runs SSH client (using @microsoft/dev-tunnels-ssh)
@@ -419,7 +419,21 @@ export async function registerRoutes(
         status: "active",
       });
 
-      res.json(session);
+      // Check if recording is enabled for this server/user
+      let recordingEnabled = false;
+      if (server.recordingEnabled) {
+        const recordedUsers = server.recordedUsers || [];
+        recordingEnabled = recordedUsers.length === 0 || recordedUsers.includes(sshUser);
+      }
+
+      // Include bridge URL and server details in response
+      res.json({
+        ...session,
+        bridgeUrl: process.env.BRIDGE_URL || null,
+        host: server.host,
+        port: server.port ?? 22,
+        recordingEnabled,
+      });
     } catch (error) {
       res.status(500).json({ message: "Failed to create session" });
     }
@@ -555,6 +569,298 @@ export async function registerRoutes(
       }
     }
   );
+
+  // ============================================
+  // TCP Bridge Validation Endpoints
+  // ============================================
+
+  // POST /api/bridge/validate - Validate session for TCP bridge connection
+  // Called by tcp-bridge service to verify a session before allowing SSH traffic
+  app.post("/api/bridge/validate", async (req, res) => {
+    try {
+      const { token, sessionId, serverId } = req.body;
+
+      if (!token || !sessionId || !serverId) {
+        res.status(400).json({ valid: false, error: "Missing required parameters" });
+        return;
+      }
+
+      // Verify JWT token
+      const payload = await verifyTideCloakToken(token, []);
+      if (!payload) {
+        res.status(401).json({ valid: false, error: "Invalid or expired token" });
+        return;
+      }
+
+      const userId = payload.sub;
+      if (!userId) {
+        res.status(401).json({ valid: false, error: "Invalid token: missing sub" });
+        return;
+      }
+
+      // Validate session exists and is active
+      const session = await storage.getSession(sessionId);
+      if (!session) {
+        res.status(404).json({ valid: false, error: "Unknown session" });
+        return;
+      }
+      if (session.status !== "active") {
+        res.status(400).json({ valid: false, error: "Session is not active" });
+        return;
+      }
+      if (session.userId !== userId || session.serverId !== serverId) {
+        res.status(403).json({ valid: false, error: "Session does not match user/server" });
+        return;
+      }
+
+      // Enforce SSH username allowlist from JWT roles/claims
+      const allowed = getAllowedSshUsersFromToken(payload);
+      if (!allowed.includes(session.sshUser)) {
+        res.status(403).json({ valid: false, error: `Not allowed to SSH as '${session.sshUser}'` });
+        return;
+      }
+
+      // Validate server exists and is enabled
+      const server = await storage.getServer(serverId);
+      if (!server) {
+        res.status(404).json({ valid: false, error: "Unknown server" });
+        return;
+      }
+      if (!server.enabled) {
+        res.status(403).json({ valid: false, error: "Server is disabled" });
+        return;
+      }
+
+      // Check subscription limits
+      try {
+        const users = await tidecloakAdmin.getUsers(token);
+        const enabledCount = users.filter(u => u.enabled).length;
+        const subscription = await subscriptionStorage.getSubscription();
+        const tier = (subscription?.tier as SubscriptionTier) || 'free';
+        const tierConfig = subscriptionTiers[tier];
+        const userLimit = tierConfig.maxUsers;
+        const isUsersOverLimit = userLimit !== -1 && enabledCount > userLimit;
+        const serverCounts = await subscriptionStorage.getServerCounts();
+        const serverLimit = tierConfig.maxServers;
+        const isServersOverLimit = serverLimit !== -1 && serverCounts.enabled > serverLimit;
+        await subscriptionStorage.updateOverLimitStatus(isUsersOverLimit, isServersOverLimit);
+      } catch {
+        // If we can't refresh, continue with cached status
+      }
+      const sshStatus = await subscriptionStorage.isSshBlocked();
+      if (sshStatus.blocked) {
+        res.status(403).json({ valid: false, error: "SSH access is currently disabled" });
+        return;
+      }
+
+      // Check if recording is enabled
+      let recordingEnabled = false;
+      if (server.recordingEnabled) {
+        const recordedUsers = server.recordedUsers || [];
+        recordingEnabled = recordedUsers.length === 0 || recordedUsers.includes(session.sshUser);
+      }
+
+      res.json({
+        valid: true,
+        host: server.host,
+        port: server.port ?? 22,
+        recordingEnabled,
+        serverName: server.name,
+        sshUser: session.sshUser,
+        userEmail: session.userEmail,
+      });
+    } catch (error) {
+      log(`Bridge validation error: ${error}`);
+      res.status(500).json({ valid: false, error: "Internal server error" });
+    }
+  });
+
+  // POST /api/sessions/:id/start-recording - Start a recording for a session
+  app.post("/api/sessions/:id/start-recording", authenticate, async (req: AuthenticatedRequest, res) => {
+    try {
+      const user = req.user!;
+      const sessionId = req.params.id;
+      const { terminalWidth, terminalHeight } = req.body;
+
+      const session = await storage.getSession(sessionId);
+      if (!session) {
+        res.status(404).json({ error: "Session not found" });
+        return;
+      }
+
+      // Only allow starting recording for own sessions
+      if (session.userId !== user.id) {
+        res.status(403).json({ error: "Access denied" });
+        return;
+      }
+
+      const server = await storage.getServer(session.serverId);
+      if (!server) {
+        res.status(404).json({ error: "Server not found" });
+        return;
+      }
+
+      // Check if recording is enabled for this server/user
+      if (!server.recordingEnabled) {
+        res.status(400).json({ error: "Recording not enabled for this server" });
+        return;
+      }
+
+      const recordedUsers = server.recordedUsers || [];
+      const shouldRecord = recordedUsers.length === 0 || recordedUsers.includes(session.sshUser);
+      if (!shouldRecord) {
+        res.status(400).json({ error: "Recording not enabled for this SSH user" });
+        return;
+      }
+
+      // Create recording
+      const width = terminalWidth || 80;
+      const height = terminalHeight || 24;
+      const recording = await recordingStorage.createRecording({
+        sessionId,
+        serverId: session.serverId,
+        serverName: server.name,
+        userId: user.id,
+        userEmail: user.email || "",
+        sshUser: session.sshUser,
+        terminalWidth: width,
+        terminalHeight: height,
+      });
+
+      // Write asciicast header
+      const timestamp = Math.floor(Date.now() / 1000);
+      const header = JSON.stringify({ version: 2, width, height, timestamp }) + "\n";
+      await recordingStorage.appendData(recording.id, header);
+
+      // Link recording to session
+      await storage.updateSession(sessionId, { recordingId: recording.id });
+
+      log(`Started recording ${recording.id} for session ${sessionId}`);
+      res.json({ recordingId: recording.id, startTime: Date.now() });
+    } catch (error) {
+      log(`Start recording error: ${error}`);
+      res.status(500).json({ error: "Failed to start recording" });
+    }
+  });
+
+  // POST /api/sessions/:id/record - Append a recording event
+  app.post("/api/sessions/:id/record", authenticate, async (req: AuthenticatedRequest, res) => {
+    try {
+      const user = req.user!;
+      const sessionId = req.params.id;
+      const { recordingId, time, eventType, data } = req.body;
+
+      if (!recordingId || time === undefined || !eventType || data === undefined) {
+        res.status(400).json({ error: "Missing required fields" });
+        return;
+      }
+
+      const session = await storage.getSession(sessionId);
+      if (!session) {
+        res.status(404).json({ error: "Session not found" });
+        return;
+      }
+
+      if (session.userId !== user.id) {
+        res.status(403).json({ error: "Access denied" });
+        return;
+      }
+
+      // Append recording event (asciicast v2 format)
+      const event = JSON.stringify([time, eventType, data]) + "\n";
+      await recordingStorage.appendData(recordingId, event);
+
+      // Append text content for search (output only)
+      if (eventType === "o") {
+        // Strip ANSI codes
+        const text = data.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "");
+        await recordingStorage.appendTextContent(recordingId, text);
+      }
+
+      res.json({ success: true });
+    } catch (error) {
+      log(`Record event error: ${error}`);
+      res.status(500).json({ error: "Failed to record event" });
+    }
+  });
+
+  // POST /api/sessions/:id/end-recording - Finalize a recording
+  app.post("/api/sessions/:id/end-recording", authenticate, async (req: AuthenticatedRequest, res) => {
+    try {
+      const user = req.user!;
+      const sessionId = req.params.id;
+      const { recordingId } = req.body;
+
+      if (!recordingId) {
+        res.status(400).json({ error: "Missing recordingId" });
+        return;
+      }
+
+      const session = await storage.getSession(sessionId);
+      if (!session) {
+        res.status(404).json({ error: "Session not found" });
+        return;
+      }
+
+      if (session.userId !== user.id) {
+        res.status(403).json({ error: "Access denied" });
+        return;
+      }
+
+      await recordingStorage.finalizeRecording(recordingId);
+      log(`Finalized recording ${recordingId} for session ${sessionId}`);
+      res.json({ success: true });
+    } catch (error) {
+      log(`End recording error: ${error}`);
+      res.status(500).json({ error: "Failed to end recording" });
+    }
+  });
+
+  // POST /api/sessions/:id/file-op - Log a file operation
+  app.post("/api/sessions/:id/file-op", authenticate, async (req: AuthenticatedRequest, res) => {
+    try {
+      const user = req.user!;
+      const sessionId = req.params.id;
+      const { operation, path, targetPath, fileSize, mode, status, errorMessage } = req.body;
+
+      if (!operation || !path || !mode || !status) {
+        res.status(400).json({ error: "Missing required fields" });
+        return;
+      }
+
+      const session = await storage.getSession(sessionId);
+      if (!session) {
+        res.status(404).json({ error: "Session not found" });
+        return;
+      }
+
+      if (session.userId !== user.id) {
+        res.status(403).json({ error: "Access denied" });
+        return;
+      }
+
+      await fileOperationStorage.logOperation({
+        sessionId,
+        serverId: session.serverId,
+        userId: user.id,
+        userEmail: session.userEmail || undefined,
+        sshUser: session.sshUser,
+        operation,
+        path,
+        targetPath,
+        fileSize,
+        mode,
+        status,
+        errorMessage,
+      });
+
+      log(`File op: ${operation} ${path} (${mode}, ${status}) - session ${sessionId}`);
+      res.json({ success: true });
+    } catch (error) {
+      log(`File op error: ${error}`);
+      res.status(500).json({ error: "Failed to log file operation" });
+    }
+  });
 
   // ============================================
   // Admin Server Routes
@@ -1573,12 +1879,13 @@ export async function registerRoutes(
       try {
         const sessionId = req.params.id;
 
-        const terminated = terminateSession(sessionId);
+        // End session in database - the tcp-bridge connection will
+        // close when the client's next action fails validation
         await storage.endSession(sessionId);
 
         res.json({
           success: true,
-          terminated,
+          message: "Session marked as ended",
         });
       } catch (error) {
         res.status(500).json({ message: "Failed to terminate session" });
