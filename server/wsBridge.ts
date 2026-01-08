@@ -412,8 +412,7 @@ export function setupWSBridge(httpServer: Server): WebSocketServer {
                 })();
                 return; // Don't forward file op messages to bridge
               }
-              // Other JSON control messages - don't forward to bridge
-              return;
+              // Unrecognized JSON - fall through to forward it (could be SSH data that happens to parse as JSON)
             } catch {
               // Not valid JSON despite starting with '{', forward to bridge
             }
@@ -530,8 +529,7 @@ export function setupWSBridge(httpServer: Server): WebSocketServer {
                 })();
                 return; // Don't forward file op messages to TCP
               }
-              // Unknown JSON message - don't forward to TCP (it would corrupt SSH protocol)
-              return;
+              // Unrecognized JSON - fall through to forward it (could be SSH data that happens to parse as JSON)
             } catch {
               // Not valid JSON despite starting with '{', forward to TCP
             }

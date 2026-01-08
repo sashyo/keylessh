@@ -17,9 +17,14 @@ import { apiRequest, getQueryFn, queryClient } from "@/lib/queryClient";
 const mockFetch = vi.fn();
 global.fetch = mockFetch;
 
-// Mock localStorage for token storage
+// Mock localStorage for token storage - verifies correct key is used
+const TOKEN_KEY = "access_token";
+let storedToken: string | null = null;
 const localStorageMock = {
-  getItem: vi.fn(),
+  getItem: vi.fn((key: string) => {
+    // Only return token for the correct key to ensure code uses right key
+    return key === TOKEN_KEY ? storedToken : null;
+  }),
   setItem: vi.fn(),
   removeItem: vi.fn(),
   clear: vi.fn(),
@@ -33,7 +38,7 @@ Object.defineProperty(global, "localStorage", { value: localStorageMock });
 describe("apiRequest", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    localStorageMock.getItem.mockReturnValue(null);
+    storedToken = null;
   });
 
   // Basic GET request without authentication
@@ -75,7 +80,7 @@ describe("apiRequest", () => {
 
   // Adds Bearer token from localStorage when available
   it("should include Authorization header when token exists", async () => {
-    localStorageMock.getItem.mockReturnValue("test-token");
+    storedToken = "test-token";
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: () => Promise.resolve({ data: "test" }),
@@ -83,6 +88,8 @@ describe("apiRequest", () => {
 
     await apiRequest("GET", "/api/test");
 
+    // Verify getItem was called with the correct key
+    expect(localStorageMock.getItem).toHaveBeenCalledWith(TOKEN_KEY);
     expect(mockFetch).toHaveBeenCalledWith("/api/test", {
       method: "GET",
       headers: { Authorization: "Bearer test-token" },
@@ -157,7 +164,7 @@ describe("apiRequest", () => {
 describe("getQueryFn", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    localStorageMock.getItem.mockReturnValue(null);
+    storedToken = null;
   });
 
   /**
@@ -249,7 +256,7 @@ describe("getQueryFn", () => {
 
   // Token is passed in Authorization header when available
   it("should include Authorization header when token exists", async () => {
-    localStorageMock.getItem.mockReturnValue("my-token");
+    storedToken = "my-token";
     const queryFn = getQueryFn({ on401: "throw" });
 
     mockFetch.mockResolvedValueOnce({
@@ -259,6 +266,8 @@ describe("getQueryFn", () => {
 
     await queryFn({ queryKey: ["/api/test"] } as any);
 
+    // Verify getItem was called with the correct key
+    expect(localStorageMock.getItem).toHaveBeenCalledWith(TOKEN_KEY);
     expect(mockFetch).toHaveBeenCalledWith("/api/test", {
       credentials: "include",
       headers: { Authorization: "Bearer my-token" },
