@@ -1118,7 +1118,9 @@ function PolicyApprovalsTab() {
                 </div>
                 <div>
                   <p className="text-muted-foreground">Threshold</p>
-                  <p className="font-medium">{selectedPolicy.threshold} approval(s) required</p>
+                  <p className="font-medium">
+                    {selectedPolicy.threshold} approval(s) required
+                  </p>
                 </div>
                 <div>
                   <p className="text-muted-foreground">Progress</p>

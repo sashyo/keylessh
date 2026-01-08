@@ -28,7 +28,7 @@ interface FileBrowserProps {
   onFileOp?: (event: FileOpLogEvent) => void;
 }
 
-export function FileBrowser({ client, scpClient, session, initialPath = "~", className, onFileOp }: FileBrowserProps) {
+export function FileBrowser({ client, scpClient, session, initialPath = ".", className, onFileOp }: FileBrowserProps) {
   const {
     mode,
     currentPath,

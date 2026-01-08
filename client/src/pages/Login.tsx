@@ -83,7 +83,7 @@ export default function Login() {
       <header className="border-b border-border">
         <div className="container mx-auto px-4 sm:px-6 py-4 flex items-center gap-3">
           <KeyleSSHLogo className="h-8 w-8 sm:h-9 sm:w-9" />
-          <span className="font-semibold text-base sm:text-lg text-[hsl(0_0%_90%)]">KeyleSSH</span>
+          <span className="font-semibold text-base sm:text-lg text-foreground">KeyleSSH</span>
         </div>
       </header>
 
@@ -91,7 +91,7 @@ export default function Login() {
         <div className="flex-1 max-w-lg hidden sm:block">
           <div className="space-y-6">
             <div className="space-y-2">
-              <h1 className="text-3xl font-semibold tracking-tight">
+              <h1 className="text-3xl font-semibold tracking-tight text-foreground">
                 Secure SSH Access
               </h1>
               <p className="text-lg text-muted-foreground">
@@ -105,7 +105,7 @@ export default function Login() {
                   <Shield className="h-5 w-5 text-primary" />
                 </div>
                 <div>
-                  <h3 className="font-medium">OIDC Authentication</h3>
+                  <h3 className="font-medium text-foreground">OIDC Authentication</h3>
                   <p className="text-sm text-muted-foreground">
                     Secure single sign-on with Tidecloak identity provider
                   </p>
@@ -117,7 +117,7 @@ export default function Login() {
                   <Server className="h-5 w-5 text-primary" />
                 </div>
                 <div>
-                  <h3 className="font-medium">Multi-Server Access</h3>
+                  <h3 className="font-medium text-foreground">Multi-Server Access</h3>
                   <p className="text-sm text-muted-foreground">
                     Connect to multiple servers with role-based permissions
                   </p>
@@ -129,9 +129,9 @@ export default function Login() {
                   <Key className="h-5 w-5 text-primary" />
                 </div>
                 <div>
-                  <h3 className="font-medium">Passwordless SSH</h3>
+                  <h3 className="font-medium text-foreground">Keyless SSH</h3>
                   <p className="text-sm text-muted-foreground">
-                    KeyleSSH handles authentication - no SSH keys needed
+                    No SSH keys to manage - authenticate with your identity provider
                   </p>
                 </div>
               </div>

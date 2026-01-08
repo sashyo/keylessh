@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="monoGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#a0a0a8"/>
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="2" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="glowStrong" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="3" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Green-tinted dark background -->
+  <rect width="64" height="64" rx="14" fill="hsl(120 15% 6%)"/>
+
+  <!-- Subtle grid lines -->
+  <g opacity="0.05" stroke="#ffffff" stroke-width="0.5">
+    <line x1="0" y1="21" x2="64" y2="21"/>
+    <line x1="0" y1="43" x2="64" y2="43"/>
+    <line x1="21" y1="0" x2="21" y2="64"/>
+    <line x1="43" y1="0" x2="43" y2="64"/>
+  </g>
+
+  <!-- Abstract K shape with glow -->
+  <g filter="url(#glowStrong)">
+    <!-- Vertical bar of K -->
+    <path d="M18 14 L18 50" stroke="url(#monoGrad)" stroke-width="5" stroke-linecap="round" fill="none"/>
+    <!-- Upper diagonal of K -->
+    <path d="M20 32 L38 14" stroke="#ffffff" stroke-width="5" stroke-linecap="round" fill="none"/>
+    <!-- Lower diagonal of K -->
+    <path d="M20 32 L38 50" stroke="#a0a0a8" stroke-width="5" stroke-linecap="round" fill="none"/>
+  </g>
+
+  <!-- Terminal cursor with glow -->
+  <g filter="url(#glow)">
+    <rect x="44" y="38" width="8" height="12" rx="1" fill="#e0e0e0"/>
+  </g>
+
+  <!-- Corner brackets -->
+  <path d="M4 14 L4 4 L14 4" stroke="#ffffff" stroke-width="1.5" fill="none" opacity="0.3"/>
+  <path d="M50 4 L60 4 L60 14" stroke="#a0a0a8" stroke-width="1.5" fill="none" opacity="0.3"/>
+  <path d="M60 50 L60 60 L50 60" stroke="#ffffff" stroke-width="1.5" fill="none" opacity="0.3"/>
+  <path d="M14 60 L4 60 L4 50" stroke="#a0a0a8" stroke-width="1.5" fill="none" opacity="0.3"/>
+</svg>

@@ -91,8 +91,7 @@ echo "📄 Generated realm name: $REALM_NAME"
 TMP_REALM_JSON="$(mktemp)"
 cp "$REALM_JSON_PATH" "$TMP_REALM_JSON"
 # sed -i "s|http://localhost:3000|$CLIENT_APP_URL|g" "$TMP_REALM_JSON"
-sed -i "s|SWARM-WALLET|$REALM_NAME|g" "$TMP_REALM_JSON"
-# sed -i "s|SWARM|$CLIENT_NAME|g" "$TMP_REALM_JSON"
+sed -i "s|KEYLESSH|$REALM_NAME|g" "$TMP_REALM_JSON"
 
 # Create realm
 echo "🌍 Creating realm..."
@@ -232,17 +231,17 @@ upload_branding() {
     fi
 
     # Look for images in public folder (relative to script dir's parent)
-    local PUBLIC_DIR="${SCRIPT_DIR}/src/public"
+    local PUBLIC_DIR="${SCRIPT_DIR}/tidecloak/public"
 
     # Upload logo if exists (use -s only, not $CURL_OPTS which has -f that exits on error)
     # Endpoint: tide-idp-admin-resources/images/upload
-    if [ -f "${PUBLIC_DIR}/swarm-logo_icon.png" ]; then
+    if [ -f "${PUBLIC_DIR}/keylessh-logo_icon.svg" ]; then
         local logo_status
         logo_status=$(curl -s -k -o /dev/null -w "%{http_code}" \
             -X POST "${TIDECLOAK_LOCAL_URL}/admin/realms/${REALM_NAME}/tide-idp-admin-resources/images/upload" \
             -H "Authorization: Bearer ${TOKEN}" \
-            -F "fileData=@${PUBLIC_DIR}/swarm-logo_icon.png" \
-            -F "fileName=swarm-logo_icon.png" \
+            -F "fileData=@${PUBLIC_DIR}/keylessh-logo_icon.svg" \
+            -F "fileName=keylessh-logo_icon.svg" \
             -F "fileType=LOGO" 2>/dev/null || echo "000")
         if [[ "$logo_status" =~ ^2 ]]; then
             echo "  ✅ Logo uploaded"
@@ -250,17 +249,17 @@ upload_branding() {
             log_warn "Logo upload failed (HTTP $logo_status) - continuing anyway"
         fi
     else
-        log_warn "Logo not found at ${PUBLIC_DIR}/swarm-logo_icon.png"
+        log_warn "Logo not found at ${PUBLIC_DIR}/keylessh-logo_icon.svg"
     fi
 
     # Upload background if exists
-    if [ -f "${PUBLIC_DIR}/SWARM_bg.png" ]; then
+    if [ -f "${PUBLIC_DIR}/keylessh_bg.gif" ]; then
         local bg_status
         bg_status=$(curl -s -k -o /dev/null -w "%{http_code}" \
             -X POST "${TIDECLOAK_LOCAL_URL}/admin/realms/${REALM_NAME}/tide-idp-admin-resources/images/upload" \
             -H "Authorization: Bearer ${TOKEN}" \
-            -F "fileData=@${PUBLIC_DIR}/SWARM_bg.png" \
-            -F "fileName=SWARM_bg.png" \
+            -F "fileData=@${PUBLIC_DIR}/keylessh_bg.gif" \
+            -F "fileName=keylessh_bg.gif" \
             -F "fileType=BACKGROUND_IMAGE" 2>/dev/null || echo "000")
         if [[ "$bg_status" =~ ^2 ]]; then
             echo "  ✅ Background uploaded"
@@ -268,7 +267,7 @@ upload_branding() {
             log_warn "Background upload failed (HTTP $bg_status) - continuing anyway"
         fi
     else
-        log_warn "Background not found at ${PUBLIC_DIR}/SWARM_bg.png"
+        log_warn "Background not found at ${PUBLIC_DIR}/keylessh_bg.gif"
     fi
 
     echo "✅ Branding upload complete."
