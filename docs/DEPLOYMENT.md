@@ -1,12 +1,13 @@
 # Deployment (Production)
 
-This app has two deployable services and requires connectivity to the ORK network:
+This app has two deployable services and requires a TideCloak docker instance and connectivity to the Tide Decentralized Network (Tide Cybersecurity Fabric):
 
-1. **Main server** (required): serves the React app + REST API + `/ws/tcp` WebSocket bridge.
-2. **TCP bridge** (optional): `tcp-bridge/` as a separate, auto-scaling WS↔TCP forwarder (recommended for high concurrency).
-3. **ORK network** (required): Tide's decentralised node network for Policy:1 authorization and SSH signing.
+1. **Main server** (required): serves the React app + REST API + default local `/ws/tcp` WebSocket bridge.
+2. **TideCloak server** (required): serves the authentication and authorization services.
+3. **Blind bridge** (optional): `tcp-bridge` as a separate, auto-scaling WS↔TCP forwarder (recommended for high concurrency).
+4. **Tide Fabric** (provided by Tide): Tide's Decentralized Network for Policy authorization and SSH signing.
 
-For most deployments you run **one main server** with a persistent `data/` volume, connectivity to the ORK network, and optionally an external `tcp-bridge/`.
+For most deployments you run **one main server** with a persistent `data/` volume, connectivity to the Tide Fabric, and optionally an external `tcp-bridge`.
 
 ## Main Server (Required)
 
@@ -25,18 +26,9 @@ The production server serves static assets from `dist/public` and the API/WS fro
 The server stores:
 
 - SQLite DB: `DATABASE_URL` (defaults to `./data/keylessh.db`)
-- TideCloak JWKS config: `./data/tidecloak.json` (required for JWT verification)
+- TideCloak JWKS adaptor: `./data/tidecloak.json` (required for JWT verification)
 
 In production you should mount `./data` as a persistent volume.
-
-### Required TideCloak files
-
-There are two configs:
-
-- **Client (browser):** `client/src/tidecloakAdapter.json`
-- **Server (JWT verification):** `data/tidecloak.json` (must include a `jwk.keys` set)
-
-The server reads `data/tidecloak.json` from the working directory (`process.cwd()`).
 
 ### Environment variables
 
@@ -112,23 +104,22 @@ Tune these for your workload.
 - Both the main server and external bridge independently validate JWTs against the same TideCloak JWKS.
 - Ensure `/ws/tcp` is reachable from browsers; if you change ports/origins, update your proxy rules accordingly.
 
-## ORK Network / Policy:1 Requirements
+## Tide Fabric / Policy Requirements
 
-SSH signing requires the ORK network (Tide's decentralised nodes) for Policy:1 authorization:
+SSH signing requires the Tide Fabric (Tide's decentralised network) for Policy authorization:
 
 ### Prerequisites
 
-- **TideCloak** must be configured with ORK endpoints (enclave proxy)
-- **ORKs** must be accessible from the browser (via TideCloak's enclave proxy)
-- **Forseti contracts** are compiled and validated by each ORK (requires Forseti.VmHost)
+- **TideCloak** must be set up and configured
+- **ORKs** (Tide's network nodes) must be accessible from the browser
 
 ### Policy Lifecycle
 
 1. Admin creates SSH policy templates in the UI
-2. Contract ID is computed (SHA512 hash of source code) and policy is committed to the ORK network
+2. Contract ID is computed (SHA512 hash of source code) and policy is committed to the Tide Fabric
 3. Committed policies are stored in SQLite (`sshPolicies` table)
-4. During SSH, the browser fetches the policy and sends to ORKs for signing
-5. ORKs validate the doken and run the Forseti contract before collaboratively signing
+4. During SSH, the browser fetches the policy and sends to Tide for signing
+5. Tide ORKs validate the doken and run the Forseti contract before collaboratively signing
 
 ### Contract ID Computation
 
@@ -139,7 +130,7 @@ Contract IDs are computed as a SHA512 hash of the C# source code. This is done s
 - **"No policy found"**: Ensure a policy exists for the SSH role (`ssh:<username>`)
 - **"Contract validation failed"**: Check ORK logs for IL vetting errors
 - **"Doken validation failed"**: Ensure the user's doken contains the required role
-- **Connection timeouts**: Verify ORK endpoints are reachable from the browser
+- **Connection timeouts**: Verify Tide ORK endpoints are reachable from the browser
 
 ## SaaS Mode (Stripe Billing)
 

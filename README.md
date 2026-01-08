@@ -2,7 +2,7 @@
   <img src="client/public/favicon.svg" width="96" height="96" alt="KeyleSSH logo" />
   <h1>KeyleSSH</h1>
   <p><strong>Truly keyless SSH.</strong></p>
-  <p>The world's first web SSH client where private keys don't exist - not on servers, not in browsers, not even in memory. Powered by Tide's decentralised threshold cryptography.</p>
+  <p>The world's first SSH client where private keys don't exist - not on servers, not in bastions, not in browsers, not even in memory. Powered by Tide's decentralised cryptography.</p>
 </div>
 
 <p align="center">
@@ -11,30 +11,31 @@
 
 ## What Makes KeyleSSH Different
 
-Traditional web SSH clients have a fundamental problem: private keys. Whether stored on a server, uploaded by users, or generated in the browser, private keys are always a liability - they can be stolen, leaked, or compromised.
+Traditional SSH clients have a fundamental problem: private keys. Whether stored on a server, uploaded by users, or generated in the browser, private keys will always be the greatest security liability - they can be stolen, leaked, or compromised.
 
 **KeyleSSH eliminates private keys entirely.**
 
-Instead of managing keys, KeyleSSH uses [Tide Protocol](https://tide.org) and TideCloak for cryptographic operations. SSH signing happens across a **decentralised network of independent nodes called ORKs** (Orchestrated Recluded Keys) - no single point holds a complete key. This isn't just distributed (copies everywhere), it's truly decentralised (the key never exists as a whole).
+Instead of managing keys, KeyleSSH uses [Tide technology](https://tide.org) for all its cryptographic operations. SSH authorization signing happens across a **decentralised network of independent nodes called ORKs** (Orchestrated Recluders of Keys) - no single point ever holds a complete key. This isn't just distributed, it's truly decentralised (the key never exists as a whole under any single organization).
 
 ### How It Works
 
 1. **No key import, no key storage** - Users authenticate via TideCloak (OIDC), receiving a "doken" (delegated token)
-2. **Policy-based authorization** - Admins define who can SSH as which user via Forseti contracts (C# policies executed in sandboxed ORKs)
-3. **Decentralised signing** - When SSH needs a signature, ORKs validate the policy and collaboratively sign the challenge
-4. **Threshold cryptography** - The signing key is mathematically split across multiple independent ORKs; no single node can sign alone
+2. **Policy-based authorization** - Admins define who can SSH as which SSH user under what role, via **Forseti** contracts (C# policies executed in sandboxed ORKs)
+3. **Decentralised signing** - When SSH needs a authorization signature, ORKs validate against the policy and collaboratively sign the challenge
+4. **Threshold cryptography** - The signing key exists mathematically split across multiple independent ORKs; no single node can sign alone
+5. **Blind bastion tunneling** - All SSH session are tunneled through an oblivious jumpbox that has no access or knowledge of to the content of the session
 
 The result: enterprise-grade SSH access control without any private keys to manage, rotate, or protect.
 
 ## Features
 
-- Browser-side SSH via `@microsoft/dev-tunnels-ssh` + `xterm.js`
+- **Browser-side SSH** via `@microsoft/dev-tunnels-ssh` + `xterm.js`
 - **SFTP file browser** - Browse, upload, download, rename, delete files via split-panel UI
-- OIDC login with TideCloak - no passwords, no keys — https://tide.org
-- **Policy:1 authorization** with Forseti contracts for SSH signing
-- Role-based SSH access (e.g., only `ssh:root` role holders can SSH as root)
-- Admin UX: servers, users, roles, policy templates, change requests (access, roles, policies), sessions, logs
-- Optional external `tcp-bridge/` for scalable WS↔TCP forwarding
+- **Quorum-based RBAC, zero-knowledge OIDC login** with TideCloak - no passwords, no keys
+- **Programmable policy encforcement** with Forseti contracts for SSH access
+- **Simple, static, trustless SSH account access** (e.g., only `ssh:root` role holders can SSH as root)
+- **Admin UX**: servers, users, roles, policy templates, change requests (access, roles, policies), sessions, logs
+- **Optional external bastion** (`tcp-bridge`) for scalable WS↔TCP tunneling
 
 ## Documentation
 
@@ -81,7 +82,53 @@ npm install
 npm run dev
 ```
 
-App: `http://localhost:3000`
+Access the KeyleSSH app in your browser at: `http://localhost:3000`
+
+## First server set-up
+
+Here's how you set up your first SSH server and access it using KeyleSSH:
+
+> [!NOTE]
+> This guide assumes you already have a Debian-based server at IP address 192.168.0.10, with a working SSH user named `user` you can access with an SSH client (for configuration).
+
+1. Go to [servers](http://localhost:3000/admin/servers) -> `Add Server` -> 
+   - Server Name: _myserver_
+   - Host: _192.168.0.10_
+   - SSH Users: _user_
+   - Click `Add Server` button
+   - Status should come up as `Online`
+2. Go to [Roles](http://localhost:3000/admin/roles) -> `Add Role`
+   - Role Name (SSH Role: ✅): user (it'll autochange it to `ssh:user`)
+   - Click the `Create Role` button
+3. Go to [Users](http://localhost:3000/admin/users) -> 
+   - Click the `Action` button (✏️) for the default `admin user`
+   - Click the `ssh:user` tag in `Available Roles` to move it to `Assigned Roles`
+   - Click the `Save Changes` button
+4. Go to [Change Requests](http://localhost:3000/admin/approvals) ->
+   - Click the `Review` button (👁️) for the user `admin`
+   - Confirm User Access Change by clicking the `Y` button
+   - Click the `Submit Approvals` button
+   - Click  the `Commit` button (📤) for the user `admin` 
+   - Change over to the `Policies` tab
+   - Click the `Review` button (👁️) for the policy role `ssh:user`
+   - Confirm User Access Change by clicking the `Y` button
+   - Click the `Submit Approvals` button
+   - Click the `Commit` button (📤) for the policy role `ssh:user`
+5. Expand your user profile (a `AD admin` icon at the bottom-left of your KeyleSSH browser windows) ->
+   - Click `Restart session` to quickly log out and in again
+5. Go to [Dashboard](http://localhost:3000/app) -> `myserver` -> SSH USER: `user` -> `Connect` ->
+   - In the `Terminal Workspace`, click the `Connect` button
+   - Copy the "Tide SSH public key" string (click the `Copy` button)
+
+You will now need to set up the server's user with a public key authentication. Connect to your server using an SSH client (e.g. Use `ssh user@192.168.0.10` in your local terminal) with the user `user` and run the following commands (replace the string `ssh-ed25519 AA....@keylessh` with what you copied in the latest step above):
+```bash
+mkdir /home/user/.ssh
+echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIsXOB07HlSdJFuVm9ysWBN2orUkljwHSl2Mlbf9uI/8 user@keylessh" > /home/user/.ssh/authorized_keys
+```
+
+Now return to the KeyleSSH `Dashboard` page where the "Authorize SSH Session" pop-up is opened, and click the `Authorize & Connect` button.
+
+Your SSH session to your server `myserver` will commence.
 
 ## Scripts
 
@@ -107,8 +154,8 @@ DATABASE_URL=./data/keylessh.db
 
 ### TideCloak configuration
 
-- Browser adapter config: `client/src/tidecloakAdapter.json`
-- Server JWT verification config (JWKS): `data/tidecloak.json`
+The KeyleSSH Server JWT verification config (holding the JWKS keychain) must be downloaded and put here: `data/tidecloak.json` .
+See any of the [guides](https://docs.tidecloak.com/Languages/React/tidecloak-react-tutorial-quickstart?_highlight=Download%20adaptor%20configs#1-prepare-tidecloak) for instructions.
 
 ## Key Dependencies
 
