@@ -166,14 +166,19 @@ export function TerminalSession({
       await connect({ type: "keypair", keyPair }, createTideSshSigner());
       setShowKeyDialog(false);
 
+      // Fit terminal and send resize to SSH server to trigger prompt display
       if (fitAddonRef.current) {
         fitAddonRef.current.fit();
+        const dims = fitAddonRef.current.proposeDimensions();
+        if (dims?.cols && dims?.rows) {
+          resize(dims.cols, dims.rows);
+        }
       }
       xtermRef.current?.focus();
     } catch (err) {
       console.error("Connection failed:", err);
     }
-  }, [authConfig, connect, server, serverIsDisabled, serverLoading, setDimensions, toast]);
+  }, [authConfig, connect, resize, server, serverIsDisabled, serverLoading, setDimensions, toast]);
 
   const handleReconnect = useCallback(() => {
     setShowKeyDialog(true);
@@ -546,6 +551,9 @@ export function TerminalSession({
                       {serverIsDisabled ? "Server disabled" : "Server appears offline"}
                     </div>
                   )}
+                  {(status === "connecting" || status === "authenticating") && (
+                    <Loader2 className="h-8 w-8 animate-spin text-primary mx-auto" />
+                  )}
                   <div className="text-sm font-medium">
                     {status === "connecting" || status === "authenticating"
                       ? "Connecting…"
@@ -561,30 +569,37 @@ export function TerminalSession({
                     </div>
                   )}
                   <div className="flex items-center justify-center gap-2">
-                    <Button
-                      size="sm"
-                      onClick={() => setShowKeyDialog(true)}
-                      disabled={
-                        serverLoading ||
-                        serverIsDisabled ||
-                        serverIsOffline ||
-                        status === "connecting" ||
-                        status === "authenticating"
-                      }
-                    >
-                      <RefreshCw className={`h-4 w-4 mr-2 ${status === "connecting" || status === "authenticating" ? "animate-spin" : ""}`} />
-                      {status === "error" || disconnectedWithReason ? "Reconnect" : "Connect"}
-                    </Button>
-                    {serverIsOffline && !serverIsDisabled && (
+                    {(status === "connecting" || status === "authenticating") ? (
                       <Button
                         size="sm"
                         variant="outline"
-                        onClick={() => setShowKeyDialog(true)}
-                        disabled={serverLoading || status === "connecting" || status === "authenticating"}
-                        title="Status checks can be wrong; try connecting anyway."
+                        onClick={handleDisconnect}
                       >
-                        Try anyway
+                        <X className="h-4 w-4 mr-2" />
+                        Cancel
                       </Button>
+                    ) : (
+                      <>
+                        <Button
+                          size="sm"
+                          onClick={() => setShowKeyDialog(true)}
+                          disabled={serverLoading || serverIsDisabled || serverIsOffline}
+                        >
+                          <RefreshCw className="h-4 w-4 mr-2" />
+                          {status === "error" || disconnectedWithReason ? "Reconnect" : "Connect"}
+                        </Button>
+                        {serverIsOffline && !serverIsDisabled && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => setShowKeyDialog(true)}
+                            disabled={serverLoading}
+                            title="Status checks can be wrong; try connecting anyway."
+                          >
+                            Try anyway
+                          </Button>
+                        )}
+                      </>
                     )}
                     {onCloseTab && (
                       <Button size="sm" variant="outline" onClick={handleCloseTabClick}>

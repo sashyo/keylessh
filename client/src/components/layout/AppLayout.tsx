@@ -303,7 +303,7 @@ export function AppLayout({ children }: AppLayoutProps) {
                   data-testid="refresh-token-button"
                 >
                   <RefreshCw className="mr-2 h-4 w-4" />
-                  Refresh token
+                  Restart session
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem onClick={logout} className="text-destructive focus:text-destructive" data-testid="logout-button">

@@ -346,37 +346,79 @@ export class BrowserSSHClient {
   private sessionEnded = false;
   private isCleaningUp = false;
   private recordingStartTime: number | null = null;
+  private recordingId: string | null = null;
+  private bridgeUrl: string | null = null;
+  private recordingEnabled = false;
+  private pendingRecordingEvents: Array<{ eventType: "i" | "o"; data: string; timestamp: number }> = [];
 
   constructor(options: SSHClientOptions) {
     this.options = options;
   }
 
   /**
-   * Send a recording event through the WebSocket to the server.
+   * Send a recording event via REST API to the server.
    * This sends decrypted terminal I/O for server-side recording.
+   * Events are buffered until recording starts to capture early output like banners.
    */
   private sendRecordingEvent(eventType: "i" | "o", data: string): void {
-    if (!this.websocket || this.websocket.readyState !== WebSocket.OPEN) {
+    if (!this.recordingEnabled || !this.sessionId) {
       return;
     }
-    if (!this.recordingStartTime) {
+
+    // Buffer events until recording is ready
+    if (!this.recordingId || !this.recordingStartTime) {
+      this.pendingRecordingEvents.push({ eventType, data, timestamp: Date.now() });
       return;
     }
-    try {
-      const relativeTime = (Date.now() - this.recordingStartTime) / 1000;
-      this.websocket.send(JSON.stringify({
-        type: "record",
-        eventType,
-        time: relativeTime,
-        data,
-      }));
-    } catch {
-      // Ignore recording errors - don't break the connection
-    }
+
+    this.sendRecordingEventNow(eventType, data, Date.now());
   }
 
   /**
-   * Send a file operation event through the WebSocket to the server.
+   * Actually send a recording event to the server.
+   */
+  private sendRecordingEventNow(eventType: "i" | "o", data: string, timestamp: number): void {
+    if (!this.recordingId || !this.recordingStartTime || !this.sessionId) {
+      return;
+    }
+
+    const token = localStorage.getItem("access_token");
+    if (!token) return;
+
+    const relativeTime = (timestamp - this.recordingStartTime) / 1000;
+
+    // Fire and forget - don't await to avoid blocking terminal I/O
+    fetch(`/api/sessions/${this.sessionId}/record`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        recordingId: this.recordingId,
+        time: Math.max(0, relativeTime), // Ensure non-negative time
+        eventType,
+        data,
+      }),
+    }).catch(() => {
+      // Ignore recording errors - don't break the connection
+    });
+  }
+
+  /**
+   * Flush any buffered recording events after recording starts.
+   */
+  private flushPendingRecordingEvents(): void {
+    if (!this.recordingId || !this.recordingStartTime) return;
+
+    for (const event of this.pendingRecordingEvents) {
+      this.sendRecordingEventNow(event.eventType, event.data, event.timestamp);
+    }
+    this.pendingRecordingEvents = [];
+  }
+
+  /**
+   * Send a file operation event via REST API to the server.
    * This logs SFTP/SCP file operations for audit purposes.
    */
   sendFileOpEvent(event: {
@@ -388,17 +430,22 @@ export class BrowserSSHClient {
     status: "success" | "error";
     errorMessage?: string;
   }): void {
-    if (!this.websocket || this.websocket.readyState !== WebSocket.OPEN) {
-      return;
-    }
-    try {
-      this.websocket.send(JSON.stringify({
-        type: "file_op",
-        ...event,
-      }));
-    } catch {
+    if (!this.sessionId) return;
+
+    const token = localStorage.getItem("access_token");
+    if (!token) return;
+
+    // Fire and forget - don't await to avoid blocking file operations
+    fetch(`/api/sessions/${this.sessionId}/file-op`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(event),
+    }).catch(() => {
       // Ignore logging errors - don't break the connection
-    }
+    });
   }
 
   async connect(auth: SSHAuth): Promise<void> {
@@ -526,8 +573,6 @@ export class BrowserSSHClient {
   }
 
   private buildWebSocketUrl(): string {
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const host = window.location.host;
     const token = localStorage.getItem("access_token") || "";
 
     const params = new URLSearchParams({
@@ -538,6 +583,14 @@ export class BrowserSSHClient {
       sessionId: this.sessionId || "",
     });
 
+    // Use external bridge URL if provided, otherwise fallback to local /ws/tcp
+    if (this.bridgeUrl) {
+      return `${this.bridgeUrl}?${params.toString()}`;
+    }
+
+    // Local development: use embedded /ws/tcp endpoint
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const host = window.location.host;
     return `${protocol}//${host}/ws/tcp?${params.toString()}`;
   }
 
@@ -564,7 +617,21 @@ export class BrowserSSHClient {
       throw new Error(err.message || `HTTP ${res.status}`);
     }
 
-    const session = (await res.json()) as Session;
+    const session = (await res.json()) as Session & {
+      bridgeUrl?: string;
+      host?: string;
+      port?: number;
+      recordingEnabled?: boolean;
+    };
+
+    // Store bridge URL if provided
+    if (session.bridgeUrl) {
+      this.bridgeUrl = session.bridgeUrl;
+    }
+
+    // Store recording enabled flag
+    this.recordingEnabled = session.recordingEnabled || false;
+
     return session.id;
   }
 
@@ -685,7 +752,7 @@ export class BrowserSSHClient {
     this.channel = await this.session.openChannel("session");
     console.log("[SSH] Channel opened, id:", this.channel.channelId);
 
-    // Request a PTY
+    // Request a PTY (no data arrives yet)
     console.log("[SSH] Requesting PTY...", { cols: this.cols, rows: this.rows });
     const ptyRequest = await createPtyRequest(this.cols, this.rows);
     const ptyResult = await this.channel.request(ptyRequest);
@@ -695,22 +762,8 @@ export class BrowserSSHClient {
       throw new Error("PTY request denied by server");
     }
 
-    // Request shell
-    console.log("[SSH] Requesting shell...");
-    const shellRequest = await createShellRequest();
-    const shellResult = await this.channel.request(shellRequest);
-    console.log("[SSH] Shell result:", shellResult);
-
-    if (!shellResult) {
-      throw new Error("Shell request denied by server");
-    }
-
-    console.log("[SSH] Shell opened successfully, setting up data handler");
-
-    // Start recording timer - server will decide if recording is enabled
-    this.recordingStartTime = Date.now();
-
-    // Handle incoming data
+    // Set up data handlers BEFORE requesting shell - MOTD arrives immediately after shell opens
+    console.log("[SSH] Setting up data handlers before shell request");
     this.channel.onDataReceived((data: Buffer) => {
       console.log("[SSH] Data received:", data.length, "bytes");
       this.options.onData(new Uint8Array(data));
@@ -720,12 +773,100 @@ export class BrowserSSHClient {
       this.sendRecordingEvent("o", data.toString("utf-8"));
     });
 
-    // Handle channel close
     this.channel.onClosed(() => {
       console.log("[SSH] Channel closed");
       this.options.onClose();
       this.cleanup();
     });
+
+    // Start recording BEFORE shell opens so recordingId is ready when MOTD arrives
+    if (this.recordingEnabled && this.sessionId) {
+      await this.startRecording();
+    }
+
+    // NOW request shell - MOTD will arrive immediately after this
+    console.log("[SSH] Requesting shell...");
+    const shellRequest = await createShellRequest();
+    const shellResult = await this.channel.request(shellRequest);
+    console.log("[SSH] Shell result:", shellResult);
+
+    if (!shellResult) {
+      throw new Error("Shell request denied by server");
+    }
+
+    console.log("[SSH] Shell opened successfully");
+
+    // Send window size to trigger prompt display on some servers
+    try {
+      const resizeRequest = await createWindowChangeRequest(this.cols, this.rows);
+      await this.channel.request(resizeRequest);
+      console.log("[SSH] Initial window size sent:", this.cols, "x", this.rows);
+    } catch (err) {
+      console.log("[SSH] Window size request failed (non-fatal):", err);
+    }
+  }
+
+  /**
+   * Start recording via REST API
+   */
+  private async startRecording(): Promise<void> {
+    if (!this.sessionId) return;
+
+    const token = localStorage.getItem("access_token");
+    if (!token) return;
+
+    try {
+      const res = await fetch(`/api/sessions/${this.sessionId}/start-recording`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          terminalWidth: this.cols,
+          terminalHeight: this.rows,
+        }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        this.recordingId = data.recordingId;
+        this.recordingStartTime = data.startTime;
+        console.log("[SSH] Recording started:", this.recordingId);
+        // Flush any events that arrived before recording was ready
+        this.flushPendingRecordingEvents();
+      } else {
+        console.log("[SSH] Failed to start recording:", res.status);
+        this.recordingEnabled = false;
+      }
+    } catch (err) {
+      console.log("[SSH] Error starting recording:", err);
+      this.recordingEnabled = false;
+    }
+  }
+
+  /**
+   * End recording via REST API
+   */
+  private async endRecording(): Promise<void> {
+    if (!this.sessionId || !this.recordingId) return;
+
+    const token = localStorage.getItem("access_token");
+    if (!token) return;
+
+    try {
+      await fetch(`/api/sessions/${this.sessionId}/end-recording`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ recordingId: this.recordingId }),
+      });
+      console.log("[SSH] Recording ended:", this.recordingId);
+    } catch (err) {
+      console.log("[SSH] Error ending recording:", err);
+    }
   }
 
   /**
@@ -889,6 +1030,8 @@ export class BrowserSSHClient {
     if (this.isCleaningUp) return;
     this.isCleaningUp = true;
 
+    // End recording if active
+    void this.endRecording();
     void this.endSessionRecordOnce();
 
     // Close SFTP and SCP first

@@ -172,26 +172,26 @@
 
   /* Core theme tokens */
   --background: var(--bg-void);
-  --foreground: 0 0% 92%;
+  --foreground: 0 0% 95%;
 
   --border: 220 15% 22%;
   --card: var(--bg-surface);
-  --card-foreground: 0 0% 92%;
+  --card-foreground: 0 0% 95%;
   --card-border: 220 15% 20%;
 
   /* Sidebar */
   --sidebar: var(--bg-surface);
-  --sidebar-foreground: 0 0% 92%;
+  --sidebar-foreground: 0 0% 95%;
   --sidebar-border: 220 15% 18%;
   --sidebar-primary: var(--accent-primary);
   --sidebar-primary-foreground: 220 15% 10%;
   --sidebar-accent: 220 12% 18%;
-  --sidebar-accent-foreground: 0 0% 92%;
+  --sidebar-accent-foreground: 0 0% 95%;
   --sidebar-ring: var(--accent-primary);
 
   /* Popover */
   --popover: var(--bg-elevated);
-  --popover-foreground: 0 0% 92%;
+  --popover-foreground: 0 0% 95%;
   --popover-border: 220 15% 22%;
 
   /* Primary - White/silver */
@@ -200,15 +200,15 @@
 
   /* Secondary - Dark surface */
   --secondary: 220 12% 18%;
-  --secondary-foreground: 0 0% 80%;
+  --secondary-foreground: 0 0% 85%;
 
   /* Muted */
   --muted: 220 10% 16%;
-  --muted-foreground: 0 0% 55%;
+  --muted-foreground: 0 0% 65%;
 
   /* Accent */
   --accent: 220 12% 20%;
-  --accent-foreground: 0 0% 92%;
+  --accent-foreground: 0 0% 95%;
 
   /* Destructive */
   --destructive: var(--status-danger);

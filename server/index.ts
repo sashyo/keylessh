@@ -3,14 +3,11 @@ import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
-import { setupWSBridge } from "./wsBridge";
 import { log } from "./logger";
+import { setupWSBridge } from "./wsBridge";
 
 const app = express();
 const httpServer = createServer(app);
-
-// Setup WebSocket TCP bridge for SSH connections
-setupWSBridge(httpServer);
 
 declare module "http" {
   interface IncomingMessage {
@@ -56,6 +53,11 @@ app.use((req, res, next) => {
 
 (async () => {
   await registerRoutes(httpServer, app);
+
+  // Setup embedded WebSocket bridge for local development (when BRIDGE_URL not set)
+  if (!process.env.BRIDGE_URL) {
+    setupWSBridge(httpServer);
+  }
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
     const status = err.status || err.statusCode || 500;

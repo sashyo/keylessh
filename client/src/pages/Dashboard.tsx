@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Server, Terminal, Clock, Activity, ArrowRight, HelpCircle, AlertCircle } from "lucide-react";
+import { Server, Terminal, Clock, Activity, ArrowRight, HelpCircle, AlertCircle, X } from "lucide-react";
 import { useCallback, useState } from "react";
 import type { ServerWithAccess, ActiveSession } from "@shared/schema";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
@@ -147,7 +147,18 @@ function ServerCardSkeleton() {
   );
 }
 
-function SessionItem({ session }: { session: ActiveSession }) {
+function SessionItem({ session, onTerminate }: { session: ActiveSession; onTerminate: (id: string) => void }) {
+  const [terminating, setTerminating] = useState(false);
+
+  const handleTerminate = async () => {
+    setTerminating(true);
+    try {
+      await onTerminate(session.id);
+    } finally {
+      setTerminating(false);
+    }
+  };
+
   return (
     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 py-3 px-4 hover-elevate rounded-md group" data-testid={`session-${session.id}`}>
       <div className="flex items-center gap-3 min-w-0">
@@ -166,11 +177,24 @@ function SessionItem({ session }: { session: ActiveSession }) {
           <span className="h-1.5 w-1.5 rounded-full bg-[hsl(var(--neon-green))] animate-pulse" />
           Active
         </Badge>
-        <Link href={`/app/console?serverId=${encodeURIComponent(session.serverId)}&user=${encodeURIComponent(session.sshUser)}`}>
-          <Button size="sm" variant="ghost" className="group-hover:text-[hsl(var(--neon-cyan))] min-h-[44px] min-w-[44px]" data-testid={`reconnect-session-${session.id}`}>
-            Reconnect
+        <div className="flex items-center gap-1">
+          <Link href={`/app/console?serverId=${encodeURIComponent(session.serverId)}&user=${encodeURIComponent(session.sshUser)}`}>
+            <Button size="sm" variant="ghost" className="group-hover:text-[hsl(var(--neon-cyan))] min-h-[44px] min-w-[44px]" data-testid={`reconnect-session-${session.id}`}>
+              Reconnect
+            </Button>
+          </Link>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="text-muted-foreground hover:text-destructive min-h-[44px] min-w-[44px]"
+            onClick={handleTerminate}
+            disabled={terminating}
+            data-testid={`terminate-session-${session.id}`}
+            title="Terminate session"
+          >
+            <X className="h-4 w-4" />
           </Button>
-        </Link>
+        </div>
       </div>
     </div>
   );
@@ -201,6 +225,17 @@ export default function Dashboard() {
   const refreshAll = useCallback(async () => {
     await Promise.all([refetchServers(), refetchSessions()]);
   }, [refetchServers, refetchSessions]);
+
+  const terminateSession = useCallback(async (sessionId: string) => {
+    const token = localStorage.getItem("access_token");
+    if (!token) return;
+
+    await fetch(`/api/sessions/${sessionId}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    await refetchSessions();
+  }, [refetchSessions]);
 
   const { secondsRemaining, refreshNow } = useAutoRefresh({
     intervalSeconds: 15,
@@ -254,7 +289,7 @@ export default function Dashboard() {
           <Card>
             <CardContent className="p-0 divide-y divide-border">
               {activeSessions.map((session) => (
-                <SessionItem key={session.id} session={session} />
+                <SessionItem key={session.id} session={session} onTerminate={terminateSession} />
               ))}
             </CardContent>
           </Card>

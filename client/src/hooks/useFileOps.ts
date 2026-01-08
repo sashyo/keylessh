@@ -117,14 +117,16 @@ export function useFileOps({
   sftpClient,
   scpClient,
   session,
-  initialPath = "/",
+  initialPath = ".",
   onFileOp,
 }: UseFileOpsOptions): UseFileOpsReturn {
-  const [currentPath, setCurrentPath] = useState(initialPath);
+  // Start with empty path - will be resolved when client connects
+  const [currentPath, setCurrentPath] = useState("");
   const [entries, setEntries] = useState<SftpFileInfo[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
+  const initialPathResolved = useRef(false);
 
   // Determine which mode we're in
   const mode: FileTransferMode = sftpClient ? "sftp" : (scpClient && session ? "scp" : "none");
@@ -140,28 +142,43 @@ export function useFileOps({
 
   // Resolve initial path on first connection
   useEffect(() => {
-    if (initialPath !== "~") return;
+    // Only resolve once per mount
+    if (initialPathResolved.current) return;
+
+    // Use realpath to resolve . or ~ to absolute path, or use initialPath directly if absolute
+    const pathToResolve = (initialPath === "." || initialPath === "~") ? "." : initialPath;
+    const needsResolution = initialPath === "." || initialPath === "~" || !initialPath.startsWith("/");
 
     if (sftpClient) {
-      sftpClient.realpath("~").then((resolved) => {
-        if (mountedRef.current) {
-          setCurrentPath(resolved);
-        }
-      }).catch(() => {
-        if (mountedRef.current) {
-          setCurrentPath("/");
-        }
-      });
+      initialPathResolved.current = true;
+      if (needsResolution) {
+        sftpClient.realpath(pathToResolve).then((resolved) => {
+          if (mountedRef.current) {
+            setCurrentPath(resolved);
+          }
+        }).catch(() => {
+          if (mountedRef.current) {
+            setCurrentPath("/");
+          }
+        });
+      } else {
+        setCurrentPath(initialPath);
+      }
     } else if (session) {
-      scpExec.realpath(session, "~").then((resolved) => {
-        if (mountedRef.current) {
-          setCurrentPath(resolved);
-        }
-      }).catch(() => {
-        if (mountedRef.current) {
-          setCurrentPath("/");
-        }
-      });
+      initialPathResolved.current = true;
+      if (needsResolution) {
+        scpExec.realpath(session, pathToResolve).then((resolved) => {
+          if (mountedRef.current) {
+            setCurrentPath(resolved);
+          }
+        }).catch(() => {
+          if (mountedRef.current) {
+            setCurrentPath("/");
+          }
+        });
+      } else {
+        setCurrentPath(initialPath);
+      }
     }
   }, [sftpClient, session, initialPath]);
 
@@ -169,6 +186,11 @@ export function useFileOps({
   useEffect(() => {
     if (mode === "none") {
       setEntries([]);
+      return;
+    }
+
+    // Don't try to load until path is resolved to an absolute path
+    if (!currentPath || currentPath === "~" || currentPath === ".") {
       return;
     }
 
