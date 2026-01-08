@@ -1,43 +1,51 @@
-# KeyleSSH TCP Bridge
+# KeyleSSH Oblivious Bridge
 
-Stateless WebSocket-TCP bridge microservice for SSH connections. Designed to run on Azure Container Apps with auto-scaling.
+Stateless, content-blind, WebSocket-to-TCP bridge microservice for SSH connections. Designed to run on Azure Container Apps with auto-scaling.
 
 ## What it does
 
 ```
-Browser (WebSocket) → TCP Bridge → SSH Server (TCP)
+Browser -(SSH-over-WebSocket)-> TCP Bridge -(SSH-over-TCP)-> SSH Server
 ```
 
 The bridge:
 1. Accepts WebSocket connections with a JWT token
-2. Verifies the JWT against TideCloak JWKS
-3. Opens TCP socket to the specified SSH server
+2. Verifies the JWT against statically-set TideCloak JWKS configuration
+3. Opens TCP socket to the specified destination SSH server
 4. Pipes bytes bidirectionally (terminal I/O + SFTP file operations share the same connection)
 5. Closes both connections when either side disconnects
 
 **Note:** Both SSH terminal and SFTP file browser use the same WebSocket connection. The SSH protocol multiplexes channels internally - no bridge changes needed for SFTP support.
 
-## Architecture
+## Cloud Architecture
 
 ```
-┌────────────────────────────────────────────────────────────────┐
-│                     Azure Container Apps                        │
-│                                                                 │
+┌───────────────────────────────────────────────────────────────┐
+│                     Azure Container Apps                      │
+│                                                               │
 │   ┌─────────────┐   ┌─────────────┐   ┌─────────────┐         │
 │   │  Instance 1 │   │  Instance 2 │   │  Instance N │   ...   │
-│   │  10 conns   │   │  10 conns   │   │  10 conns   │         │
+│   │  y conns    │   │  y conns    │   │  y  conns   │         │
 │   └─────────────┘   └─────────────┘   └─────────────┘         │
-│                                                                 │
-│   Auto-scales 0 → 100 based on concurrent connections          │
-└────────────────────────────────────────────────────────────────┘
+│                                                               │
+│   Auto-scales 0 → N based on max concurrent y connections     │
+│   (by default, y=10 )                                         │
+└───────────────────────────────────────────────────────────────┘
 ```
 
 ## Security
+
+Postude designed to provide resiliancy against a fully compromised bridge.
 
 - **JWT tokens** are verified against TideCloak JWKS (no shared secrets)
 - Token verification checks: signature, issuer, expiry, and authorized party (azp)
 - Connection parameters (host, port, serverId) are passed as query parameters
 - The bridge independently validates tokens using the same JWKS as the main server
+- Bridge has no visibility or access to the signed SSH handshake or encrypted SSH stream it routes
+
+Remaining threats:
+
+- A compromised bridge can cause denial of service
 
 ## Environment Variables
 
@@ -49,6 +57,8 @@ The bridge:
 ## Local Development
 
 ```bash
+export PORT=8088 # prevents port colision with TideCloak if running a local test
+export TIDECLOAK_CONFIG_PATH="../data/tidecloak.json" # When testing locally with KeyleSSH server 
 npm install
 npm run dev
 ```
@@ -65,7 +75,7 @@ Make sure `data/tidecloak.json` exists with your TideCloak client adapter config
 ## Health Check
 
 ```bash
-curl http://localhost:8080/health
+curl http://localhost:8088/health
 # {"status":"ok","connections":0}
 ```
 
