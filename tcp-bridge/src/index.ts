@@ -1,7 +1,8 @@
 import { createServer } from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import { Socket, connect, isIP } from "net";
-import { lookup, Resolver } from "dns";
+import { lookup } from "dns";
+import { exec } from "child_process";
 import { jwtVerify, createLocalJWKSet, JWTPayload } from "jose";
 import { readFileSync } from "fs";
 import { join } from "path";
@@ -89,41 +90,47 @@ function loadConfig(): boolean {
   }
 }
 
-// Public DNS servers for fallback resolution
-const PUBLIC_DNS_SERVERS = ["1.1.1.1", "8.8.8.8"];
-
 /**
- * Fallback: resolve hostname using public DNS servers directly.
- * Uses Node's c-ares DNS client to bypass OS resolver.
+ * Fallback: resolve hostname using system commands.
+ * Handles WINS/NetBIOS on Windows, and nsswitch sources on Linux.
  */
-function resolveWithPublicDns(host: string): Promise<string> {
+function resolveWithSystem(host: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    const resolver = new Resolver();
-    resolver.setServers(PUBLIC_DNS_SERVERS);
+    const isWindows = process.platform === "win32";
+    // Windows ping triggers WINS/NetBIOS lookup
+    // Linux getent queries nsswitch.conf (may include wins if configured)
+    const cmd = isWindows ? `ping -n 1 -w 1000 ${host}` : `getent hosts ${host}`;
 
-    // Try IPv4 first
-    resolver.resolve4(host, (err4, addresses4) => {
-      if (!err4 && addresses4?.length) {
-        resolve(addresses4[0]);
+    exec(cmd, { timeout: 5000 }, (err, stdout) => {
+      if (err) {
+        reject(new Error(`System lookup failed: ${err.message}`));
         return;
       }
 
-      // Fall back to IPv6
-      resolver.resolve6(host, (err6, addresses6) => {
-        if (!err6 && addresses6?.length) {
-          resolve(addresses6[0]);
-          return;
-        }
+      let ip: string | null = null;
+      if (isWindows) {
+        // Parse Windows ping output: "Pinging hostname [192.168.1.1]" or "Reply from 192.168.1.1"
+        const match = stdout.match(/\[(\d+\.\d+\.\d+\.\d+)\]/) ||
+                      stdout.match(/Reply from (\d+\.\d+\.\d+\.\d+)/i);
+        if (match) ip = match[1];
+      } else {
+        // Parse getent output: "192.168.1.1    hostname"
+        const match = stdout.match(/^(\S+)/);
+        if (match && isIP(match[1])) ip = match[1];
+      }
 
-        reject(err4 || err6 || new Error(`DNS lookup failed for ${host}`));
-      });
+      if (ip) {
+        resolve(ip);
+      } else {
+        reject(new Error("Could not parse IP from system command"));
+      }
     });
   });
 }
 
 /**
  * Resolve hostname to IP address.
- * Tries OS resolver first (dns.lookup), falls back to public DNS servers.
+ * Tries OS resolver first (dns.lookup), falls back to system commands for WINS/NetBIOS.
  */
 function resolveHost(host: string): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -132,18 +139,18 @@ function resolveHost(host: string): Promise<string> {
       return;
     }
 
-    // Try OS resolver first (handles /etc/hosts, WINS if configured, etc.)
+    // Try OS resolver first (handles /etc/hosts, DNS, etc.)
     lookup(host, { family: 0 }, (err, address) => {
       if (!err && address) {
         resolve(address);
         return;
       }
 
-      // Fallback to public DNS servers
-      console.log(`[Bridge] OS lookup failed for ${host}, trying public DNS`);
-      resolveWithPublicDns(host)
+      // Fallback to system command for WINS/NetBIOS
+      console.log(`[Bridge] dns.lookup failed for ${host}, trying system command`);
+      resolveWithSystem(host)
         .then(resolve)
-        .catch(() => reject(err)); // Return original error if both fail
+        .catch(() => reject(err)); // Return original DNS error if both fail
     });
   });
 }
@@ -193,7 +200,9 @@ const wss = new WebSocketServer({ server });
 wss.on("connection", async (ws: WebSocket, req) => {
   const url = new URL(req.url || "/", `http://${req.headers.host}`);
   const token = url.searchParams.get("token");
-  const host = url.searchParams.get("host");
+  // Decode host to handle URL-encoded IPv6 scoped addresses (e.g., %25 -> %)
+  const hostParam = url.searchParams.get("host");
+  const host = hostParam ? decodeURIComponent(hostParam) : null;
   const port = parseInt(url.searchParams.get("port") || "22", 10);
   const sessionId = url.searchParams.get("sessionId");
 
