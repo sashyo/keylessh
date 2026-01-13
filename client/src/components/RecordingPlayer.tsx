@@ -400,30 +400,23 @@ export function RecordingPlayer({ recording }: RecordingPlayerProps) {
   };
 
   return (
-    <div className="space-y-4">
-      {/* Terminal Display */}
-      <div
-        className="bg-black rounded-lg overflow-hidden border border-border"
-        style={{
-          width: "100%",
-          maxWidth: `${Math.min(header.width * 9, 900)}px`,
-        }}
-      >
+    <div className="space-y-4 w-full max-w-4xl mx-auto">
+      {/* Terminal Display - Standard size for all recordings */}
+      <div className="bg-black rounded-lg overflow-hidden border border-border w-full">
         <div className="bg-gray-800 px-4 py-2 flex items-center gap-2">
           <div className="flex gap-1.5">
             <div className="w-3 h-3 rounded-full bg-red-500" />
             <div className="w-3 h-3 rounded-full bg-yellow-500" />
             <div className="w-3 h-3 rounded-full bg-green-500" />
           </div>
-          <span className="text-gray-400 text-sm ml-2">
+          <span className="text-gray-400 text-sm ml-2 truncate">
             {recording.serverName} - {recording.sshUser}@server
           </span>
         </div>
         <pre
           ref={terminalRef}
-          className="p-4 text-gray-300 font-mono text-sm overflow-auto whitespace-pre-wrap"
+          className="p-4 text-gray-300 font-mono text-sm overflow-auto whitespace-pre-wrap h-[400px]"
           style={{
-            height: `${Math.min(header.height * 18, 400)}px`,
             backgroundColor: "#1a1a1a",
           }}
         >

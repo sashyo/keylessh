@@ -10,6 +10,17 @@ export const users = sqliteTable("users", {
   allowedServers: text("allowed_servers", { mode: "json" }).$type<string[]>().notNull().default([]),
 });
 
+// SSH bridges - WebSocket-to-TCP relay endpoints
+export const bridges = sqliteTable("bridges", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  url: text("url").notNull(), // WebSocket URL, e.g., wss://bridge.example.com/ws/tcp
+  description: text("description"),
+  enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
+  isDefault: integer("is_default", { mode: "boolean" }).notNull().default(false),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+});
+
 export const servers = sqliteTable("servers", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
@@ -22,6 +33,8 @@ export const servers = sqliteTable("servers", {
   // Session recording settings
   recordingEnabled: integer("recording_enabled", { mode: "boolean" }).notNull().default(false),
   recordedUsers: text("recorded_users", { mode: "json" }).$type<string[]>().notNull().default([]), // Empty = all users when enabled
+  // Bridge association - null means use default/embedded bridge
+  bridgeId: text("bridge_id"),
 });
 
 export const sessions = sqliteTable("sessions", {
@@ -118,12 +131,14 @@ export const insertServerSchema = createInsertSchema(servers).omit({ id: true })
 export const insertSessionSchema = createInsertSchema(sessions).omit({ id: true, startedAt: true, endedAt: true });
 export const insertSubscriptionSchema = createInsertSchema(subscriptions).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertBillingHistorySchema = createInsertSchema(billingHistory).omit({ id: true, createdAt: true });
+export const insertBridgeSchema = createInsertSchema(bridges).omit({ id: true, createdAt: true });
 
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type InsertServer = z.infer<typeof insertServerSchema>;
 export type InsertSession = z.infer<typeof insertSessionSchema>;
 export type InsertSubscription = z.infer<typeof insertSubscriptionSchema>;
 export type InsertBillingHistory = z.infer<typeof insertBillingHistorySchema>;
+export type InsertBridge = z.infer<typeof insertBridgeSchema>;
 
 export type User = typeof users.$inferSelect;
 export type Server = typeof servers.$inferSelect;
@@ -131,6 +146,7 @@ export type Session = typeof sessions.$inferSelect;
 export type FileOperation = typeof fileOperations.$inferSelect;
 export type Subscription = typeof subscriptions.$inferSelect;
 export type BillingHistory = typeof billingHistory.$inferSelect;
+export type Bridge = typeof bridges.$inferSelect;
 
 // File operation types for API
 export type FileOperationType = "upload" | "download" | "delete" | "mkdir" | "rename" | "chmod";

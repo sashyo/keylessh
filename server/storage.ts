@@ -12,6 +12,7 @@ import {
   fileOperations,
   subscriptions,
   billingHistory,
+  bridges,
   subscriptionTiers,
   type User,
   type InsertUser,
@@ -30,6 +31,8 @@ import {
   type InsertSubscription,
   type BillingHistory,
   type InsertBillingHistory,
+  type Bridge,
+  type InsertBridge,
   type SubscriptionTier,
   type LicenseInfo,
   type LimitCheck,
@@ -298,6 +301,19 @@ sqlite.exec(`
   CREATE INDEX IF NOT EXISTS idx_file_ops_server ON file_operations(server_id);
   CREATE INDEX IF NOT EXISTS idx_file_ops_user ON file_operations(user_id);
   CREATE INDEX IF NOT EXISTS idx_file_ops_timestamp ON file_operations(timestamp DESC);
+
+  -- SSH bridges - WebSocket-to-TCP relay endpoints
+  CREATE TABLE IF NOT EXISTS bridges (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    url TEXT NOT NULL,
+    description TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    is_default INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_bridges_enabled ON bridges(enabled);
+  CREATE INDEX IF NOT EXISTS idx_bridges_default ON bridges(is_default);
 `);
 
 // Lightweight migrations for existing DBs (CREATE TABLE IF NOT EXISTS doesn't alter).
@@ -391,6 +407,38 @@ try {
   // Ignore migration errors; queries will surface issues.
 }
 
+// Migration: Add bridge_id column to servers table for multi-bridge support
+try {
+  const serverColumns = sqlite
+    .prepare(`PRAGMA table_info(servers)`)
+    .all() as Array<{ name: string }>;
+  const hasBridgeId = serverColumns.some((c) => c.name === "bridge_id");
+  if (!hasBridgeId) {
+    sqlite.prepare(`ALTER TABLE servers ADD COLUMN bridge_id TEXT`).run();
+  }
+} catch {
+  // Ignore migration errors; queries will surface issues.
+}
+
+// Seed: Create default bridge from BRIDGE_URL env var if no bridges exist
+try {
+  const bridgeUrl = process.env.BRIDGE_URL;
+  if (bridgeUrl) {
+    const existingBridges = sqlite.prepare(`SELECT COUNT(*) as count FROM bridges`).get() as { count: number };
+    if (existingBridges.count === 0) {
+      const id = randomUUID();
+      const now = Math.floor(Date.now() / 1000);
+      sqlite.prepare(`
+        INSERT INTO bridges (id, name, url, description, enabled, is_default, created_at)
+        VALUES (?, ?, ?, ?, 1, 1, ?)
+      `).run(id, "Default Bridge", bridgeUrl, "Auto-created from BRIDGE_URL environment variable", now);
+      console.log(`[Storage] Created default bridge from BRIDGE_URL: ${bridgeUrl}`);
+    }
+  }
+} catch (err) {
+  console.error(`[Storage] Failed to seed default bridge: ${err}`);
+}
+
 export class SQLiteStorage implements IStorage {
   async getUser(id: string): Promise<User | undefined> {
     const result = db.select().from(users).where(eq(users.id, id)).get();
@@ -455,6 +503,7 @@ export class SQLiteStorage implements IStorage {
       sshUsers: (insertServer.sshUsers ?? []) as string[],
       recordingEnabled: insertServer.recordingEnabled ?? false,
       recordedUsers: (insertServer.recordedUsers ?? []) as string[],
+      bridgeId: insertServer.bridgeId ?? null,
     };
     db.insert(servers).values(server).run();
     return server;
@@ -2335,6 +2384,150 @@ export class FileOperationStorage {
   }
 }
 
+// Bridge storage class for SSH bridge/relay endpoints
+export class BridgeStorage {
+  // Create a new bridge
+  async createBridge(data: InsertBridge): Promise<Bridge> {
+    const id = randomUUID();
+    const now = Math.floor(Date.now() / 1000);
+
+    // If this bridge is being set as default, unset any existing default
+    if (data.isDefault) {
+      sqlite.prepare(`UPDATE bridges SET is_default = 0`).run();
+    }
+
+    sqlite.prepare(`
+      INSERT INTO bridges (id, name, url, description, enabled, is_default, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      data.name,
+      data.url,
+      data.description || null,
+      data.enabled !== false ? 1 : 0,
+      data.isDefault ? 1 : 0,
+      now
+    );
+
+    return {
+      id,
+      name: data.name,
+      url: data.url,
+      description: data.description || null,
+      enabled: data.enabled !== false,
+      isDefault: data.isDefault || false,
+      createdAt: new Date(now * 1000),
+    };
+  }
+
+  // Get bridge by ID
+  async getBridge(id: string): Promise<Bridge | undefined> {
+    const row = sqlite.prepare(`
+      SELECT * FROM bridges WHERE id = ?
+    `).get(id) as any | undefined;
+
+    if (!row) return undefined;
+
+    return this.mapRow(row);
+  }
+
+  // Get the default bridge
+  async getDefaultBridge(): Promise<Bridge | undefined> {
+    const row = sqlite.prepare(`
+      SELECT * FROM bridges WHERE is_default = 1 AND enabled = 1 LIMIT 1
+    `).get() as any | undefined;
+
+    if (!row) return undefined;
+
+    return this.mapRow(row);
+  }
+
+  // Get all bridges
+  async getBridges(): Promise<Bridge[]> {
+    const rows = sqlite.prepare(`
+      SELECT * FROM bridges ORDER BY is_default DESC, name ASC
+    `).all() as any[];
+
+    return rows.map(row => this.mapRow(row));
+  }
+
+  // Get enabled bridges
+  async getEnabledBridges(): Promise<Bridge[]> {
+    const rows = sqlite.prepare(`
+      SELECT * FROM bridges WHERE enabled = 1 ORDER BY is_default DESC, name ASC
+    `).all() as any[];
+
+    return rows.map(row => this.mapRow(row));
+  }
+
+  // Update a bridge
+  async updateBridge(id: string, data: Partial<InsertBridge>): Promise<Bridge | undefined> {
+    const existing = await this.getBridge(id);
+    if (!existing) return undefined;
+
+    const updates: string[] = [];
+    const values: any[] = [];
+
+    if (data.name !== undefined) {
+      updates.push('name = ?');
+      values.push(data.name);
+    }
+    if (data.url !== undefined) {
+      updates.push('url = ?');
+      values.push(data.url);
+    }
+    if (data.description !== undefined) {
+      updates.push('description = ?');
+      values.push(data.description || null);
+    }
+    if (data.enabled !== undefined) {
+      updates.push('enabled = ?');
+      values.push(data.enabled ? 1 : 0);
+    }
+    if (data.isDefault !== undefined) {
+      // If setting as default, unset any existing default first
+      if (data.isDefault) {
+        sqlite.prepare(`UPDATE bridges SET is_default = 0`).run();
+      }
+      updates.push('is_default = ?');
+      values.push(data.isDefault ? 1 : 0);
+    }
+
+    if (updates.length > 0) {
+      values.push(id);
+      sqlite.prepare(`
+        UPDATE bridges SET ${updates.join(', ')} WHERE id = ?
+      `).run(...values);
+    }
+
+    return this.getBridge(id);
+  }
+
+  // Delete a bridge
+  async deleteBridge(id: string): Promise<boolean> {
+    // First, remove this bridge from any servers using it
+    sqlite.prepare(`UPDATE servers SET bridge_id = NULL WHERE bridge_id = ?`).run(id);
+
+    const result = sqlite.prepare(`
+      DELETE FROM bridges WHERE id = ?
+    `).run(id);
+    return result.changes > 0;
+  }
+
+  // Map database row to Bridge type
+  private mapRow(row: any): Bridge {
+    return {
+      id: row.id,
+      name: row.name,
+      url: row.url,
+      description: row.description,
+      enabled: !!row.enabled,
+      isDefault: !!row.is_default,
+      createdAt: new Date(row.created_at * 1000),
+    };
+  }
+}
+
 export const storage = new SQLiteStorage();
 export const approvalStorage = new ApprovalStorage();
 export const policyStorage = new PolicyStorage();
@@ -2343,3 +2536,4 @@ export const templateStorage = new TemplateStorage();
 export const subscriptionStorage = new SubscriptionStorage();
 export const recordingStorage = new RecordingStorage();
 export const fileOperationStorage = new FileOperationStorage();
+export const bridgeStorage = new BridgeStorage();

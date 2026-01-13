@@ -8,6 +8,8 @@ import type {
   PolicyTemplate,
   InsertPolicyTemplate,
   TemplateParameter,
+  Bridge,
+  InsertBridge,
 } from "@shared/schema";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
@@ -32,6 +34,11 @@ async function apiRequest<T>(
   if (!response.ok) {
     const error = await response.json().catch(() => ({ message: "Request failed" }));
     throw new Error(error.message || `HTTP ${response.status}`);
+  }
+
+  // Handle 204 No Content (common for DELETE)
+  if (response.status === 204) {
+    return undefined as T;
   }
 
   return response.json();
@@ -114,6 +121,22 @@ export const api = {
         }),
       delete: (id: string) =>
         apiRequest<void>(`/api/admin/servers/${id}`, { method: "DELETE" }),
+    },
+    bridges: {
+      list: () => apiRequest<Bridge[]>("/api/admin/bridges"),
+      get: (id: string) => apiRequest<Bridge>(`/api/admin/bridges/${id}`),
+      create: (data: InsertBridge) =>
+        apiRequest<Bridge>("/api/admin/bridges", {
+          method: "POST",
+          body: JSON.stringify(data),
+        }),
+      update: (id: string, data: Partial<InsertBridge>) =>
+        apiRequest<Bridge>(`/api/admin/bridges/${id}`, {
+          method: "PUT",
+          body: JSON.stringify(data),
+        }),
+      delete: (id: string) =>
+        apiRequest<void>(`/api/admin/bridges/${id}`, { method: "DELETE" }),
     },
     users: {
       list: () => apiRequest<AdminUser[]>("/api/admin/users"),
@@ -399,8 +422,8 @@ export const api = {
   },
 };
 
-// Re-export template types for convenience
-export type { PolicyTemplate, InsertPolicyTemplate, TemplateParameter };
+// Re-export types for convenience
+export type { PolicyTemplate, InsertPolicyTemplate, TemplateParameter, Bridge, InsertBridge };
 
 // SSH Policy Configuration for role creation
 export interface SshPolicyConfig {
@@ -668,4 +691,99 @@ export interface RecordingStats {
   totalCount: number;
   totalStorage: number;
   totalStorageFormatted: string;
+}
+
+/**
+ * Test SSH server connectivity through a bridge.
+ * This is a client-side test that connects via WebSocket to verify reachability.
+ */
+export async function testBridgeConnection(
+  bridgeUrl: string,
+  host: string,
+  port: number,
+  timeoutMs = 5000
+): Promise<{ success: boolean; message: string }> {
+  return new Promise((resolve) => {
+    const token = localStorage.getItem("access_token") || "";
+
+    const params = new URLSearchParams({
+      host,
+      port: port.toString(),
+      serverId: "test",
+      token,
+      sessionId: "test-connection",
+    });
+
+    const wsUrl = `${bridgeUrl}?${params.toString()}`;
+    let ws: WebSocket | null = null;
+    let settled = false;
+
+    const finish = (success: boolean, message: string) => {
+      if (settled) return;
+      settled = true;
+      if (ws) {
+        try {
+          ws.close();
+        } catch {
+          // ignore
+        }
+      }
+      resolve({ success, message });
+    };
+
+    const timeout = setTimeout(() => {
+      finish(false, "Connection timeout");
+    }, timeoutMs);
+
+    try {
+      ws = new WebSocket(wsUrl);
+
+      ws.onopen = () => {
+        // WebSocket connected to bridge, now waiting for TCP connection
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === "connected") {
+            clearTimeout(timeout);
+            finish(true, "Connection successful");
+          } else if (data.type === "error") {
+            clearTimeout(timeout);
+            finish(false, data.message || "Connection failed");
+          }
+        } catch {
+          // Binary data or non-JSON - ignore for test
+        }
+      };
+
+      ws.onerror = () => {
+        clearTimeout(timeout);
+        finish(false, "Bridge connection failed");
+      };
+
+      ws.onclose = (event) => {
+        clearTimeout(timeout);
+        if (!settled) {
+          finish(false, event.reason || "Connection closed");
+        }
+      };
+    } catch (err) {
+      clearTimeout(timeout);
+      finish(false, err instanceof Error ? err.message : "Connection failed");
+    }
+  });
+}
+
+/**
+ * Build the WebSocket URL for a bridge (or embedded bridge).
+ */
+export function getBridgeWebSocketUrl(bridgeUrl?: string | null): string {
+  if (bridgeUrl) {
+    return bridgeUrl;
+  }
+  // Local development: use embedded /ws/tcp endpoint
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const host = window.location.host;
+  return `${protocol}//${host}/ws/tcp`;
 }
