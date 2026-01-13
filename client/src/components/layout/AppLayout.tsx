@@ -24,7 +24,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Server, Users, Activity, LogOut, Shield, ChevronDown, Layers, ScrollText, KeyRound, CheckSquare, RefreshCw, FileCode, CreditCard, Video, Zap, Sun, Moon } from "lucide-react";
+import { Server, Users, Activity, LogOut, Shield, ChevronDown, Layers, ScrollText, KeyRound, CheckSquare, RefreshCw, FileCode, CreditCard, Video, Zap, Sun, Moon, Network } from "lucide-react";
 
 function KeyleSSHLogo({ className = "" }: { className?: string }) {
   return (
@@ -75,6 +75,7 @@ const adminNavGroups = [
     items: [
       { title: "Overview", url: "/admin", icon: Shield },
       { title: "Servers", url: "/admin/servers", icon: Server },
+      { title: "Bridges", url: "/admin/bridges", icon: Network },
       { title: "Sessions", url: "/admin/sessions", icon: Activity },
     ],
   },

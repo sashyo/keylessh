@@ -22,6 +22,7 @@ import AdminSessions from "@/pages/AdminSessions";
 import AdminLogs from "@/pages/AdminLogs";
 import AdminLicense from "@/pages/AdminLicense";
 import AdminRecordings from "@/pages/AdminRecordings";
+import AdminBridges from "@/pages/AdminBridges";
 import NotFound from "@/pages/not-found";
 import { Loader2, Terminal } from "lucide-react";
 import type { ReactNode } from "react";
@@ -209,7 +210,13 @@ function Router() {
           <AdminServers />
         </AdminRoute>
       </Route>
-      
+
+      <Route path="/admin/bridges">
+        <AdminRoute>
+          <AdminBridges />
+        </AdminRoute>
+      </Route>
+
       <Route path="/admin/users">
         <AdminRoute>
           <AdminUsers />
