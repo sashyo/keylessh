@@ -1,8 +1,6 @@
 import { createServer } from "http";
 import { WebSocketServer, WebSocket } from "ws";
-import { Socket, connect, isIP } from "net";
-import { lookup } from "dns";
-import { exec } from "child_process";
+import { Socket, connect } from "net";
 import { jwtVerify, createLocalJWKSet, JWTPayload } from "jose";
 import { readFileSync } from "fs";
 import { join } from "path";
@@ -90,71 +88,6 @@ function loadConfig(): boolean {
   }
 }
 
-/**
- * Fallback: resolve hostname using system commands.
- * Handles WINS/NetBIOS on Windows, and nsswitch sources on Linux.
- */
-function resolveWithSystem(host: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const isWindows = process.platform === "win32";
-    // Windows ping triggers WINS/NetBIOS lookup
-    // Linux getent queries nsswitch.conf (may include wins if configured)
-    const cmd = isWindows ? `ping -n 1 -w 1000 ${host}` : `getent hosts ${host}`;
-
-    exec(cmd, { timeout: 5000 }, (err, stdout) => {
-      if (err) {
-        reject(new Error(`System lookup failed: ${err.message}`));
-        return;
-      }
-
-      let ip: string | null = null;
-      if (isWindows) {
-        // Parse Windows ping output: "Pinging hostname [192.168.1.1]" or "Reply from 192.168.1.1"
-        const match = stdout.match(/\[(\d+\.\d+\.\d+\.\d+)\]/) ||
-                      stdout.match(/Reply from (\d+\.\d+\.\d+\.\d+)/i);
-        if (match) ip = match[1];
-      } else {
-        // Parse getent output: "192.168.1.1    hostname"
-        const match = stdout.match(/^(\S+)/);
-        if (match && isIP(match[1])) ip = match[1];
-      }
-
-      if (ip) {
-        resolve(ip);
-      } else {
-        reject(new Error("Could not parse IP from system command"));
-      }
-    });
-  });
-}
-
-/**
- * Resolve hostname to IP address.
- * Tries OS resolver first (dns.lookup), falls back to system commands for WINS/NetBIOS.
- */
-function resolveHost(host: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    if (isIP(host)) {
-      resolve(host);
-      return;
-    }
-
-    // Try OS resolver first (handles /etc/hosts, DNS, etc.)
-    lookup(host, { family: 0 }, (err, address) => {
-      if (!err && address) {
-        resolve(address);
-        return;
-      }
-
-      // Fallback to system command for WINS/NetBIOS
-      console.log(`[Bridge] dns.lookup failed for ${host}, trying system command`);
-      resolveWithSystem(host)
-        .then(resolve)
-        .catch(() => reject(err)); // Return original DNS error if both fail
-    });
-  });
-}
-
 async function verifyToken(token: string): Promise<JWTPayload | null> {
   if (!JWKS || !tcConfig) return null;
 
@@ -227,30 +160,13 @@ wss.on("connection", async (ws: WebSocket, req) => {
   console.log(`[Bridge] Connection: ${userId} -> ${host}:${port} (session: ${sessionId})`);
   activeConnections++;
 
-  // Resolve hostname first
-  let resolvedHost: string;
-  try {
-    resolvedHost = await resolveHost(host);
-    if (resolvedHost !== host) {
-      console.log(`[Bridge] DNS resolved ${host} -> ${resolvedHost}`);
-    }
-  } catch (err: any) {
-    console.log(`[Bridge] DNS resolution failed for ${host}: ${err.message}`);
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "error", message: `DNS lookup failed for ${host}` }));
-      ws.close(4003, "DNS error");
-    }
-    activeConnections--;
-    return;
-  }
-
-  // Connect to SSH server using resolved IP
-  const tcpSocket: Socket = connect({ host: resolvedHost, port });
+  // Connect to SSH server
+  const tcpSocket: Socket = connect({ host, port });
   let tcpConnected = false;
 
   tcpSocket.on("connect", () => {
     tcpConnected = true;
-    console.log(`[Bridge] TCP connected to ${host}:${port} (${resolvedHost})`);
+    console.log(`[Bridge] TCP connected to ${host}:${port}`);
     ws.send(JSON.stringify({ type: "connected" }));
   });
 
