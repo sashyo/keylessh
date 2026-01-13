@@ -413,7 +413,7 @@ export default function AdminServers() {
 
   const isFetching = useIsFetching({ queryKey: ["/api/admin/servers"] }) > 0;
   const { secondsRemaining, refreshNow } = useAutoRefresh({
-    intervalSeconds: 15,
+    intervalSeconds: 1800, // 30 minutes - status checks go through bridges which is expensive
     refresh: () => {
       // Clear client-side status on refresh to re-check
       setClientSideStatus({});
@@ -556,7 +556,7 @@ export default function AdminServers() {
             isRefreshing={isFetching}
             secondsRemaining={secondsRemaining}
             data-testid="refresh-servers"
-            title="Refresh now"
+            title="Sync server status"
           />
 
           <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>

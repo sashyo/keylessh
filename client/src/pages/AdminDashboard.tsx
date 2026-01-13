@@ -105,7 +105,7 @@ export default function AdminDashboard() {
   }, [refetchServers, refetchServerStatus, refetchUsers, refetchSessions]);
 
   const { secondsRemaining, refreshNow } = useAutoRefresh({
-    intervalSeconds: 15,
+    intervalSeconds: 300, // 5 minutes for dashboard overview
     refresh: refreshAll,
     isBlocked: isFetching,
   });

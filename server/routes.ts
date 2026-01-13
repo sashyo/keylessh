@@ -67,30 +67,31 @@ async function checkTcpReachable(host: string, port: number, timeoutMs = 2500): 
   });
 }
 
-// Check server health - uses direct TCP for local servers, returns "unknown" for bridged servers
+// Check server health via direct TCP connection
 async function checkServerHealth(server: ServerType): Promise<ServerStatus> {
-  // If server uses an external bridge, we can't check from the server side
-  // The browser would need to test through the bridge
+  // Try direct TCP check first
+  const ok = await checkTcpReachable(server.host, server.port ?? 22);
+  if (ok) return "online";
+
+  // Server not directly reachable - check if it uses a bridge
+  // If so, return "unknown" to trigger client-side check via bridge
   if (server.bridgeId) {
     const bridge = await bridgeStorage.getBridge(server.bridgeId);
     if (bridge?.enabled) {
-      // Server uses an external bridge - can't verify from server
-      return "unknown";
+      return "unknown"; // Client will check via bridge
     }
   }
 
-  // Check if there's a default external bridge (not embedded)
+  // Check if default bridge is external (not localhost)
   const defaultBridge = await bridgeStorage.getDefaultBridge();
-  if (defaultBridge?.enabled && !defaultBridge.url.includes("localhost") && !defaultBridge.url.includes("127.0.0.1")) {
-    // Default bridge is external - can't verify from server unless server has no bridge assigned
-    if (!server.bridgeId) {
-      return "unknown";
-    }
+  if (defaultBridge?.enabled &&
+      !defaultBridge.url.includes("localhost") &&
+      !defaultBridge.url.includes("127.0.0.1")) {
+    return "unknown"; // Client will check via bridge
   }
 
-  // Direct TCP check for local/embedded bridge servers
-  const ok = await checkTcpReachable(server.host, server.port ?? 22);
-  return ok ? "online" : "offline";
+  // No bridge available - server is genuinely offline
+  return "offline";
 }
 
 // Check health for multiple servers in parallel
