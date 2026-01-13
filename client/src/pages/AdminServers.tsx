@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useIsFetching } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
@@ -35,10 +35,10 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { queryClient, apiRequest } from "@/lib/queryClient";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
-import { Plus, Pencil, Trash2, Server, Search, AlertCircle, Video } from "lucide-react";
+import { Plus, Pencil, Trash2, Server, Search, AlertCircle, Video, Loader2, CheckCircle, XCircle, Wifi } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import type { Server as ServerType, ServerStatus } from "@shared/schema";
-import { api } from "@/lib/api";
+import type { Server as ServerType, ServerStatus, Bridge } from "@shared/schema";
+import { api, testBridgeConnection, getBridgeWebSocketUrl } from "@/lib/api";
 import { UpgradeBanner } from "@/components/UpgradeBanner";
 import { RefreshButton } from "@/components/RefreshButton";
 
@@ -52,6 +52,7 @@ interface ServerFormData {
   enabled: boolean;
   recordingEnabled: boolean;
   recordedUsers: string;
+  bridgeId: string;
 }
 
 const defaultFormData: ServerFormData = {
@@ -64,6 +65,7 @@ const defaultFormData: ServerFormData = {
   enabled: true,
   recordingEnabled: false,
   recordedUsers: "",
+  bridgeId: "",
 };
 
 function ServerForm({
@@ -71,17 +73,52 @@ function ServerForm({
   onSubmit,
   onCancel,
   isLoading,
+  bridges,
 }: {
   initialData?: ServerFormData;
   onSubmit: (data: ServerFormData) => void;
   onCancel: () => void;
   isLoading: boolean;
+  bridges?: Bridge[];
 }) {
   const [formData, setFormData] = useState<ServerFormData>(initialData || defaultFormData);
+  const [testStatus, setTestStatus] = useState<"idle" | "testing" | "success" | "error">("idle");
+  const [testMessage, setTestMessage] = useState<string>("");
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     onSubmit(formData);
+  };
+
+  const handleTestConnection = async () => {
+    if (!formData.host) {
+      setTestStatus("error");
+      setTestMessage("Please enter a host address first");
+      return;
+    }
+
+    setTestStatus("testing");
+    setTestMessage("");
+
+    // Determine which bridge URL to use
+    let bridgeUrl: string;
+    if (formData.bridgeId && bridges) {
+      const selectedBridge = bridges.find(b => b.id === formData.bridgeId);
+      bridgeUrl = selectedBridge?.url || getBridgeWebSocketUrl();
+    } else {
+      // Use default bridge if available
+      const defaultBridge = bridges?.find(b => b.isDefault && b.enabled);
+      bridgeUrl = defaultBridge?.url || getBridgeWebSocketUrl();
+    }
+
+    try {
+      const result = await testBridgeConnection(bridgeUrl, formData.host, formData.port || 22);
+      setTestStatus(result.success ? "success" : "error");
+      setTestMessage(result.message);
+    } catch (err) {
+      setTestStatus("error");
+      setTestMessage(err instanceof Error ? err.message : "Test failed");
+    }
   };
 
   return (
@@ -163,6 +200,67 @@ function ServerForm({
         />
       </div>
 
+      {bridges && bridges.length > 0 && (
+        <div className="space-y-2">
+          <Label htmlFor="bridgeId">SSH Bridge</Label>
+          <Select
+            value={formData.bridgeId || "_default"}
+            onValueChange={(value) => setFormData({ ...formData, bridgeId: value === "_default" ? "" : value })}
+          >
+            <SelectTrigger data-testid="select-server-bridge">
+              <SelectValue placeholder="Use default bridge" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="_default">Use default bridge</SelectItem>
+              {bridges.filter(b => b.enabled).map((bridge) => (
+                <SelectItem key={bridge.id} value={bridge.id}>
+                  {bridge.name} {bridge.isDefault && "(default)"}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-muted-foreground">
+            Select a specific bridge for this server or use the default
+          </p>
+        </div>
+      )}
+
+      {/* Test Connection Button */}
+      <div className="space-y-2">
+        <div className="flex items-center gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={handleTestConnection}
+            disabled={testStatus === "testing" || !formData.host}
+            className="gap-2"
+          >
+            {testStatus === "testing" ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Wifi className="h-4 w-4" />
+            )}
+            Test Connection
+          </Button>
+          {testStatus === "success" && (
+            <div className="flex items-center gap-1 text-sm text-green-600">
+              <CheckCircle className="h-4 w-4" />
+              {testMessage}
+            </div>
+          )}
+          {testStatus === "error" && (
+            <div className="flex items-center gap-1 text-sm text-red-600">
+              <XCircle className="h-4 w-4" />
+              {testMessage}
+            </div>
+          )}
+        </div>
+        <p className="text-xs text-muted-foreground">
+          Test SSH connectivity through the selected bridge
+        </p>
+      </div>
+
       <div className="flex items-center justify-between">
         <Label htmlFor="enabled">Enabled</Label>
         <Switch
@@ -226,6 +324,9 @@ export default function AdminServers() {
   const [search, setSearch] = useState("");
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [editingServer, setEditingServer] = useState<ServerType | null>(null);
+  // Client-side status checks for servers using external bridges
+  const [clientSideStatus, setClientSideStatus] = useState<Record<string, ServerStatus>>({});
+  const [checkingStatus, setCheckingStatus] = useState<Set<string>>(new Set());
 
   const { data: servers, isLoading, refetch } = useQuery<ServerType[]>({
     queryKey: ["/api/admin/servers"],
@@ -247,10 +348,77 @@ export default function AdminServers() {
     queryFn: api.admin.license.get,
   });
 
+  const { data: bridges } = useQuery<Bridge[]>({
+    queryKey: ["/api/admin/bridges"],
+    queryFn: api.admin.bridges.list,
+  });
+
+  // Check server status through bridge (client-side for external bridges)
+  const checkServerViaClient = useCallback(async (server: ServerType) => {
+    if (!bridges) return;
+
+    // Determine which bridge to use
+    let bridgeUrl: string;
+    if (server.bridgeId) {
+      const bridge = bridges.find(b => b.id === server.bridgeId && b.enabled);
+      if (!bridge) return;
+      bridgeUrl = bridge.url;
+    } else {
+      // Use default bridge
+      const defaultBridge = bridges.find(b => b.isDefault && b.enabled);
+      bridgeUrl = defaultBridge?.url || getBridgeWebSocketUrl();
+    }
+
+    setCheckingStatus(prev => new Set(prev).add(server.id));
+
+    try {
+      const result = await testBridgeConnection(bridgeUrl, server.host, server.port || 22, 5000);
+      setClientSideStatus(prev => ({
+        ...prev,
+        [server.id]: result.success ? "online" : "offline"
+      }));
+    } catch {
+      setClientSideStatus(prev => ({
+        ...prev,
+        [server.id]: "offline"
+      }));
+    } finally {
+      setCheckingStatus(prev => {
+        const next = new Set(prev);
+        next.delete(server.id);
+        return next;
+      });
+    }
+  }, [bridges]);
+
+  // Check servers with "unknown" status through client
+  useEffect(() => {
+    if (!servers || !serverStatusData || !bridges) return;
+
+    const serverStatuses = serverStatusData.statuses || {};
+
+    // Find servers with "unknown" status that haven't been checked yet
+    const unknownServers = servers.filter(server =>
+      server.enabled &&
+      serverStatuses[server.id] === "unknown" &&
+      !clientSideStatus[server.id] &&
+      !checkingStatus.has(server.id)
+    );
+
+    // Check up to 3 servers at a time to avoid overwhelming
+    unknownServers.slice(0, 3).forEach(server => {
+      checkServerViaClient(server);
+    });
+  }, [servers, serverStatusData, bridges, clientSideStatus, checkingStatus, checkServerViaClient]);
+
   const isFetching = useIsFetching({ queryKey: ["/api/admin/servers"] }) > 0;
   const { secondsRemaining, refreshNow } = useAutoRefresh({
     intervalSeconds: 15,
-    refresh: () => Promise.all([refetch(), refetchServerStatus(), refetchServerLimit(), refetchLicense()]),
+    refresh: () => {
+      // Clear client-side status on refresh to re-check
+      setClientSideStatus({});
+      return Promise.all([refetch(), refetchServerStatus(), refetchServerLimit(), refetchLicense()]);
+    },
     isBlocked: isFetching,
   });
 
@@ -266,6 +434,7 @@ export default function AdminServers() {
         enabled: data.enabled,
         recordingEnabled: data.recordingEnabled,
         recordedUsers: data.recordedUsers.split(",").map((u) => u.trim()).filter(Boolean),
+        bridgeId: data.bridgeId || null,
       };
       return apiRequest("POST", "/api/admin/servers", serverData);
     },
@@ -294,6 +463,7 @@ export default function AdminServers() {
         enabled: data.enabled,
         recordingEnabled: data.recordingEnabled,
         recordedUsers: data.recordedUsers.split(",").map((u) => u.trim()).filter(Boolean),
+        bridgeId: data.bridgeId || null,
       };
       return apiRequest("PATCH", `/api/admin/servers/${id}`, serverData);
     },
@@ -426,9 +596,11 @@ export default function AdminServers() {
                       enabled: editingServer.enabled,
                       recordingEnabled: editingServer.recordingEnabled || false,
                       recordedUsers: editingServer.recordedUsers?.join(", ") || "",
+                      bridgeId: editingServer.bridgeId || "",
                     }
                   : undefined
               }
+              bridges={bridges}
               onSubmit={handleSubmit}
               onCancel={handleCloseDialog}
               isLoading={createMutation.isPending || updateMutation.isPending}
@@ -554,21 +726,38 @@ export default function AdminServers() {
                     </TableCell>
                     <TableCell>
                       {server.enabled ? (
-                        <Badge
-                          variant={
-                            statusById[server.id] === "online"
-                              ? "default"
-                              : statusById[server.id] === "offline"
-                                ? "destructive"
-                                : "secondary"
+                        (() => {
+                          // Use client-side status for servers with external bridges, fall back to server status
+                          const effectiveStatus = clientSideStatus[server.id] || statusById[server.id];
+                          const isChecking = checkingStatus.has(server.id);
+
+                          if (isChecking) {
+                            return (
+                              <Badge variant="secondary" className="gap-1">
+                                <Loader2 className="h-3 w-3 animate-spin" />
+                                Checking
+                              </Badge>
+                            );
                           }
-                        >
-                          {statusById[server.id] === "online"
-                            ? "Online"
-                            : statusById[server.id] === "offline"
-                              ? "Offline"
-                              : "Unknown"}
-                        </Badge>
+
+                          return (
+                            <Badge
+                              variant={
+                                effectiveStatus === "online"
+                                  ? "default"
+                                  : effectiveStatus === "offline"
+                                    ? "destructive"
+                                    : "secondary"
+                              }
+                            >
+                              {effectiveStatus === "online"
+                                ? "Online"
+                                : effectiveStatus === "offline"
+                                  ? "Offline"
+                                  : "Unknown"}
+                            </Badge>
+                          );
+                        })()
                       ) : (
                         <Badge variant="secondary">Disabled</Badge>
                       )}

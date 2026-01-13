@@ -58,8 +58,11 @@ export function useSSHSession({
   const [sftpClient, setSftpClient] = useState<SftpClient | null>(null);
   const [scpClient, setScpClient] = useState<ScpClient | null>(null);
   const clientRef = useRef<BrowserSSHClient | null>(null);
-  const initialColsRef = useRef<number>(80);
-  const initialRowsRef = useRef<number>(24);
+  // Minimum terminal dimensions for consistent recordings
+  const MIN_COLS = 80;
+  const MIN_ROWS = 24;
+  const initialColsRef = useRef<number>(MIN_COLS);
+  const initialRowsRef = useRef<number>(MIN_ROWS);
 
   // Store current values in refs so connect always has access to latest values
   const hostRef = useRef(host);
@@ -151,16 +154,22 @@ export function useSSHSession({
   }, []);
 
   const resize = useCallback((cols: number, rows: number) => {
+    // Enforce minimum dimensions for consistent recordings
+    const safeCols = Math.max(cols, MIN_COLS);
+    const safeRows = Math.max(rows, MIN_ROWS);
     if (clientRef.current) {
-      clientRef.current.resize(cols, rows);
+      clientRef.current.resize(safeCols, safeRows);
     }
   }, []);
 
   const setDimensions = useCallback((cols: number, rows: number) => {
-    initialColsRef.current = cols;
-    initialRowsRef.current = rows;
+    // Enforce minimum dimensions for consistent recordings
+    const safeCols = Math.max(cols, MIN_COLS);
+    const safeRows = Math.max(rows, MIN_ROWS);
+    initialColsRef.current = safeCols;
+    initialRowsRef.current = safeRows;
     if (clientRef.current) {
-      clientRef.current.setDimensions(cols, rows);
+      clientRef.current.setDimensions(safeCols, safeRows);
     }
   }, []);
 

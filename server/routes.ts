@@ -1,6 +1,6 @@
 import type { Express } from "express";
 import type { Server } from "http";
-import { storage, approvalStorage, policyStorage, pendingPolicyStorage, templateStorage, subscriptionStorage, recordingStorage, fileOperationStorage, type ApprovalType } from "./storage";
+import { storage, approvalStorage, policyStorage, pendingPolicyStorage, templateStorage, subscriptionStorage, recordingStorage, fileOperationStorage, bridgeStorage, type ApprovalType } from "./storage";
 import { subscriptionTiers, type SubscriptionTier } from "@shared/schema";
 import * as stripeLib from "./lib/stripe";
 import { log, logForseti, logError } from "./logger";
@@ -67,8 +67,28 @@ async function checkTcpReachable(host: string, port: number, timeoutMs = 2500): 
   });
 }
 
-// Check server health by calling its health check URL
+// Check server health - uses direct TCP for local servers, returns "unknown" for bridged servers
 async function checkServerHealth(server: ServerType): Promise<ServerStatus> {
+  // If server uses an external bridge, we can't check from the server side
+  // The browser would need to test through the bridge
+  if (server.bridgeId) {
+    const bridge = await bridgeStorage.getBridge(server.bridgeId);
+    if (bridge?.enabled) {
+      // Server uses an external bridge - can't verify from server
+      return "unknown";
+    }
+  }
+
+  // Check if there's a default external bridge (not embedded)
+  const defaultBridge = await bridgeStorage.getDefaultBridge();
+  if (defaultBridge?.enabled && !defaultBridge.url.includes("localhost") && !defaultBridge.url.includes("127.0.0.1")) {
+    // Default bridge is external - can't verify from server unless server has no bridge assigned
+    if (!server.bridgeId) {
+      return "unknown";
+    }
+  }
+
+  // Direct TCP check for local/embedded bridge servers
   const ok = await checkTcpReachable(server.host, server.port ?? 22);
   return ok ? "online" : "offline";
 }
@@ -426,10 +446,29 @@ export async function registerRoutes(
         recordingEnabled = recordedUsers.length === 0 || recordedUsers.includes(sshUser);
       }
 
+      // Determine bridge URL: server-specific bridge > default bridge > env BRIDGE_URL > null (embedded)
+      let bridgeUrl: string | null = null;
+      if (server.bridgeId) {
+        const bridge = await bridgeStorage.getBridge(server.bridgeId);
+        if (bridge?.enabled) {
+          bridgeUrl = bridge.url;
+        }
+      }
+      if (!bridgeUrl) {
+        // Try default bridge
+        const defaultBridge = await bridgeStorage.getDefaultBridge();
+        if (defaultBridge?.enabled) {
+          bridgeUrl = defaultBridge.url;
+        }
+      }
+      if (!bridgeUrl && process.env.BRIDGE_URL) {
+        bridgeUrl = process.env.BRIDGE_URL;
+      }
+
       // Include bridge URL and server details in response
       res.json({
         ...session,
-        bridgeUrl: process.env.BRIDGE_URL || null,
+        bridgeUrl,
         host: server.host,
         port: server.port ?? 22,
         recordingEnabled,
@@ -960,6 +999,116 @@ export async function registerRoutes(
         res.json({ success: true });
       } catch (error) {
         res.status(500).json({ message: "Failed to delete server" });
+      }
+    }
+  );
+
+  // ============================================
+  // Admin Bridge Routes
+  // ============================================
+
+  // GET /api/admin/bridges - List all bridges
+  app.get(
+    "/api/admin/bridges",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const bridgeList = await bridgeStorage.getBridges();
+        res.json(bridgeList);
+      } catch (error) {
+        log(`Failed to fetch bridges: ${error}`);
+        res.status(500).json({ message: "Failed to fetch bridges" });
+      }
+    }
+  );
+
+  // POST /api/admin/bridges - Create new bridge
+  app.post(
+    "/api/admin/bridges",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const { name, url, description, enabled, isDefault } = req.body;
+        if (!name || !url) {
+          return res.status(400).json({ message: "Name and URL are required" });
+        }
+        const bridge = await bridgeStorage.createBridge({
+          name,
+          url,
+          description,
+          enabled: enabled !== false,
+          isDefault: isDefault || false,
+        });
+        res.status(201).json(bridge);
+      } catch (error) {
+        log(`Failed to create bridge: ${error}`);
+        res.status(500).json({ message: "Failed to create bridge" });
+      }
+    }
+  );
+
+  // GET /api/admin/bridges/:id - Get a specific bridge
+  app.get(
+    "/api/admin/bridges/:id",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const bridge = await bridgeStorage.getBridge(req.params.id);
+        if (!bridge) {
+          return res.status(404).json({ message: "Bridge not found" });
+        }
+        res.json(bridge);
+      } catch (error) {
+        log(`Failed to fetch bridge: ${error}`);
+        res.status(500).json({ message: "Failed to fetch bridge" });
+      }
+    }
+  );
+
+  // PUT /api/admin/bridges/:id - Update a bridge
+  app.put(
+    "/api/admin/bridges/:id",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const { name, url, description, enabled, isDefault } = req.body;
+        const bridge = await bridgeStorage.updateBridge(req.params.id, {
+          name,
+          url,
+          description,
+          enabled,
+          isDefault,
+        });
+        if (!bridge) {
+          return res.status(404).json({ message: "Bridge not found" });
+        }
+        res.json(bridge);
+      } catch (error) {
+        log(`Failed to update bridge: ${error}`);
+        res.status(500).json({ message: "Failed to update bridge" });
+      }
+    }
+  );
+
+  // DELETE /api/admin/bridges/:id - Delete a bridge
+  app.delete(
+    "/api/admin/bridges/:id",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const deleted = await bridgeStorage.deleteBridge(req.params.id);
+        if (!deleted) {
+          return res.status(404).json({ message: "Bridge not found" });
+        }
+        res.status(204).send();
+      } catch (error) {
+        log(`Failed to delete bridge: ${error}`);
+        res.status(500).json({ message: "Failed to delete bridge" });
       }
     }
   );
