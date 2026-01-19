@@ -65,6 +65,40 @@ npm run dev
 
 Make sure `data/tidecloak.json` exists with your TideCloak client adapter config (same file as main server).
 
+## Docker deployment
+
+**Build the docker image**
+
+```bash
+docker build --no-cache -t keylessh-bridge .
+```
+
+**Run the docker image**
+
+```bash
+docker start --rm -d --name keylessh-bridge -p 8088:8080 -v ../data:/data keylessh-bridge
+```
+
+Switches:
+- `--rm` - Remove docker once stopped
+- `-d` - Run in silent mode
+- `--name` - Give the docker a name
+- `-p` - Expose port 8088 and redirect it to port 8080 inside
+- `-v` - Map an external folder with the database files and tidecloak adapter for consistency.
+
+**Check console logs**
+
+```bash
+sudo docker logs keylessh-bridge
+```
+
+**Stop the docker**
+
+```bash
+sudo docker stop keylessh-bridge
+```
+
+
 ## Deploy to Azure
 
 ```bash
