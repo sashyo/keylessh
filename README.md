@@ -53,7 +53,14 @@ cd keylessh/script/tidecloak
 ./start.sh
 ```
 
-### 2. Link your Tide account
+### 2. Activate your free Tide subscription
+
+During initialization, you'll be prompted to:
+
+1. **Enter an email to manage your license** - Provide a valid email address for your Tide subscription
+2. **Accept the Terms & Conditions** - Review the terms at https://tide.org/legal and enter `y` or `yes` to agree
+
+### 3. Link your Tide account
 
 The script will generate an invite link:
 
@@ -66,7 +73,7 @@ Open this link in your browser and either:
 - Create a new  tide account, or
 - Sign in with your existing Tide account
 
-### 3. Wait for initialization
+### 4. Wait for initialization
 
 The script will detect when linking is complete and continue finishing the setup:
 
@@ -74,7 +81,7 @@ The script will detect when linking is complete and continue finishing the setup
 🎉 Tidecloak initialization complete!
 ```
 
-### 4. Start the app
+### 5. Start the app
 
 ```bash
 cd ../..  # back to keylessh root
