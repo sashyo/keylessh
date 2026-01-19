@@ -112,10 +112,37 @@ fi
 # Initialize Tide realm + IGA
 TOKEN="$(get_admin_token)"
 echo "🔐 Initializing Tide realm + IGA..."
+
+# Prompt for email
+echo ""
+while true; do
+    echo -ne "${YELLOW}Enter an email to manage your license: ${NC}"
+    read LICENSE_EMAIL
+    if [[ -n "$LICENSE_EMAIL" && "$LICENSE_EMAIL" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
+        break
+    else
+        log_error "Please enter a valid email address"
+    fi
+done
+
+# Prompt for terms acceptance
+echo ""
+echo "Please review the Terms & Conditions at: https://tide.org/legal"
+while true; do
+    echo -ne "${YELLOW}I agree to the Terms & Conditions (enter 'y' or 'yes' to continue): ${NC}"
+    read TERMS_ACCEPTANCE
+    if [[ "$TERMS_ACCEPTANCE" == "y" || "$TERMS_ACCEPTANCE" == "yes" ]]; then
+        break
+    else
+        log_error "You must explicitly agree to the Terms & Conditions by entering 'y' or 'yes'"
+    fi
+done
+echo ""
+
 curl -s $CURL_OPTS -X POST "${TIDECLOAK_LOCAL_URL}/admin/realms/${REALM_NAME}/vendorResources/setUpTideRealm" \
     -H "Authorization: Bearer $TOKEN" \
     -H "Content-Type: application/x-www-form-urlencoded" \
-    --data-urlencode "email=keylesshdemo@tide.org" \
+    --data-urlencode "email=${LICENSE_EMAIL}" \
     --data-urlencode "isRagnarokEnabled=true" > /dev/null 2>&1
 
 curl -s $CURL_OPTS -X POST "${TIDECLOAK_LOCAL_URL}/admin/realms/${REALM_NAME}/tide-admin/toggle-iga" \
