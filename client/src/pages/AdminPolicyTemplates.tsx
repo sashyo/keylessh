@@ -50,28 +50,41 @@ import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 import { RefreshButton } from "@/components/RefreshButton";
 import { FileCode, Pencil, Plus, Trash2, Search, Code, Variable } from "lucide-react";
 
-const DEFAULT_CS_CODE = `using Forseti.Sdk;
+const DEFAULT_CS_CODE = `using Ork.Forseti.Sdk;
+using System;
+using System.Collections.Generic;
+using System.Text;
 
 /// <summary>
-/// Custom SSH Policy - Describe your policy here.
+/// Forseti contract - start here.
 /// </summary>
-public class SshPolicy : IAccessPolicy
+public class Contract : IAccessPolicy
 {
-    public PolicyDecision Authorize(AccessContext ctx)
+    // These policy parameters are filled in by the policy "params" map.
+    // Marking them Required ensures missing values result in deny/validation failures.
+    [PolicyParam(Required = true, Description = "Role required for SSH access (e.g., ssh:root)")]
+    public string Role { get; set; }
+
+    [PolicyParam(Required = true, Description = "Resource identifier for role checks")]
+    public string Resource { get; set; }
+
+    // Called for every request. Validate the request data payload and return Allow/Deny.
+    // For SSH signing, ctx.Data is the SSHv2 publickey auth "to-be-signed" payload.
+    public PolicyDecision ValidateData(DataContext ctx)
     {
-        var policy = ctx.Policy;
-        var doken = ctx.Doken;
+        throw new NotImplementedException("Implement SSH challenge validation in ValidateData().");
+    }
 
-        if (policy == null)
-            return PolicyDecision.Deny("No policy provided");
+    // Called for explicit approvals. Validate that the approvers are allowed to approve this request.
+    public PolicyDecision ValidateApprovers(ApproversContext ctx)
+    {
+        throw new NotImplementedException("Implement approver validation in ValidateApprovers().");
+    }
 
-        if (doken == null)
-            return PolicyDecision.Deny("No doken provided");
-
-        // Add your authorization logic here
-        // Use {{PARAM_NAME}} placeholders for configurable values
-
-        return PolicyDecision.Allow();
+    // Called for execution. Validate that the executor (caller) is allowed to execute this request.
+    public PolicyDecision ValidateExecutor(ExecutorContext ctx)
+    {
+        throw new NotImplementedException("Implement executor validation in ValidateExecutor().");
     }
 }`;
 
@@ -186,6 +199,18 @@ export default function AdminPolicyTemplates() {
       return;
     }
 
+    const entryTypeMatch = formData.csCode.match(
+      /public\s+(?:\w+\s+)*class\s+(\w+)\s*:\s*IAccessPolicy/
+    );
+    if (!entryTypeMatch || entryTypeMatch[1] !== "Contract") {
+      toast({
+        title: "Invalid contract entry type",
+        description: "Your contract must declare `public class Contract : IAccessPolicy`.",
+        variant: "destructive",
+      });
+      return;
+    }
+
     if (editingTemplate) {
       updateMutation.mutate({ id: editingTemplate.id, data: formData });
     } else {
@@ -248,6 +273,10 @@ export default function AdminPolicyTemplates() {
           </p>
           <p className="text-xs text-muted-foreground">
             Use <code className="bg-muted px-1 rounded">{"{{PARAM_NAME}}"}</code> placeholders in your code for configurable values.
+          </p>
+          <p className="text-xs text-muted-foreground">
+            Entry type must be <code className="bg-muted px-1 rounded">Contract</code>:{" "}
+            <code className="bg-muted px-1 rounded">public class Contract : IAccessPolicy</code>
           </p>
         </div>
         <div className="flex items-center gap-2">

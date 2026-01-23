@@ -1355,7 +1355,7 @@ using System.Text;
 /// Uses [PolicyParam] attributes for automatic parameter binding and
 /// DecisionBuilder for composable policy validation.
 /// </summary>
-public class SshPolicy : IAccessPolicy
+public class Contract : IAccessPolicy
 {
     [PolicyParam(Required = true, Description = "Role required for SSH access")]
     public string Role { get; set; }

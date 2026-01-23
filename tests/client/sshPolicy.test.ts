@@ -68,8 +68,8 @@ describe("SSH Forseti Contract", () => {
   });
 
   // Main policy class declaration
-  it("should contain the SshPolicy class", () => {
-    expect(SSH_FORSETI_CONTRACT).toContain("public class SshPolicy");
+  it("should contain the Contract class", () => {
+    expect(SSH_FORSETI_CONTRACT).toContain("public class Contract");
   });
 
   // Must implement IAccessPolicy interface for Ork execution
