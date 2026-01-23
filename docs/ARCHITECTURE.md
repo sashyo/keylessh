@@ -162,10 +162,12 @@ KeyleSSH can support multiple signing patterns but currently only the `Basic` on
 
 ### Forseti Contract
 
+The contract entry type is fixed to `Contract`, so policies must declare `public class Contract : IAccessPolicy`.
+
 The SSH contract validates role-based access and serializes the SSH authorization:
 
 ```csharp
-public class SshPolicy : IAccessPolicy
+public class Contract : IAccessPolicy
 {
     [PolicyParam(Required = true, Description = "Role required for SSH access")]
     public string Role { get; set; }

@@ -26,7 +26,7 @@ using System.Text;
 /// Uses [PolicyParam] attributes for automatic parameter binding and
 /// DecisionBuilder for composable policy validation.
 /// </summary>
-public class SshPolicy : IAccessPolicy
+public class Contract : IAccessPolicy
 {
     [PolicyParam(Required = true, Description = "Role required for SSH access")]
     public string Role { get; set; }
@@ -395,7 +395,7 @@ export async function createSshPolicyRequest(
   // Structure: forsetiData[1] = innerPayload = [source, entryType]
   const contractTypeBytes = new TextEncoder().encode("forseti");
   const sourceCodeBytes = new TextEncoder().encode(SSH_FORSETI_CONTRACT);
-  const entryTypeBytes = new TextEncoder().encode("SshPolicy");
+  const entryTypeBytes = new TextEncoder().encode("Contract");
   const innerPayload = TideMemory.CreateFromArray([sourceCodeBytes, entryTypeBytes]);
   const forsetiData = TideMemory.CreateFromArray([new Uint8Array(0), innerPayload]);
   const contractTransport = TideMemory.CreateFromArray([contractTypeBytes, forsetiData]);
@@ -419,8 +419,17 @@ export async function createSshPolicyRequestWithCode(
   // Compute the contract ID from source code
   const { contractId } = await compileForsetiContract(config.contractCode);
 
-  // Detect entry type from custom code
-  const entryType = detectEntryType(config.contractCode) || "SshPolicy";
+  // Entry type must be a Contract implementing IAccessPolicy
+  const detectedEntryType = detectEntryType(config.contractCode);
+  if (!detectedEntryType) {
+    throw new Error("Contract code must declare `public class Contract : IAccessPolicy`.");
+  }
+  if (detectedEntryType !== "Contract") {
+    throw new Error(
+      `Contract entry type must be "Contract" (expected \`public class Contract : IAccessPolicy\`, found "${detectedEntryType}").`
+    );
+  }
+  const entryType = "Contract";
 
   // Create policy request with the contract ID
   const policyParams = new Map<string, any>();
@@ -466,7 +475,7 @@ export async function createSshPolicyRequestWithCode(
  */
 function detectEntryType(source: string): string | null {
   // Match: public class ClassName : IAccessPolicy
-  const match = source.match(/public\s+class\s+(\w+)\s*:\s*IAccessPolicy/);
+  const match = source.match(/public\s+(?:\w+\s+)*class\s+(\w+)\s*:\s*IAccessPolicy/);
   return match ? match[1] : null;
 }
 
