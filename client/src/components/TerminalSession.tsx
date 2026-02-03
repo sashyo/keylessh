@@ -366,11 +366,9 @@ export function TerminalSession({
       send(data);
     });
 
-    // Ctrl+C: copy selection to clipboard when text is selected, otherwise send SIGINT
-    // Ctrl+V paste is handled natively by the browser
+    // Ctrl+C with selection: copy to clipboard instead of SIGINT
     term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
       if (e.type !== 'keydown') return true;
-
       if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
         const selection = term.getSelection();
         if (selection) {
@@ -379,20 +377,31 @@ export function TerminalSession({
           return false;
         }
       }
-
       return true;
     });
+
+    // Paste via native browser event - works with Ctrl+V, Cmd+V, right-click paste
+    const handlePaste = (e: ClipboardEvent) => {
+      const text = e.clipboardData?.getData('text');
+      if (text) {
+        send(text);
+        e.preventDefault();
+      }
+    };
+    terminalRef.current.addEventListener('paste', handlePaste);
 
     const handleResize = () => {
       fitNow();
     };
 
     const resizeObserver = new ResizeObserver(handleResize);
-    resizeObserver.observe(terminalRef.current);
+    const termEl = terminalRef.current;
+    resizeObserver.observe(termEl);
     window.addEventListener("resize", handleResize);
 
     return () => {
       window.removeEventListener("resize", handleResize);
+      termEl.removeEventListener('paste', handlePaste);
       resizeObserver.disconnect();
       try {
         term.dispose();
