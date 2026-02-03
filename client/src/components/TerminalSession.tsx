@@ -462,18 +462,30 @@ export function TerminalSession({
     window.setTimeout(fit, 150);
   }, [isActive, resize, setDimensions, status]);
 
-  // Auto-focus terminal on any keypress when connected
+  // Auto-focus terminal on any keypress when connected, and prevent
+  // browser shortcuts (Ctrl+W close tab, Ctrl+N new window, etc.) at the
+  // window level so they reach xterm instead of triggering browser actions.
   useEffect(() => {
     if (status !== "connected" || !isActive) return;
 
     xtermRef.current?.focus();
 
-    const handleKeyDown = () => {
+    const PREVENT_BROWSER_KEYS = new Set([
+      'w', 't', 'n', 'k', 'l', 'u', 'd', 'h', 'j', 'o', 'p', 's', 'q', 'g',
+    ]);
+
+    const handleKeyDown = (e: KeyboardEvent) => {
       const active = document.activeElement;
       // Don't steal focus from inputs, textareas, selects, or dialogs
       if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.tagName === 'SELECT' || active.closest('[role="dialog"]'))) {
         return;
       }
+
+      // Block browser defaults for shell-relevant Ctrl+<letter> combos
+      if (e.ctrlKey && !e.shiftKey && !e.metaKey && PREVENT_BROWSER_KEYS.has(e.key)) {
+        e.preventDefault();
+      }
+
       xtermRef.current?.focus();
     };
 

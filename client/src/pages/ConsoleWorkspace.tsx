@@ -65,6 +65,19 @@ export default function ConsoleWorkspace() {
     }
   }, [activeTabId, tabs]);
 
+  // Show browser "Leave site?" confirmation when there are open terminal tabs.
+  // Ctrl+W (close tab) is a browser-level action that JavaScript cannot block,
+  // but beforeunload at least gives the user a chance to cancel.
+  useEffect(() => {
+    if (tabs.length === 0) return;
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [tabs.length]);
+
   const addTab = (serverId: string, sshUser: string) => {
     const id = newId();
     const next: ConsoleTab = { id, serverId, sshUser };

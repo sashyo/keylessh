@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useIsFetching } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
@@ -35,12 +35,63 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { queryClient, apiRequest } from "@/lib/queryClient";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
-import { Plus, Pencil, Trash2, Server, Search, AlertCircle, Video, Loader2, CheckCircle, XCircle, Wifi } from "lucide-react";
+import { Plus, Pencil, Trash2, Server, Search, AlertCircle, Video, Loader2, CheckCircle, XCircle, Wifi, KeyRound, Copy, Check } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import type { Server as ServerType, ServerStatus, Bridge } from "@shared/schema";
 import { api, testBridgeConnection, getBridgeWebSocketUrl } from "@/lib/api";
+import { base64UrlToBytes, formatOpenSshEd25519PublicKey } from "@/lib/sshClient";
+import { useAuth, useAuthConfig } from "@/contexts/AuthContext";
 import { UpgradeBanner } from "@/components/UpgradeBanner";
 import { RefreshButton } from "@/components/RefreshButton";
+
+function SshPublicKeyBanner() {
+  const { user } = useAuth();
+  const authConfig = useAuthConfig();
+  const [copied, setCopied] = useState(false);
+  const username = user?.username || "user";
+
+  const publicKey = useMemo(() => {
+    try {
+      const jwkX = authConfig?.jwk?.keys?.[0]?.x;
+      if (typeof jwkX !== "string") return null;
+      const rawPublicKey = base64UrlToBytes(jwkX);
+      return formatOpenSshEd25519PublicKey(rawPublicKey, `${username}@keylessh`);
+    } catch {
+      return null;
+    }
+  }, [username, authConfig]);
+
+  if (!publicKey) return null;
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(publicKey);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  return (
+    <div className="rounded-lg border border-border bg-card">
+      <div className="flex items-center gap-3 px-4 py-3">
+        <KeyRound className="h-4 w-4 text-[hsl(var(--neon-cyan))] shrink-0" />
+        <span className="text-sm font-medium flex-1">SSH Public Key</span>
+        <Badge variant="outline" className="text-xs font-mono">ed25519</Badge>
+      </div>
+      <div className="px-4 pb-3 space-y-2">
+        <p className="text-xs text-muted-foreground">
+          Add this key to <code className="text-xs bg-muted px-1 py-0.5 rounded">~/.ssh/authorized_keys</code> on your servers to enable keyless SSH authentication.
+        </p>
+        <div className="flex gap-2">
+          <code className="flex-1 text-xs font-mono bg-muted px-3 py-2 rounded-md break-all select-all leading-relaxed">
+            {publicKey}
+          </code>
+          <Button variant="outline" size="sm" onClick={handleCopy} className="shrink-0 h-auto">
+            {copied ? <Check className="h-3.5 w-3.5 text-green-500" /> : <Copy className="h-3.5 w-3.5" />}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 interface ServerFormData {
   name: string;
@@ -628,6 +679,8 @@ export default function AdminServers() {
           </AlertDescription>
         </Alert>
       )}
+
+      <SshPublicKeyBanner />
 
       <Card>
         <CardHeader className="pb-4">
