@@ -366,22 +366,22 @@ export function TerminalSession({
       send(data);
     });
 
-    // Ctrl+C: copy selection to clipboard (or SIGINT if no selection)
-    // Ctrl+V: paste from clipboard into SSH session
+    // Ctrl+C: copy if text selected, otherwise SIGINT (same as Windows Terminal, VS Code)
+    // Ctrl+V: paste from clipboard
     term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
       if (e.type !== 'keydown') return true;
 
-      if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === 'c') {
         const selection = term.getSelection();
         if (selection) {
           navigator.clipboard.writeText(selection);
           term.clearSelection();
           return false;
         }
-        return true;
+        return true; // no selection → SIGINT
       }
 
-      if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === 'v') {
         e.preventDefault();
         navigator.clipboard.readText().then((text) => {
           if (text) send(text);
@@ -435,6 +435,25 @@ export function TerminalSession({
     window.setTimeout(fit, 50);
     window.setTimeout(fit, 150);
   }, [isActive, resize, setDimensions, status]);
+
+  // Auto-focus terminal on any keypress when connected
+  useEffect(() => {
+    if (status !== "connected" || !isActive) return;
+
+    xtermRef.current?.focus();
+
+    const handleKeyDown = () => {
+      const active = document.activeElement;
+      // Don't steal focus from inputs, textareas, selects, or dialogs
+      if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.tagName === 'SELECT' || active.closest('[role="dialog"]'))) {
+        return;
+      }
+      xtermRef.current?.focus();
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [status, isActive]);
 
   useEffect(() => {
     const prev = prevStatusRef.current;
