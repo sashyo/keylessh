@@ -39,8 +39,9 @@ import { useToast } from "@/hooks/use-toast";
 import { queryClient } from "@/lib/queryClient";
 import { api } from "@/lib/api";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
-import { Users, Pencil, Search, Shield, User as UserIcon, Plus, Trash2, X, Link, Unlink, Copy, Check, AlertCircle } from "lucide-react";
+import { Users, Pencil, Search, Shield, User as UserIcon, Plus, Trash2, X, Link, Unlink, Copy, Check, AlertCircle, Clock } from "lucide-react";
 import type { AdminUser } from "@shared/schema";
+import type { AccessApproval } from "@/lib/api";
 import { UpgradeBanner } from "@/components/UpgradeBanner";
 import { RefreshButton } from "@/components/RefreshButton";
 
@@ -67,6 +68,7 @@ export default function AdminUsers() {
     assignedRoles: [],
   });
   const [initialRoles, setInitialRoles] = useState<string[]>([]);
+  const [removedPendingRoles, setRemovedPendingRoles] = useState<string[]>([]);
   const [createFormData, setCreateFormData] = useState({
     username: "",
     firstName: "",
@@ -91,7 +93,7 @@ export default function AdminUsers() {
   const isFetchingUsers = useIsFetching({ queryKey: ["/api/admin/users"] }) > 0;
   const { secondsRemaining, refreshNow } = useAutoRefresh({
     intervalSeconds: 15,
-    refresh: () => Promise.all([refetchUsers(), refetchUserLimit(), refetchLicense()]),
+    refresh: () => Promise.all([refetchUsers(), refetchUserLimit(), refetchLicense(), refetchAccessApprovals()]),
     isBlocked: isFetchingUsers,
   });
 
@@ -100,7 +102,20 @@ export default function AdminUsers() {
     queryFn: api.admin.roles.listAll,
   });
 
+  const { data: accessApprovals, refetch: refetchAccessApprovals } = useQuery<AccessApproval[]>({
+    queryKey: ["/api/admin/access-approvals"],
+    queryFn: api.admin.accessApprovals.list,
+  });
+
   const allRoles = rolesData?.roles || [];
+
+  // Helper to get pending roles for a specific user
+  const getPendingRolesForUser = (username: string | undefined): string[] => {
+    if (!username || !accessApprovals) return [];
+    return accessApprovals
+      .filter((approval) => approval.username === username && !approval.commitReady)
+      .map((approval) => approval.role);
+  };
 
   const updateProfileMutation = useMutation({
     mutationFn: (data: { id: string; firstName: string; lastName: string; email: string }) =>
@@ -119,7 +134,9 @@ export default function AdminUsers() {
       api.admin.users.updateRoles(data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/admin/users"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/access-approvals"] });
       void queryClient.refetchQueries({ queryKey: ["/api/admin/users"] });
+      void queryClient.refetchQueries({ queryKey: ["/api/admin/access-approvals"] });
     },
     onError: (error: Error) => {
       toast({ title: "Failed to update user roles", description: error.message, variant: "destructive" });
@@ -147,7 +164,9 @@ export default function AdminUsers() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/admin/users"] });
       queryClient.invalidateQueries({ queryKey: ["/api/admin/license/check/user"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/access-approvals"] });
       void queryClient.refetchQueries({ queryKey: ["/api/admin/users"] });
+      void queryClient.refetchQueries({ queryKey: ["/api/admin/access-approvals"] });
       setDeletingUser(null);
       setEditingUser(null);
       toast({ title: "User deleted successfully" });
@@ -175,6 +194,7 @@ export default function AdminUsers() {
     const userRoles = Array.isArray(user.role) ? user.role : user.role ? [user.role] : [];
     setEditingUser(user);
     setInitialRoles(userRoles);
+    setRemovedPendingRoles([]);
     setFormData({
       id: user.id,
       firstName: user.firstName,
@@ -261,9 +281,31 @@ export default function AdminUsers() {
     }
   };
 
+  // Get pending roles for the currently editing user
+  const editingUserPendingRoles = editingUser ? getPendingRolesForUser(editingUser.username) : [];
+  const effectivePendingRoles = editingUserPendingRoles.filter((r) => !removedPendingRoles.includes(r));
+
+  // Newly added roles (not yet saved) should show as pending by default
+  const newlyAddedRoles = formData.assignedRoles.filter((r) => !initialRoles.includes(r));
+  // Committed (green) roles: in assignedRoles, in initialRoles, and not pending from API
+  const committedRoles = formData.assignedRoles.filter(
+    (r) => initialRoles.includes(r) && !effectivePendingRoles.includes(r)
+  );
+  // All pending roles to display: API pending + newly added
+  const allPendingDisplay = [...effectivePendingRoles, ...newlyAddedRoles];
+
+  const removePendingRole = (roleName: string) => {
+    if (editingUserPendingRoles.includes(roleName)) {
+      setRemovedPendingRoles((prev) => [...prev, roleName]);
+    }
+    if (formData.assignedRoles.includes(roleName)) {
+      unassignRole(roleName);
+    }
+  };
+
   const availableRoles = allRoles
     .map((role) => role.name)
-    .filter((roleName) => !formData.assignedRoles.includes(roleName));
+    .filter((roleName) => !formData.assignedRoles.includes(roleName) && !effectivePendingRoles.includes(roleName));
 
   const filteredUsers = users?.filter(
     (user) =>
@@ -391,24 +433,55 @@ export default function AdminUsers() {
                         </div>
                       </TableCell>
                       <TableCell className="hidden sm:table-cell">
-                        <div className="flex flex-wrap gap-1">
-                          {userRoles.length > 0 ? (
-                            <>
-                              {userRoles.slice(0, 2).map((role) => (
-                                <Badge key={role} variant="secondary" className="text-xs">
-                                  {role}
-                                </Badge>
-                              ))}
-                              {userRoles.length > 2 && (
-                                <Badge variant="outline" className="text-xs">
-                                  +{userRoles.length - 2}
-                                </Badge>
+                        {(() => {
+                          const pendingRoles = getPendingRolesForUser(user.username);
+                          // Roles only in pending (not yet in user.role)
+                          const pendingNewRoles = pendingRoles.filter((r) => !userRoles.includes(r));
+                          // All roles to display: active + pending-only (deduplicated)
+                          const allDisplayRoles = [...userRoles, ...pendingNewRoles];
+                          const totalRoles = allDisplayRoles.length;
+                          const displayLimit = 2;
+                          const displayRoles = allDisplayRoles.slice(0, displayLimit);
+                          const remainingCount = totalRoles - displayLimit;
+
+                          return (
+                            <div className="flex flex-wrap gap-1">
+                              {totalRoles > 0 ? (
+                                <>
+                                  {displayRoles.map((role) => {
+                                    // A role is pending if it has an active change request
+                                    const isPending = pendingRoles.includes(role);
+                                    return isPending ? (
+                                      <Badge
+                                        key={role}
+                                        variant="outline"
+                                        className="text-xs text-muted-foreground bg-muted/50"
+                                      >
+                                        <Clock className="h-3 w-3 mr-1" />
+                                        {role}
+                                      </Badge>
+                                    ) : (
+                                      <Badge
+                                        key={role}
+                                        variant="outline"
+                                        className="text-xs bg-green-50 text-green-700 border-green-200 dark:bg-green-950/30 dark:text-green-400 dark:border-green-800"
+                                      >
+                                        {role}
+                                      </Badge>
+                                    );
+                                  })}
+                                  {remainingCount > 0 && (
+                                    <Badge variant="outline" className="text-xs">
+                                      +{remainingCount}
+                                    </Badge>
+                                  )}
+                                </>
+                              ) : (
+                                <span className="text-xs text-muted-foreground">No roles</span>
                               )}
-                            </>
-                          ) : (
-                            <span className="text-xs text-muted-foreground">No roles</span>
-                          )}
-                        </div>
+                            </div>
+                          );
+                        })()}
                       </TableCell>
                       <TableCell className="hidden md:table-cell">
                         {user.linked ? (
@@ -526,26 +599,48 @@ export default function AdminUsers() {
                   </div>
                   <ScrollArea className="h-32">
                     <div className="p-2 space-y-1">
-                      {formData.assignedRoles.length > 0 ? (
-                        formData.assignedRoles.map((roleName) => (
-                          <div
-                            key={roleName}
-                            className="flex items-center justify-between p-2 rounded-md bg-secondary/50 text-sm"
+                      {/* Committed/active roles (green) */}
+                      {committedRoles.map((roleName) => (
+                        <div
+                          key={roleName}
+                          className="flex items-center justify-between p-2 rounded-md text-sm bg-green-50 dark:bg-green-950/30"
+                        >
+                          <span className="text-green-700 dark:text-green-400">{roleName}</span>
+                          <Button
+                            type="button"
+                            size="icon"
+                            variant="ghost"
+                            className="h-6 w-6"
+                            onClick={() => unassignRole(roleName)}
+                            disabled={!editingUser?.linked}
                           >
-                            <span>{roleName}</span>
-                            <Button
-                              type="button"
-                              size="icon"
-                              variant="ghost"
-                              className="h-6 w-6"
-                              onClick={() => unassignRole(roleName)}
-                              disabled={!editingUser?.linked}
-                            >
-                              <X className="h-3 w-3" />
-                            </Button>
+                            <X className="h-3 w-3" />
+                          </Button>
+                        </div>
+                      ))}
+                      {/* Pending roles (API pending + newly added) */}
+                      {allPendingDisplay.map((roleName) => (
+                        <div
+                          key={`pending-${roleName}`}
+                          className="flex items-center justify-between p-2 rounded-md bg-muted/50 text-sm"
+                        >
+                          <div className="flex items-center gap-2">
+                            <Clock className="h-3 w-3 text-muted-foreground" />
+                            <span className="text-muted-foreground">{roleName}</span>
                           </div>
-                        ))
-                      ) : (
+                          <Button
+                            type="button"
+                            size="icon"
+                            variant="ghost"
+                            className="h-6 w-6"
+                            onClick={() => removePendingRole(roleName)}
+                            disabled={!editingUser?.linked}
+                          >
+                            <X className="h-3 w-3" />
+                          </Button>
+                        </div>
+                      ))}
+                      {committedRoles.length === 0 && allPendingDisplay.length === 0 && (
                         <p className="text-sm text-muted-foreground text-center py-4">
                           No roles assigned
                         </p>
@@ -586,7 +681,9 @@ export default function AdminUsers() {
                         ))
                       ) : (
                         <p className="text-sm text-muted-foreground text-center py-4">
-                          All roles assigned
+                          {committedRoles.length + allPendingDisplay.length > 0
+                            ? "All roles assigned"
+                            : "No roles available"}
                         </p>
                       )}
                     </div>
