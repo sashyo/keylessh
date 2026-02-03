@@ -366,8 +366,28 @@ export function TerminalSession({
       send(data);
     });
 
-    // Ctrl+C: copy if text selected, otherwise SIGINT (same as Windows Terminal, VS Code)
+    // Intercept browser shortcuts that conflict with shell/SSH key bindings.
+    // Ctrl+C: copy if text selected, otherwise SIGINT (Windows Terminal / VS Code behaviour)
     // Ctrl+V: paste from clipboard
+    // All other Ctrl+<letter> combos that browsers steal: preventDefault and let xterm forward to SSH.
+    // Exceptions kept as browser defaults: Ctrl+F (find), Ctrl+R (reload/reverse-search is ambiguous).
+    const PREVENT_BROWSER_KEYS = new Set([
+      'w', // delete word      (browser: close tab)
+      't', // transpose chars  (browser: new tab)
+      'n', // next history     (browser: new window)
+      'k', // kill to EOL      (browser: focus address bar)
+      'l', // clear screen     (browser: focus address bar)
+      'u', // kill to BOL      (browser: view source)
+      'd', // EOF / logout     (browser: bookmark)
+      'h', // backspace        (browser: history)
+      'j', // newline          (browser: downloads)
+      'o', // operate-and-next (browser: open file)
+      'p', // prev history     (browser: print)
+      's', // XOFF             (browser: save page)
+      'q', // XON              (browser: quit in some)
+      'g', // abort / bell     (browser: find next)
+    ]);
+
     term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
       if (e.type !== 'keydown') return true;
 
@@ -387,6 +407,12 @@ export function TerminalSession({
           if (text) send(text);
         }).catch(() => {});
         return false;
+      }
+
+      // Block browser default for shell-relevant Ctrl+<letter> combos
+      if (e.ctrlKey && !e.shiftKey && !e.metaKey && PREVENT_BROWSER_KEYS.has(e.key)) {
+        e.preventDefault();
+        return true; // let xterm forward to SSH
       }
 
       return true;
