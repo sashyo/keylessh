@@ -258,11 +258,11 @@ export default function Console() {
       send(data);
     });
 
-    // Ctrl+C (copy when selection exists) and Ctrl+V (paste)
+    // Ctrl+C: copy selection to clipboard when text is selected, otherwise send SIGINT
+    // Ctrl+V paste is handled natively by the browser
     term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
       if (e.type !== 'keydown') return true;
 
-      // Ctrl+C: copy selection to clipboard, or pass through as SIGINT
       if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
         const selection = term.getSelection();
         if (selection) {
@@ -270,15 +270,6 @@ export default function Console() {
           term.clearSelection();
           return false;
         }
-        return true;
-      }
-
-      // Ctrl+V: paste from clipboard
-      if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
-        navigator.clipboard.readText().then((text) => {
-          if (text) term.paste(text);
-        }).catch(() => {});
-        return false;
       }
 
       return true;
