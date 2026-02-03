@@ -258,22 +258,22 @@ export default function Console() {
       send(data);
     });
 
-    // Ctrl+C: copy selection to clipboard (or SIGINT if no selection)
-    // Ctrl+V: paste from clipboard into SSH session
+    // Ctrl+C: copy if text selected, otherwise SIGINT (same as Windows Terminal, VS Code)
+    // Ctrl+V: paste from clipboard
     term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
       if (e.type !== 'keydown') return true;
 
-      if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === 'c') {
         const selection = term.getSelection();
         if (selection) {
           navigator.clipboard.writeText(selection);
           term.clearSelection();
           return false;
         }
-        return true;
+        return true; // no selection → SIGINT
       }
 
-      if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === 'v') {
         e.preventDefault();
         navigator.clipboard.readText().then((text) => {
           if (text) send(text);
