@@ -10,6 +10,7 @@ import { storage } from "./storage";
  */
 
 let activeConnections = 0;
+const sessionConnections = new Map<string, WebSocket>();
 
 export function setupWSBridge(httpServer: HTTPServer): void {
   const wss = new WebSocketServer({ server: httpServer, path: "/ws/tcp" });
@@ -41,6 +42,7 @@ export function setupWSBridge(httpServer: HTTPServer): void {
     const userId = payload.sub || "unknown";
     console.log(`[WSBridge] Connection: ${userId} -> ${host}:${port} (session: ${sessionId})`);
     activeConnections++;
+    if (sessionId) sessionConnections.set(sessionId, ws);
 
     // Connect to SSH server
     const tcpSocket: Socket = connect({ host, port });
@@ -82,6 +84,7 @@ export function setupWSBridge(httpServer: HTTPServer): void {
     ws.on("close", () => {
       console.log("[WSBridge] WebSocket closed");
       activeConnections--;
+      if (sessionId) sessionConnections.delete(sessionId);
       if (!tcpSocket.destroyed) {
         tcpSocket.destroy();
       }
@@ -106,4 +109,16 @@ export function setupWSBridge(httpServer: HTTPServer): void {
 
 export function getActiveConnections(): number {
   return activeConnections;
+}
+
+/**
+ * Forcibly close the WebSocket for a given session, which tears down the
+ * TCP tunnel and triggers the normal close-handler cleanup.
+ * Returns true if a connection was found and closed.
+ */
+export function terminateSession(sessionId: string): boolean {
+  const ws = sessionConnections.get(sessionId);
+  if (!ws) return false;
+  ws.close(4004, "Terminated by admin");
+  return true;
 }

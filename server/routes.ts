@@ -9,6 +9,7 @@ import { createRequire } from "module";
 import { getHomeOrkUrl, GetConfig } from "./lib/auth/tidecloakConfig";
 import { createConnection } from "net";
 import { createHash } from "crypto";
+import { terminateSession as terminateBridgeSession } from "./wsBridge";
 
 // Use createRequire for heimdall-tide (CJS module with broken ESM exports)
 // In CJS bundle __filename is available; in ESM dev mode use import.meta.url
@@ -2028,13 +2029,15 @@ export async function registerRoutes(
       try {
         const sessionId = req.params.id;
 
-        // End session in database - the tcp-bridge connection will
-        // close when the client's next action fails validation
+        // Close the live WebSocket/TCP connection (if the session is on this instance)
+        const terminated = terminateBridgeSession(sessionId);
+
+        // Mark session as completed in the database
         await storage.endSession(sessionId);
 
         res.json({
           success: true,
-          message: "Session marked as ended",
+          terminated,
         });
       } catch (error) {
         res.status(500).json({ message: "Failed to terminate session" });
