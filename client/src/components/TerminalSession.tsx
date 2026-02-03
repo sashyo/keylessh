@@ -366,6 +366,32 @@ export function TerminalSession({
       send(data);
     });
 
+    // Ctrl+C (copy when selection exists) and Ctrl+V (paste)
+    term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
+      if (e.type !== 'keydown') return true;
+
+      // Ctrl+C: copy selection to clipboard, or pass through as SIGINT
+      if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
+        const selection = term.getSelection();
+        if (selection) {
+          navigator.clipboard.writeText(selection);
+          term.clearSelection();
+          return false; // prevent default (don't send SIGINT)
+        }
+        return true; // no selection, let SIGINT pass through
+      }
+
+      // Ctrl+V: paste from clipboard
+      if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
+        navigator.clipboard.readText().then((text) => {
+          if (text) term.paste(text);
+        }).catch(() => {});
+        return false; // prevent default
+      }
+
+      return true;
+    });
+
     const handleResize = () => {
       fitNow();
     };
