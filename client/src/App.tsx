@@ -25,7 +25,6 @@ import AdminRecordings from "@/pages/AdminRecordings";
 import AdminBridges from "@/pages/AdminBridges";
 import NotFound from "@/pages/not-found";
 import { Loader2, Terminal } from "lucide-react";
-import type { ReactNode } from "react";
 
 function LoadingScreen({ showRetry = false }: { showRetry?: boolean }) {
   const handleClearAndRetry = () => {
@@ -65,10 +64,35 @@ function LoadingScreen({ showRetry = false }: { showRetry?: boolean }) {
   );
 }
 
-function ProtectedRoute({ children }: { children: ReactNode }) {
-  const { isAuthenticated, isLoading } = useAuth();
+/**
+ * Legacy redirect: /app/console/:serverId?user=xxx → /app/console?serverId=...&user=...
+ * Already inside AuthenticatedApp so auth is guaranteed.
+ */
+function ConsoleLegacyRedirect() {
+  const [, setLocation] = useLocation();
+  const params = useParams<{ serverId: string }>();
+  const search = useSearch();
+
+  useEffect(() => {
+    const sp = new URLSearchParams(search);
+    const user = sp.get("user") || "root";
+    setLocation(`/app/console?serverId=${encodeURIComponent(params.serverId)}&user=${encodeURIComponent(user)}`);
+  }, [setLocation, params.serverId, search]);
+
+  return null;
+}
+
+/**
+ * All authenticated routes share a single AppLayout.
+ * ConsoleWorkspace is always mounted (hidden when not on the console page)
+ * so SSH connections persist across page navigation.
+ */
+function AuthenticatedApp() {
+  const { isAuthenticated, isLoading, hasRole } = useAuth();
+  const [location] = useLocation();
   const [, setLocation] = useLocation();
   const [showRetry, setShowRetry] = useState(false);
+  const isAdmin = hasRole("admin");
 
   useEffect(() => {
     if (!isLoading && !isAuthenticated) {
@@ -93,84 +117,63 @@ function ProtectedRoute({ children }: { children: ReactNode }) {
     return <LoadingScreen />;
   }
 
-  return <AppLayout>{children}</AppLayout>;
-}
-
-function AdminRoute({ children }: { children: ReactNode }) {
-  const { isAuthenticated, isLoading, hasRole } = useAuth();
-  const [, setLocation] = useLocation();
-
-  useEffect(() => {
-    if (!isLoading) {
-      if (!isAuthenticated) {
-        setLocation("/login");
-      } else if (!hasRole("admin")) {
-        setLocation("/app");
-      }
-    }
-  }, [isLoading, isAuthenticated, hasRole, setLocation]);
-
-  if (isLoading) {
-    return <LoadingScreen />;
-  }
-
-  if (!isAuthenticated || !hasRole("admin")) {
-    return <LoadingScreen />;
-  }
-
-  return <AppLayout>{children}</AppLayout>;
-}
-
-function ConsoleLegacyRedirectRoute() {
-  const { isAuthenticated, isLoading } = useAuth();
-  const [, setLocation] = useLocation();
-  const params = useParams<{ serverId: string }>();
-  const search = useSearch();
-
-  useEffect(() => {
-    if (!isLoading && !isAuthenticated) {
-      setLocation("/login");
-      return;
-    }
-    if (!isLoading && isAuthenticated) {
-      const sp = new URLSearchParams(search);
-      const user = sp.get("user") || "root";
-      setLocation(`/app/console?serverId=${encodeURIComponent(params.serverId)}&user=${encodeURIComponent(user)}`);
-    }
-  }, [isLoading, isAuthenticated, setLocation]);
-
-  if (isLoading) {
-    return <LoadingScreen />;
-  }
-
-  if (!isAuthenticated) {
-    return <LoadingScreen />;
-  }
-
-  return <LoadingScreen />;
-}
-
-function ConsoleWorkspaceRoute() {
-  const { isAuthenticated, isLoading } = useAuth();
-  const [, setLocation] = useLocation();
-
-  useEffect(() => {
-    if (!isLoading && !isAuthenticated) {
-      setLocation("/login");
-    }
-  }, [isLoading, isAuthenticated, setLocation]);
-
-  if (isLoading) {
-    return <LoadingScreen />;
-  }
-
-  if (!isAuthenticated) {
-    return <LoadingScreen />;
-  }
+  const isConsolePage = location === "/app/console";
 
   return (
     <AppLayout>
-      <ConsoleWorkspace />
+      {/* ConsoleWorkspace is always mounted so SSH connections survive page navigation.
+          Hidden via CSS when the user is on a different page. The existing ResizeObserver
+          in TerminalSession automatically refits the terminal when it becomes visible again. */}
+      <div className={isConsolePage ? "h-full" : "hidden"}>
+        <ConsoleWorkspace />
+      </div>
+      {!isConsolePage && (
+        <Switch>
+          <Route path="/">
+            <Redirect to="/app" />
+          </Route>
+          <Route path="/app">
+            <Dashboard />
+          </Route>
+          <Route path="/app/console/:serverId">
+            <ConsoleLegacyRedirect />
+          </Route>
+          <Route path="/admin">
+            {isAdmin ? <AdminDashboard /> : <Redirect to="/app" />}
+          </Route>
+          <Route path="/admin/servers">
+            {isAdmin ? <AdminServers /> : <Redirect to="/app" />}
+          </Route>
+          <Route path="/admin/bridges">
+            {isAdmin ? <AdminBridges /> : <Redirect to="/app" />}
+          </Route>
+          <Route path="/admin/users">
+            {isAdmin ? <AdminUsers /> : <Redirect to="/app" />}
+          </Route>
+          <Route path="/admin/roles">
+            {isAdmin ? <AdminRoles /> : <Redirect to="/app" />}
+          </Route>
+          <Route path="/admin/policy-templates">
+            {isAdmin ? <AdminPolicyTemplates /> : <Redirect to="/app" />}
+          </Route>
+          <Route path="/admin/approvals">
+            {isAdmin ? <AdminApprovals /> : <Redirect to="/app" />}
+          </Route>
+          <Route path="/admin/sessions">
+            {isAdmin ? <AdminSessions /> : <Redirect to="/app" />}
+          </Route>
+          <Route path="/admin/logs">
+            {isAdmin ? <AdminLogs /> : <Redirect to="/app" />}
+          </Route>
+          <Route path="/admin/license">
+            {isAdmin ? <AdminLicense /> : <Redirect to="/app" />}
+          </Route>
+          <Route path="/admin/recordings">
+            {isAdmin ? <AdminRecordings /> : <Redirect to="/app" />}
+          </Route>
+          <Route component={NotFound} />
+        </Switch>
+      )}
     </AppLayout>
   );
 }
@@ -178,94 +181,12 @@ function ConsoleWorkspaceRoute() {
 function Router() {
   return (
     <Switch>
-      <Route path="/">
-        <Redirect to="/app" />
-      </Route>
-
       <Route path="/login" component={Login} />
       <Route path="/auth/redirect" component={AuthRedirect} />
-      
-      <Route path="/app">
-        <ProtectedRoute>
-          <Dashboard />
-        </ProtectedRoute>
+      {/* All other routes require authentication */}
+      <Route>
+        <AuthenticatedApp />
       </Route>
-      
-      <Route path="/app/console/:serverId">
-        <ConsoleLegacyRedirectRoute />
-      </Route>
-
-      <Route path="/app/console">
-        <ConsoleWorkspaceRoute />
-      </Route>
-      
-      <Route path="/admin">
-        <AdminRoute>
-          <AdminDashboard />
-        </AdminRoute>
-      </Route>
-      
-      <Route path="/admin/servers">
-        <AdminRoute>
-          <AdminServers />
-        </AdminRoute>
-      </Route>
-
-      <Route path="/admin/bridges">
-        <AdminRoute>
-          <AdminBridges />
-        </AdminRoute>
-      </Route>
-
-      <Route path="/admin/users">
-        <AdminRoute>
-          <AdminUsers />
-        </AdminRoute>
-      </Route>
-
-      <Route path="/admin/roles">
-        <AdminRoute>
-          <AdminRoles />
-        </AdminRoute>
-      </Route>
-
-      <Route path="/admin/policy-templates">
-        <AdminRoute>
-          <AdminPolicyTemplates />
-        </AdminRoute>
-      </Route>
-
-      <Route path="/admin/approvals">
-        <AdminRoute>
-          <AdminApprovals />
-        </AdminRoute>
-      </Route>
-
-      <Route path="/admin/sessions">
-        <AdminRoute>
-          <AdminSessions />
-        </AdminRoute>
-      </Route>
-
-      <Route path="/admin/logs">
-        <AdminRoute>
-          <AdminLogs />
-        </AdminRoute>
-      </Route>
-
-      <Route path="/admin/license">
-        <AdminRoute>
-          <AdminLicense />
-        </AdminRoute>
-      </Route>
-
-      <Route path="/admin/recordings">
-        <AdminRoute>
-          <AdminRecordings />
-        </AdminRoute>
-      </Route>
-
-      <Route component={NotFound} />
     </Switch>
   );
 }

@@ -2,6 +2,7 @@ import { Server as HTTPServer } from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import { Socket, connect } from "net";
 import { verifyTideCloakToken } from "./lib/auth/tideJWT";
+import { storage } from "./storage";
 
 /**
  * Embedded WebSocket-to-TCP bridge for local development.
@@ -83,6 +84,12 @@ export function setupWSBridge(httpServer: HTTPServer): void {
       activeConnections--;
       if (!tcpSocket.destroyed) {
         tcpSocket.destroy();
+      }
+      // End the session record in the database so it doesn't appear as a ghost session
+      if (sessionId) {
+        storage.endSession(sessionId).catch((err) => {
+          console.log(`[WSBridge] Failed to end session ${sessionId}:`, err);
+        });
       }
     });
 

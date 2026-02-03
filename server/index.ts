@@ -5,6 +5,7 @@ import { serveStatic } from "./static";
 import { createServer } from "http";
 import { log } from "./logger";
 import { setupWSBridge } from "./wsBridge";
+import { storage } from "./storage";
 
 const app = express();
 const httpServer = createServer(app);
@@ -76,6 +77,18 @@ app.use((req, res, next) => {
     const { setupVite } = await import("./vite");
     await setupVite(httpServer, app);
   }
+
+  // Clean up any stale sessions left from previous crashes/restarts
+  const STALE_SESSION_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
+  const STALE_SESSION_CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // every 5 minutes
+  storage.cleanupStaleSessions(STALE_SESSION_MAX_AGE_MS).then((count) => {
+    if (count > 0) log(`Cleaned up ${count} stale session(s) from previous run`);
+  }).catch(() => {});
+  setInterval(() => {
+    storage.cleanupStaleSessions(STALE_SESSION_MAX_AGE_MS).then((count) => {
+      if (count > 0) log(`Cleaned up ${count} stale session(s)`);
+    }).catch(() => {});
+  }, STALE_SESSION_CLEANUP_INTERVAL_MS);
 
   // ALWAYS serve the app on the port specified in the environment variable PORT
   // Other ports are firewalled. Default to 3000 if not specified.

@@ -1,6 +1,6 @@
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
-import { eq, desc, inArray } from "drizzle-orm";
+import { eq, desc, inArray, and, lt } from "drizzle-orm";
 import { randomUUID } from "crypto";
 import { mkdirSync, existsSync } from "fs";
 import { dirname } from "path";
@@ -575,6 +575,21 @@ export class SQLiteStorage implements IStorage {
       .where(eq(sessions.id, id))
       .run();
     return result.changes > 0;
+  }
+
+  /**
+   * Clean up stale sessions that have been "active" for longer than the given
+   * threshold. This catches ghost sessions left behind when browsers crash or
+   * network drops prevent normal cleanup.
+   */
+  async cleanupStaleSessions(maxAgeMs: number = 24 * 60 * 60 * 1000): Promise<number> {
+    const cutoff = new Date(Date.now() - maxAgeMs);
+    const result = db
+      .update(sessions)
+      .set({ status: "completed", endedAt: new Date() })
+      .where(and(eq(sessions.status, "active"), lt(sessions.startedAt, cutoff)))
+      .run();
+    return result.changes;
   }
 }
 

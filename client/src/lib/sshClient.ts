@@ -350,6 +350,7 @@ export class BrowserSSHClient {
   private bridgeUrl: string | null = null;
   private recordingEnabled = false;
   private pendingRecordingEvents: Array<{ eventType: "i" | "o"; data: string; timestamp: number }> = [];
+  private boundBeforeUnload: (() => void) | null = null;
 
   constructor(options: SSHClientOptions) {
     this.options = options;
@@ -463,6 +464,9 @@ export class BrowserSSHClient {
       // Create session record first so the WS bridge can be associated with a session.
       this.sessionId = await this.createSessionRecord();
       this.sessionEnded = false;
+
+      // Register browser close/navigate handlers to end session on unexpected exit
+      this.registerUnloadHandlers();
 
       const keyPair = auth.keyPair;
 
@@ -635,6 +639,44 @@ export class BrowserSSHClient {
     return session.id;
   }
 
+  private registerUnloadHandlers(): void {
+    this.unregisterUnloadHandlers();
+    this.boundBeforeUnload = () => {
+      this.endSessionBeacon();
+    };
+    window.addEventListener("beforeunload", this.boundBeforeUnload);
+    window.addEventListener("pagehide", this.boundBeforeUnload);
+  }
+
+  private unregisterUnloadHandlers(): void {
+    if (this.boundBeforeUnload) {
+      window.removeEventListener("beforeunload", this.boundBeforeUnload);
+      window.removeEventListener("pagehide", this.boundBeforeUnload);
+      this.boundBeforeUnload = null;
+    }
+  }
+
+  /**
+   * Best-effort session end using keepalive fetch, suitable for beforeunload/pagehide.
+   */
+  private endSessionBeacon(): void {
+    if (!this.sessionId || this.sessionEnded) return;
+    this.sessionEnded = true;
+
+    const token = localStorage.getItem("access_token");
+    if (!token) return;
+
+    try {
+      fetch(`/api/sessions/${this.sessionId}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+        keepalive: true,
+      }).catch(() => {});
+    } catch {
+      // ignore - best effort
+    }
+  }
+
   private async endSessionRecordOnce(): Promise<void> {
     if (!this.sessionId || this.sessionEnded) return;
     this.sessionEnded = true;
@@ -650,7 +692,17 @@ export class BrowserSSHClient {
         },
       });
     } catch {
-      // ignore
+      // Retry once on failure
+      try {
+        await fetch(`/api/sessions/${this.sessionId}`, {
+          method: "DELETE",
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        });
+      } catch {
+        // ignore after retry
+      }
     }
   }
 
@@ -1029,6 +1081,9 @@ export class BrowserSSHClient {
   private cleanup(): void {
     if (this.isCleaningUp) return;
     this.isCleaningUp = true;
+
+    // Unregister browser close handlers
+    this.unregisterUnloadHandlers();
 
     // End recording if active
     void this.endRecording();
