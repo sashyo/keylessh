@@ -274,6 +274,7 @@ export default function Console() {
       }
 
       if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
+        e.preventDefault();
         navigator.clipboard.readText().then((text) => {
           if (text) send(text);
         }).catch(() => {});
