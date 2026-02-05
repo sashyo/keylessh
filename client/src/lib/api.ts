@@ -10,6 +10,9 @@ import type {
   TemplateParameter,
   Bridge,
   InsertBridge,
+  Organization,
+  OrganizationUser,
+  OrgRole,
 } from "@shared/schema";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
@@ -419,11 +422,45 @@ export const api = {
           body: JSON.stringify(params),
         }),
     },
+    organizations: {
+      list: () => apiRequest<Organization[]>("/api/admin/organizations"),
+      get: (id: string) => apiRequest<Organization>(`/api/admin/organizations/${id}`),
+      create: (data: { name: string; slug: string }) =>
+        apiRequest<Organization>("/api/admin/organizations", {
+          method: "POST",
+          body: JSON.stringify(data),
+        }),
+      update: (id: string, data: { name?: string; slug?: string }) =>
+        apiRequest<Organization>(`/api/admin/organizations/${id}`, {
+          method: "PATCH",
+          body: JSON.stringify(data),
+        }),
+      delete: (id: string) =>
+        apiRequest<{ success: boolean }>(`/api/admin/organizations/${id}`, {
+          method: "DELETE",
+        }),
+      listUsers: (orgId: string) =>
+        apiRequest<OrganizationUser[]>(`/api/admin/organizations/${orgId}/users`),
+      addUser: (orgId: string, userId: string, role?: OrgRole) =>
+        apiRequest<OrganizationUser>(`/api/admin/organizations/${orgId}/users`, {
+          method: "POST",
+          body: JSON.stringify({ userId, role }),
+        }),
+      removeUser: (orgId: string, userId: string) =>
+        apiRequest<{ success: boolean }>(`/api/admin/organizations/${orgId}/users/${userId}`, {
+          method: "DELETE",
+        }),
+      updateUserRole: (orgId: string, userId: string, role: OrgRole) =>
+        apiRequest<OrganizationUser>(`/api/admin/organizations/${orgId}/users/${userId}`, {
+          method: "PATCH",
+          body: JSON.stringify({ role }),
+        }),
+    },
   },
 };
 
 // Re-export types for convenience
-export type { PolicyTemplate, InsertPolicyTemplate, TemplateParameter, Bridge, InsertBridge };
+export type { PolicyTemplate, InsertPolicyTemplate, TemplateParameter, Bridge, InsertBridge, Organization, OrganizationUser, OrgRole };
 
 // SSH Policy Configuration for role creation
 export interface SshPolicyConfig {

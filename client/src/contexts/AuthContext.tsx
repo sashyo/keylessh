@@ -68,6 +68,8 @@ function TideCloakAuthBridge({ children, authConfig }: { children: ReactNode; au
     accessToken: null,
     isAuthenticated: false,
     isLoading: true,
+    organizationId: null,
+    orgRole: null,
   });
   const [vuid, setVuid] = useState<string>("");
   const [initError, setInitError] = useState<Error | null>(null);
@@ -90,6 +92,7 @@ function TideCloakAuthBridge({ children, authConfig }: { children: ReactNode; au
 
     try {
       if (tidecloak.authenticated) {
+        const isAdmin = tidecloak.hasClientRole("tide-realm-admin", "realm-management");
         const user: OIDCUser = {
           id: tidecloak.getValueFromIdToken("sub") || "",
           username:
@@ -97,8 +100,10 @@ function TideCloakAuthBridge({ children, authConfig }: { children: ReactNode; au
             tidecloak.getValueFromIdToken("name") ||
             "",
           email: tidecloak.getValueFromIdToken("email") || "",
-          role: tidecloak.hasClientRole("tide-realm-admin", "realm-management") ? "admin" : "user",
+          role: isAdmin ? "admin" : "user",
           allowedServers: (tidecloak.getValueFromIdToken("allowed_servers") as string[]) || [],
+          organizationId: (tidecloak.getValueFromIdToken("organization_id") as string) || "default",
+          orgRole: ((tidecloak.getValueFromIdToken("org_role") as string) || (isAdmin ? "org-admin" : "user")) as OIDCUser["orgRole"],
         };
 
         if (tidecloak.token) {
@@ -113,6 +118,8 @@ function TideCloakAuthBridge({ children, authConfig }: { children: ReactNode; au
           accessToken: tidecloak.token || null,
           isAuthenticated: true,
           isLoading: false,
+          organizationId: user.organizationId,
+          orgRole: user.orgRole,
         });
         return;
       }
@@ -124,6 +131,8 @@ function TideCloakAuthBridge({ children, authConfig }: { children: ReactNode; au
         accessToken: null,
         isAuthenticated: false,
         isLoading: false,
+        organizationId: null,
+        orgRole: null,
       });
     } catch (err) {
       console.error("Auth sync error:", err);
@@ -134,6 +143,8 @@ function TideCloakAuthBridge({ children, authConfig }: { children: ReactNode; au
         accessToken: null,
         isAuthenticated: false,
         isLoading: false,
+        organizationId: null,
+        orgRole: null,
       });
     }
   }, [tidecloak.isInitializing, tidecloak.authenticated, tidecloak.token, tidecloak]);

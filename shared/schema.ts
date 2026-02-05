@@ -2,6 +2,24 @@ import { sqliteTable, text, integer } from "drizzle-orm/sqlite-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
+// Organizations table
+export const organizations = sqliteTable("organizations", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  slug: text("slug").notNull().unique(),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp" }),
+});
+
+// Organization membership (user ↔ org with role)
+export const organizationUsers = sqliteTable("organization_users", {
+  id: text("id").primaryKey(),
+  organizationId: text("organization_id").notNull(),
+  userId: text("user_id").notNull(),
+  role: text("role").notNull().default("user"), // "global-admin" | "org-admin" | "user"
+  joinedAt: integer("joined_at", { mode: "timestamp" }).notNull(),
+});
+
 export const users = sqliteTable("users", {
   id: text("id").primaryKey(),
   username: text("username").notNull().unique(),
@@ -19,6 +37,7 @@ export const bridges = sqliteTable("bridges", {
   enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
   isDefault: integer("is_default", { mode: "boolean" }).notNull().default(false),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+  organizationId: text("organization_id").notNull().default("default"),
 });
 
 export const servers = sqliteTable("servers", {
@@ -35,6 +54,7 @@ export const servers = sqliteTable("servers", {
   recordedUsers: text("recorded_users", { mode: "json" }).$type<string[]>().notNull().default([]), // Empty = all users when enabled
   // Bridge association - null means use default/embedded bridge
   bridgeId: text("bridge_id"),
+  organizationId: text("organization_id").notNull().default("default"),
 });
 
 export const sessions = sqliteTable("sessions", {
@@ -48,6 +68,7 @@ export const sessions = sqliteTable("sessions", {
   startedAt: integer("started_at", { mode: "timestamp" }).notNull(),
   endedAt: integer("ended_at", { mode: "timestamp" }),
   recordingId: text("recording_id"), // Link to recording if session was recorded
+  organizationId: text("organization_id").notNull().default("default"),
 });
 
 // File operations log - tracks SFTP/SCP file transfers
@@ -66,6 +87,7 @@ export const fileOperations = sqliteTable("file_operations", {
   status: text("status").notNull(), // "success" | "error"
   errorMessage: text("error_message"),
   timestamp: integer("timestamp", { mode: "timestamp" }).notNull(),
+  organizationId: text("organization_id").notNull().default("default"),
 });
 
 // Session recordings table - stores terminal I/O for playback
@@ -87,6 +109,7 @@ export const recordings = sqliteTable("recordings", {
   // Searchable text content (all output concatenated)
   textContent: text("text_content").notNull().default(""),
   fileSize: integer("file_size").notNull().default(0), // Size in bytes
+  organizationId: text("organization_id").notNull().default("default"),
 });
 
 // Subscription tier definitions
@@ -111,6 +134,7 @@ export const subscriptions = sqliteTable("subscriptions", {
   cancelAtPeriodEnd: integer("cancel_at_period_end", { mode: "boolean" }).default(false),
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at"),
+  organizationId: text("organization_id").notNull().default("default"),
 });
 
 // Billing history table
@@ -124,6 +148,7 @@ export const billingHistory = sqliteTable("billing_history", {
   invoicePdf: text("invoice_pdf"),
   description: text("description"),
   createdAt: integer("created_at").notNull(),
+  organizationId: text("organization_id").notNull().default("default"),
 });
 
 export const insertUserSchema = createInsertSchema(users).omit({ id: true });
@@ -132,6 +157,8 @@ export const insertSessionSchema = createInsertSchema(sessions).omit({ id: true,
 export const insertSubscriptionSchema = createInsertSchema(subscriptions).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertBillingHistorySchema = createInsertSchema(billingHistory).omit({ id: true, createdAt: true });
 export const insertBridgeSchema = createInsertSchema(bridges).omit({ id: true, createdAt: true });
+export const insertOrganizationSchema = createInsertSchema(organizations).omit({ id: true, createdAt: true, updatedAt: true });
+export const insertOrganizationUserSchema = createInsertSchema(organizationUsers).omit({ id: true, joinedAt: true });
 
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type InsertServer = z.infer<typeof insertServerSchema>;
@@ -139,6 +166,8 @@ export type InsertSession = z.infer<typeof insertSessionSchema>;
 export type InsertSubscription = z.infer<typeof insertSubscriptionSchema>;
 export type InsertBillingHistory = z.infer<typeof insertBillingHistorySchema>;
 export type InsertBridge = z.infer<typeof insertBridgeSchema>;
+export type InsertOrganization = z.infer<typeof insertOrganizationSchema>;
+export type InsertOrganizationUser = z.infer<typeof insertOrganizationUserSchema>;
 
 export type User = typeof users.$inferSelect;
 export type Server = typeof servers.$inferSelect;
@@ -147,6 +176,8 @@ export type FileOperation = typeof fileOperations.$inferSelect;
 export type Subscription = typeof subscriptions.$inferSelect;
 export type BillingHistory = typeof billingHistory.$inferSelect;
 export type Bridge = typeof bridges.$inferSelect;
+export type Organization = typeof organizations.$inferSelect;
+export type OrganizationUser = typeof organizationUsers.$inferSelect;
 
 // File operation types for API
 export type FileOperationType = "upload" | "download" | "delete" | "mkdir" | "rename" | "chmod";
@@ -191,6 +222,7 @@ export interface LimitCheck {
 }
 
 export type UserRole = "user" | "admin";
+export type OrgRole = "global-admin" | "org-admin" | "user";
 
 export interface OIDCUser {
   id: string;
@@ -198,6 +230,8 @@ export interface OIDCUser {
   email: string;
   role: UserRole;
   allowedServers: string[];
+  organizationId: string;
+  orgRole: OrgRole;
 }
 
 export interface AuthState {
@@ -205,6 +239,8 @@ export interface AuthState {
   accessToken: string | null;
   isAuthenticated: boolean;
   isLoading: boolean;
+  organizationId: string | null;
+  orgRole: OrgRole | null;
 }
 
 export type ServerStatus = "online" | "offline" | "unknown";

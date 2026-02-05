@@ -13,6 +13,8 @@ import {
   subscriptions,
   billingHistory,
   bridges,
+  organizations,
+  organizationUsers,
   subscriptionTiers,
   type User,
   type InsertUser,
@@ -33,12 +35,18 @@ import {
   type InsertBillingHistory,
   type Bridge,
   type InsertBridge,
+  type Organization,
+  type OrganizationUser,
+  type InsertOrganization,
+  type InsertOrganizationUser,
   type SubscriptionTier,
   type LicenseInfo,
   type LimitCheck,
+  type OrgRole,
 } from "@shared/schema";
 import { getAdminPolicy } from "./lib/tidecloakApi";
 import { isStripeConfigured } from "./lib/stripe";
+import { DEFAULT_ORG_ID, DEFAULT_ORG_NAME, DEFAULT_ORG_SLUG } from "./config";
 import { createRequire } from "module";
 
 // Use createRequire for heimdall-tide (CJS module with broken ESM exports)
@@ -64,17 +72,17 @@ export interface IStorage {
   getUsers(): Promise<User[]>;
   updateUser(id: string, data: Partial<User>): Promise<User | undefined>;
 
-  getServers(): Promise<Server[]>;
+  getServers(orgId: string): Promise<Server[]>;
   getServer(id: string): Promise<Server | undefined>;
   getServersByIds(ids: string[]): Promise<Server[]>;
-  createServer(server: InsertServer): Promise<Server>;
+  createServer(orgId: string, server: InsertServer): Promise<Server>;
   updateServer(id: string, data: Partial<Server>): Promise<Server | undefined>;
   deleteServer(id: string): Promise<boolean>;
 
-  getSessions(): Promise<Session[]>;
+  getSessions(orgId: string): Promise<Session[]>;
   getSession(id: string): Promise<Session | undefined>;
   getSessionsByUserId(userId: string): Promise<Session[]>;
-  createSession(session: InsertSession): Promise<Session>;
+  createSession(orgId: string, session: InsertSession): Promise<Session>;
   updateSession(id: string, data: Partial<Session>): Promise<Session | undefined>;
   endSession(id: string): Promise<boolean>;
 }
@@ -310,10 +318,33 @@ sqlite.exec(`
     description TEXT,
     enabled INTEGER NOT NULL DEFAULT 1,
     is_default INTEGER NOT NULL DEFAULT 0,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    organization_id TEXT NOT NULL DEFAULT 'default'
   );
   CREATE INDEX IF NOT EXISTS idx_bridges_enabled ON bridges(enabled);
   CREATE INDEX IF NOT EXISTS idx_bridges_default ON bridges(is_default);
+  CREATE INDEX IF NOT EXISTS idx_bridges_org ON bridges(organization_id);
+
+  -- Organizations (multi-tenancy)
+  CREATE TABLE IF NOT EXISTS organizations (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    slug TEXT NOT NULL UNIQUE,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER
+  );
+
+  -- Organization user membership
+  CREATE TABLE IF NOT EXISTS organization_users (
+    id TEXT PRIMARY KEY,
+    organization_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'user',
+    joined_at INTEGER NOT NULL,
+    UNIQUE(organization_id, user_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_org_users_org ON organization_users(organization_id);
+  CREATE INDEX IF NOT EXISTS idx_org_users_user ON organization_users(user_id);
 `);
 
 // Lightweight migrations for existing DBs (CREATE TABLE IF NOT EXISTS doesn't alter).
@@ -420,6 +451,40 @@ try {
   // Ignore migration errors; queries will surface issues.
 }
 
+// Migration: Add organization_id column to all tenant-scoped tables
+const orgMigrationTables = [
+  "servers", "sessions", "bridges", "recordings",
+  "file_operations", "subscriptions", "billing_history",
+  "pending_approvals", "ssh_policies", "pending_ssh_policies", "policy_templates",
+];
+for (const table of orgMigrationTables) {
+  try {
+    const cols = sqlite
+      .prepare(`PRAGMA table_info(${table})`)
+      .all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === "organization_id")) {
+      sqlite.prepare(`ALTER TABLE ${table} ADD COLUMN organization_id TEXT NOT NULL DEFAULT 'default'`).run();
+      sqlite.prepare(`CREATE INDEX IF NOT EXISTS idx_${table}_org ON ${table}(organization_id)`).run();
+    }
+  } catch {
+    // Ignore migration errors; queries will surface issues.
+  }
+}
+
+// Seed: Create default organization if it doesn't exist
+try {
+  const existingOrg = sqlite.prepare(`SELECT id FROM organizations WHERE id = ?`).get(DEFAULT_ORG_ID);
+  if (!existingOrg) {
+    const now = Math.floor(Date.now() / 1000);
+    sqlite.prepare(`
+      INSERT INTO organizations (id, name, slug, created_at) VALUES (?, ?, ?, ?)
+    `).run(DEFAULT_ORG_ID, DEFAULT_ORG_NAME, DEFAULT_ORG_SLUG, now);
+    console.log(`[Storage] Created default organization: ${DEFAULT_ORG_NAME}`);
+  }
+} catch (err) {
+  console.error(`[Storage] Failed to seed default organization: ${err}`);
+}
+
 // Seed: Create default bridge from BRIDGE_URL env var if no bridges exist
 try {
   const bridgeUrl = process.env.BRIDGE_URL;
@@ -476,8 +541,8 @@ export class SQLiteStorage implements IStorage {
     return updated;
   }
 
-  async getServers(): Promise<Server[]> {
-    return db.select().from(servers).all();
+  async getServers(orgId: string): Promise<Server[]> {
+    return db.select().from(servers).where(eq(servers.organizationId, orgId)).all();
   }
 
   async getServer(id: string): Promise<Server | undefined> {
@@ -490,7 +555,7 @@ export class SQLiteStorage implements IStorage {
     return db.select().from(servers).where(inArray(servers.id, ids)).all();
   }
 
-  async createServer(insertServer: InsertServer): Promise<Server> {
+  async createServer(orgId: string, insertServer: InsertServer): Promise<Server> {
     const id = randomUUID();
     const server: Server = {
       id,
@@ -504,6 +569,7 @@ export class SQLiteStorage implements IStorage {
       recordingEnabled: insertServer.recordingEnabled ?? false,
       recordedUsers: (insertServer.recordedUsers ?? []) as string[],
       bridgeId: insertServer.bridgeId ?? null,
+      organizationId: orgId,
     };
     db.insert(servers).values(server).run();
     return server;
@@ -523,8 +589,8 @@ export class SQLiteStorage implements IStorage {
     return result.changes > 0;
   }
 
-  async getSessions(): Promise<Session[]> {
-    return db.select().from(sessions).orderBy(desc(sessions.startedAt)).all();
+  async getSessions(orgId: string): Promise<Session[]> {
+    return db.select().from(sessions).where(eq(sessions.organizationId, orgId)).orderBy(desc(sessions.startedAt)).all();
   }
 
   async getSession(id: string): Promise<Session | undefined> {
@@ -541,7 +607,7 @@ export class SQLiteStorage implements IStorage {
       .all();
   }
 
-  async createSession(insertSession: InsertSession): Promise<Session> {
+  async createSession(orgId: string, insertSession: InsertSession): Promise<Session> {
     const id = randomUUID();
     const session: Session = {
       id,
@@ -554,6 +620,7 @@ export class SQLiteStorage implements IStorage {
       startedAt: new Date(),
       endedAt: null,
       recordingId: insertSession.recordingId ?? null,
+      organizationId: orgId,
     };
     db.insert(sessions).values(session).run();
     return session;
@@ -633,10 +700,10 @@ export interface AccessChangeLog {
 // Approval storage class
 export class ApprovalStorage {
   // Get all pending approvals with their decisions
-  async getPendingApprovals(): Promise<PendingApproval[]> {
+  async getPendingApprovals(orgId: string): Promise<PendingApproval[]> {
     const rows = sqlite.prepare(`
-      SELECT * FROM pending_approvals WHERE status = 'pending' ORDER BY created_at DESC
-    `).all() as any[];
+      SELECT * FROM pending_approvals WHERE status = 'pending' AND organization_id = ? ORDER BY created_at DESC
+    `).all(orgId) as any[];
 
     return Promise.all(rows.map(async (row) => {
       const approvers = sqlite.prepare(`
@@ -665,6 +732,7 @@ export class ApprovalStorage {
 
   // Create a new approval request
   async createApproval(
+    orgId: string,
     type: ApprovalType,
     requestedBy: string,
     data: any,
@@ -673,9 +741,9 @@ export class ApprovalStorage {
   ): Promise<string> {
     const id = randomUUID();
     sqlite.prepare(`
-      INSERT INTO pending_approvals (id, type, requested_by, target_user_id, target_user_email, data, status)
-      VALUES (?, ?, ?, ?, ?, ?, 'pending')
-    `).run(id, type, requestedBy, targetUserId, targetUserEmail, JSON.stringify(data));
+      INSERT INTO pending_approvals (id, type, requested_by, target_user_id, target_user_email, data, status, organization_id)
+      VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
+    `).run(id, type, requestedBy, targetUserId, targetUserEmail, JSON.stringify(data), orgId);
 
     // Log the creation
     await this.addAccessChangeLog('created', id, requestedBy, targetUserEmail, JSON.stringify(data));
@@ -903,10 +971,10 @@ export class PolicyStorage {
   }
 
   // Get all policies
-  async getAllPolicies(): Promise<SshPolicy[]> {
+  async getAllPolicies(orgId: string): Promise<SshPolicy[]> {
     const rows = sqlite.prepare(`
-      SELECT * FROM ssh_policies ORDER BY created_at DESC
-    `).all() as any[];
+      SELECT * FROM ssh_policies WHERE organization_id = ? ORDER BY created_at DESC
+    `).all(orgId) as any[];
 
     return rows.map(row => ({
       roleId: row.role_id,
@@ -1019,7 +1087,7 @@ export class PendingPolicyStorage {
 
   // Get all pending policies (not yet committed or cancelled)
   // For commit-ready policies, adds the admin policy to the request (required for Ork commit)
-  async getAllPendingPolicies(): Promise<PendingSshPolicy[]> {
+  async getAllPendingPolicies(orgId: string): Promise<PendingSshPolicy[]> {
     const rows = sqlite.prepare(`
       SELECT p.*,
         (SELECT COUNT(*) FROM ssh_policy_decisions d WHERE d.policy_request_id = p.id AND d.decision = 1) as approval_count,
@@ -1027,9 +1095,9 @@ export class PendingPolicyStorage {
         (SELECT GROUP_CONCAT(user_vuid) FROM ssh_policy_decisions d WHERE d.policy_request_id = p.id AND d.decision = 1) as approved_by,
         (SELECT GROUP_CONCAT(user_vuid) FROM ssh_policy_decisions d WHERE d.policy_request_id = p.id AND d.decision = 0) as denied_by
       FROM pending_ssh_policies p
-      WHERE p.status IN ('pending', 'approved')
+      WHERE p.status IN ('pending', 'approved') AND p.organization_id = ?
       ORDER BY p.created_at DESC
-    `).all() as any[];
+    `).all(orgId) as any[];
 
     // Fetch admin policy from TideCloak (needed to authorize commits)
     let adminPolicyBytes: Uint8Array | null = null;
@@ -1230,14 +1298,14 @@ export class PendingPolicyStorage {
 // Policy Template storage class
 export class TemplateStorage {
   // Create a new template
-  async createTemplate(template: InsertPolicyTemplate): Promise<PolicyTemplate> {
+  async createTemplate(orgId: string, template: InsertPolicyTemplate): Promise<PolicyTemplate> {
     const id = randomUUID();
     const now = Math.floor(Date.now() / 1000);
 
     sqlite.prepare(`
-      INSERT INTO policy_templates (id, name, description, cs_code, parameters, created_by, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(id, template.name, template.description, template.csCode, JSON.stringify(template.parameters), template.createdBy, now);
+      INSERT INTO policy_templates (id, name, description, cs_code, parameters, created_by, created_at, organization_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, template.name, template.description, template.csCode, JSON.stringify(template.parameters), template.createdBy, now, orgId);
 
     return {
       id,
@@ -1291,10 +1359,10 @@ export class TemplateStorage {
   }
 
   // Get all templates
-  async getAllTemplates(): Promise<PolicyTemplate[]> {
+  async getAllTemplates(orgId: string): Promise<PolicyTemplate[]> {
     const rows = sqlite.prepare(`
-      SELECT * FROM policy_templates ORDER BY created_at DESC
-    `).all() as any[];
+      SELECT * FROM policy_templates WHERE organization_id = ? ORDER BY created_at DESC
+    `).all(orgId) as any[];
 
     return rows.map(row => ({
       id: row.id,
@@ -1695,11 +1763,11 @@ try {
 
 // Subscription storage class for license management
 export class SubscriptionStorage {
-  // Get the current subscription (there's only one per installation)
-  async getSubscription(): Promise<Subscription | null> {
+  // Get the current subscription for an organization
+  async getSubscription(orgId: string): Promise<Subscription | null> {
     const row = sqlite.prepare(`
-      SELECT * FROM subscriptions ORDER BY created_at DESC LIMIT 1
-    `).get() as any | undefined;
+      SELECT * FROM subscriptions WHERE organization_id = ? ORDER BY created_at DESC LIMIT 1
+    `).get(orgId) as any | undefined;
 
     if (!row) return null;
 
@@ -1714,12 +1782,13 @@ export class SubscriptionStorage {
       cancelAtPeriodEnd: !!row.cancel_at_period_end,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
+      organizationId: row.organization_id || DEFAULT_ORG_ID,
     };
   }
 
   // Create or update the subscription
-  async upsertSubscription(data: Partial<InsertSubscription> & { tier?: SubscriptionTier }): Promise<Subscription> {
-    const existing = await this.getSubscription();
+  async upsertSubscription(orgId: string, data: Partial<InsertSubscription> & { tier?: SubscriptionTier }): Promise<Subscription> {
+    const existing = await this.getSubscription(orgId);
     const now = Math.floor(Date.now() / 1000);
 
     if (existing) {
@@ -1766,13 +1835,13 @@ export class SubscriptionStorage {
         `).run(...values);
       }
 
-      return (await this.getSubscription())!;
+      return (await this.getSubscription(orgId))!;
     } else {
       // Create new subscription
       const id = randomUUID();
       sqlite.prepare(`
-        INSERT INTO subscriptions (id, tier, stripe_customer_id, stripe_subscription_id, stripe_price_id, status, current_period_end, cancel_at_period_end, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO subscriptions (id, tier, stripe_customer_id, stripe_subscription_id, stripe_price_id, status, current_period_end, cancel_at_period_end, created_at, organization_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         id,
         data.tier || 'free',
@@ -1782,19 +1851,20 @@ export class SubscriptionStorage {
         data.status || 'active',
         data.currentPeriodEnd || null,
         data.cancelAtPeriodEnd ? 1 : 0,
-        now
+        now,
+        orgId
       );
 
-      return (await this.getSubscription())!;
+      return (await this.getSubscription(orgId))!;
     }
   }
 
   // Get current usage counts
-  async getUsageCounts(): Promise<{ users: number; servers: number }> {
+  async getUsageCounts(orgId: string): Promise<{ users: number; servers: number }> {
     // Count servers from local database
     const serverCount = sqlite.prepare(`
-      SELECT COUNT(*) as count FROM servers
-    `).get() as { count: number };
+      SELECT COUNT(*) as count FROM servers WHERE organization_id = ?
+    `).get(orgId) as { count: number };
 
     // Note: Users are counted from TideCloak, not local DB
     // This method returns server count; user count comes from TideCloak API
@@ -1805,34 +1875,34 @@ export class SubscriptionStorage {
   }
 
   // Get server count only (for limit checks)
-  async getServerCount(): Promise<number> {
+  async getServerCount(orgId: string): Promise<number> {
     const result = sqlite.prepare(`
-      SELECT COUNT(*) as count FROM servers
-    `).get() as { count: number };
+      SELECT COUNT(*) as count FROM servers WHERE organization_id = ?
+    `).get(orgId) as { count: number };
     return result.count;
   }
 
   // Get enabled server count
-  async getEnabledServerCount(): Promise<number> {
+  async getEnabledServerCount(orgId: string): Promise<number> {
     const result = sqlite.prepare(`
-      SELECT COUNT(*) as count FROM servers WHERE enabled = 1
-    `).get() as { count: number };
+      SELECT COUNT(*) as count FROM servers WHERE enabled = 1 AND organization_id = ?
+    `).get(orgId) as { count: number };
     return result.count;
   }
 
   // Get server counts (total and enabled)
-  async getServerCounts(): Promise<{ total: number; enabled: number }> {
+  async getServerCounts(orgId: string): Promise<{ total: number; enabled: number }> {
     const result = sqlite.prepare(`
       SELECT
         COUNT(*) as total,
         SUM(CASE WHEN enabled = 1 THEN 1 ELSE 0 END) as enabled
-      FROM servers
-    `).get() as { total: number; enabled: number };
+      FROM servers WHERE organization_id = ?
+    `).get(orgId) as { total: number; enabled: number };
     return { total: result.total, enabled: result.enabled || 0 };
   }
 
   // Check if can add a resource (user or server)
-  async checkCanAdd(resource: 'user' | 'server', currentCount: number): Promise<LimitCheck> {
+  async checkCanAdd(orgId: string, resource: 'user' | 'server', currentCount: number): Promise<LimitCheck> {
     // If Stripe is not configured, allow unlimited resources
     if (!isStripeConfigured()) {
       return {
@@ -1844,7 +1914,7 @@ export class SubscriptionStorage {
       };
     }
 
-    const subscription = await this.getSubscription();
+    const subscription = await this.getSubscription(orgId);
     const tier: SubscriptionTier = (subscription?.tier as SubscriptionTier) || 'free';
     const tierConfig = subscriptionTiers[tier];
     const limit = resource === 'user' ? tierConfig.maxUsers : tierConfig.maxServers;
@@ -1863,9 +1933,10 @@ export class SubscriptionStorage {
 
   // Get full license info
   async getLicenseInfo(
+    orgId: string,
     userCounts: { total: number; enabled: number }
   ): Promise<LicenseInfo> {
-    const serverCounts = await this.getServerCounts();
+    const serverCounts = await this.getServerCounts(orgId);
 
     // If Stripe is not configured, return unlimited license info
     if (!isStripeConfigured()) {
@@ -1897,7 +1968,7 @@ export class SubscriptionStorage {
       };
     }
 
-    const subscription = await this.getSubscription();
+    const subscription = await this.getSubscription(orgId);
     const tier: SubscriptionTier = (subscription?.tier as SubscriptionTier) || 'free';
     const tierConfig = subscriptionTiers[tier];
 
@@ -1937,8 +2008,8 @@ export class SubscriptionStorage {
   }
 
   // Update the cached over-limit status for SSH access control
-  async updateOverLimitStatus(usersOverLimit: boolean, serversOverLimit: boolean): Promise<void> {
-    const subscription = await this.getSubscription();
+  async updateOverLimitStatus(orgId: string, usersOverLimit: boolean, serversOverLimit: boolean): Promise<void> {
+    const subscription = await this.getSubscription(orgId);
     if (!subscription) return;
 
     sqlite.prepare(`
@@ -1947,13 +2018,13 @@ export class SubscriptionStorage {
   }
 
   // Check if SSH access is blocked due to being over limit
-  async isSshBlocked(): Promise<{ blocked: boolean; reason?: string }> {
+  async isSshBlocked(orgId: string): Promise<{ blocked: boolean; reason?: string }> {
     // If Stripe is not configured, never block SSH access
     if (!isStripeConfigured()) {
       return { blocked: false };
     }
 
-    const subscription = await this.getSubscription();
+    const subscription = await this.getSubscription(orgId);
     if (!subscription) {
       return { blocked: false };
     }
@@ -1964,7 +2035,7 @@ export class SubscriptionStorage {
     const serverLimit = tierConfig.maxServers;
 
     // Real-time check for servers (we have this data locally)
-    const serverCounts = await this.getServerCounts();
+    const serverCounts = await this.getServerCounts(orgId);
     const serversOverLimit = serverLimit !== -1 && serverCounts.enabled > serverLimit;
 
     // Check the cached users_over_limit status (users require TideCloak API)
@@ -1999,7 +2070,7 @@ export class SubscriptionStorage {
   }
 
   // Add a billing history record
-  async addBillingRecord(data: {
+  async addBillingRecord(orgId: string, data: {
     stripeInvoiceId?: string;
     amount: number;
     currency?: string;
@@ -2007,7 +2078,7 @@ export class SubscriptionStorage {
     invoicePdf?: string;
     description?: string;
   }): Promise<void> {
-    const subscription = await this.getSubscription();
+    const subscription = await this.getSubscription(orgId);
     if (!subscription) return;
 
     const id = randomUUID();
@@ -2030,10 +2101,10 @@ export class SubscriptionStorage {
   }
 
   // Get billing history
-  async getBillingHistory(limit: number = 50): Promise<BillingHistory[]> {
+  async getBillingHistory(orgId: string, limit: number = 50): Promise<BillingHistory[]> {
     const rows = sqlite.prepare(`
-      SELECT * FROM billing_history ORDER BY created_at DESC LIMIT ?
-    `).all(limit) as any[];
+      SELECT * FROM billing_history WHERE organization_id = ? ORDER BY created_at DESC LIMIT ?
+    `).all(orgId, limit) as any[];
 
     return rows.map(row => ({
       id: row.id,
@@ -2045,6 +2116,7 @@ export class SubscriptionStorage {
       invoicePdf: row.invoice_pdf,
       description: row.description,
       createdAt: row.created_at,
+      organizationId: row.organization_id || DEFAULT_ORG_ID,
     }));
   }
 }
@@ -2175,10 +2247,10 @@ export class RecordingStorage {
   }
 
   // Get all recordings (paginated)
-  async getRecordings(limit: number = 50, offset: number = 0): Promise<Recording[]> {
+  async getRecordings(orgId: string, limit: number = 50, offset: number = 0): Promise<Recording[]> {
     const rows = sqlite.prepare(`
-      SELECT * FROM recordings ORDER BY started_at DESC LIMIT ? OFFSET ?
-    `).all(limit, offset) as any[];
+      SELECT * FROM recordings WHERE organization_id = ? ORDER BY started_at DESC LIMIT ? OFFSET ?
+    `).all(orgId, limit, offset) as any[];
 
     return rows.map(row => this.mapRow(row));
   }
@@ -2202,10 +2274,10 @@ export class RecordingStorage {
   }
 
   // Search recordings by text content
-  async searchRecordings(query: string, limit: number = 50): Promise<Recording[]> {
+  async searchRecordings(orgId: string, query: string, limit: number = 50): Promise<Recording[]> {
     const rows = sqlite.prepare(`
-      SELECT * FROM recordings WHERE text_content LIKE ? ORDER BY started_at DESC LIMIT ?
-    `).all(`%${query}%`, limit) as any[];
+      SELECT * FROM recordings WHERE organization_id = ? AND text_content LIKE ? ORDER BY started_at DESC LIMIT ?
+    `).all(orgId, `%${query}%`, limit) as any[];
 
     return rows.map(row => this.mapRow(row));
   }
@@ -2283,13 +2355,13 @@ export interface InsertFileOperation {
 
 export class FileOperationStorage {
   // Log a file operation
-  async logOperation(data: InsertFileOperation): Promise<FileOperation> {
+  async logOperation(orgId: string, data: InsertFileOperation): Promise<FileOperation> {
     const id = randomUUID();
     const now = Math.floor(Date.now() / 1000);
 
     sqlite.prepare(`
-      INSERT INTO file_operations (id, session_id, server_id, user_id, user_email, ssh_user, operation, path, target_path, file_size, mode, status, error_message, timestamp)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO file_operations (id, session_id, server_id, user_id, user_email, ssh_user, operation, path, target_path, file_size, mode, status, error_message, timestamp, organization_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       data.sessionId,
@@ -2304,7 +2376,8 @@ export class FileOperationStorage {
       data.mode,
       data.status,
       data.errorMessage || null,
-      now
+      now,
+      orgId
     );
 
     return {
@@ -2322,6 +2395,7 @@ export class FileOperationStorage {
       status: data.status,
       errorMessage: data.errorMessage || null,
       timestamp: new Date(now * 1000),
+      organizationId: orgId,
     };
   }
 
@@ -2353,10 +2427,10 @@ export class FileOperationStorage {
   }
 
   // Get all file operations (paginated)
-  async getOperations(limit: number = 100, offset: number = 0): Promise<FileOperation[]> {
+  async getOperations(orgId: string, limit: number = 100, offset: number = 0): Promise<FileOperation[]> {
     const rows = sqlite.prepare(`
-      SELECT * FROM file_operations ORDER BY timestamp DESC LIMIT ? OFFSET ?
-    `).all(limit, offset) as any[];
+      SELECT * FROM file_operations WHERE organization_id = ? ORDER BY timestamp DESC LIMIT ? OFFSET ?
+    `).all(orgId, limit, offset) as any[];
 
     return rows.map(row => this.mapRow(row));
   }
@@ -2395,6 +2469,7 @@ export class FileOperationStorage {
       status: row.status as FileOperationStatus,
       errorMessage: row.error_message,
       timestamp: new Date(row.timestamp * 1000),
+      organizationId: row.organization_id || DEFAULT_ORG_ID,
     };
   }
 }
@@ -2402,18 +2477,18 @@ export class FileOperationStorage {
 // Bridge storage class for SSH bridge/relay endpoints
 export class BridgeStorage {
   // Create a new bridge
-  async createBridge(data: InsertBridge): Promise<Bridge> {
+  async createBridge(orgId: string, data: InsertBridge): Promise<Bridge> {
     const id = randomUUID();
     const now = Math.floor(Date.now() / 1000);
 
-    // If this bridge is being set as default, unset any existing default
+    // If this bridge is being set as default, unset any existing default within the org
     if (data.isDefault) {
-      sqlite.prepare(`UPDATE bridges SET is_default = 0`).run();
+      sqlite.prepare(`UPDATE bridges SET is_default = 0 WHERE organization_id = ?`).run(orgId);
     }
 
     sqlite.prepare(`
-      INSERT INTO bridges (id, name, url, description, enabled, is_default, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO bridges (id, name, url, description, enabled, is_default, created_at, organization_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       data.name,
@@ -2421,7 +2496,8 @@ export class BridgeStorage {
       data.description || null,
       data.enabled !== false ? 1 : 0,
       data.isDefault ? 1 : 0,
-      now
+      now,
+      orgId
     );
 
     return {
@@ -2432,6 +2508,7 @@ export class BridgeStorage {
       enabled: data.enabled !== false,
       isDefault: data.isDefault || false,
       createdAt: new Date(now * 1000),
+      organizationId: orgId,
     };
   }
 
@@ -2458,19 +2535,19 @@ export class BridgeStorage {
   }
 
   // Get all bridges
-  async getBridges(): Promise<Bridge[]> {
+  async getBridges(orgId: string): Promise<Bridge[]> {
     const rows = sqlite.prepare(`
-      SELECT * FROM bridges ORDER BY is_default DESC, name ASC
-    `).all() as any[];
+      SELECT * FROM bridges WHERE organization_id = ? ORDER BY is_default DESC, name ASC
+    `).all(orgId) as any[];
 
     return rows.map(row => this.mapRow(row));
   }
 
   // Get enabled bridges
-  async getEnabledBridges(): Promise<Bridge[]> {
+  async getEnabledBridges(orgId: string): Promise<Bridge[]> {
     const rows = sqlite.prepare(`
-      SELECT * FROM bridges WHERE enabled = 1 ORDER BY is_default DESC, name ASC
-    `).all() as any[];
+      SELECT * FROM bridges WHERE enabled = 1 AND organization_id = ? ORDER BY is_default DESC, name ASC
+    `).all(orgId) as any[];
 
     return rows.map(row => this.mapRow(row));
   }
@@ -2539,7 +2616,91 @@ export class BridgeStorage {
       enabled: !!row.enabled,
       isDefault: !!row.is_default,
       createdAt: new Date(row.created_at * 1000),
+      organizationId: row.organization_id || DEFAULT_ORG_ID,
     };
+  }
+}
+
+// Organization storage for multi-tenancy
+export class OrganizationStorage {
+  async createOrganization(name: string, slug: string): Promise<Organization> {
+    const id = randomUUID();
+    const now = new Date();
+    const org: Organization = { id, name, slug, createdAt: now, updatedAt: null };
+    db.insert(organizations).values(org).run();
+    return org;
+  }
+
+  async getOrganization(id: string): Promise<Organization | undefined> {
+    return db.select().from(organizations).where(eq(organizations.id, id)).get();
+  }
+
+  async getOrganizationBySlug(slug: string): Promise<Organization | undefined> {
+    return db.select().from(organizations).where(eq(organizations.slug, slug)).get();
+  }
+
+  async listOrganizations(): Promise<Organization[]> {
+    return db.select().from(organizations).all();
+  }
+
+  async updateOrganization(id: string, data: Partial<Pick<Organization, "name" | "slug">>): Promise<Organization | undefined> {
+    const existing = await this.getOrganization(id);
+    if (!existing) return undefined;
+    const updated = { ...existing, ...data, updatedAt: new Date() };
+    db.update(organizations).set(updated).where(eq(organizations.id, id)).run();
+    return updated;
+  }
+
+  async deleteOrganization(id: string): Promise<boolean> {
+    const result = db.delete(organizations).where(eq(organizations.id, id)).run();
+    return result.changes > 0;
+  }
+
+  async addUserToOrg(orgId: string, userId: string, role: OrgRole = "user"): Promise<OrganizationUser> {
+    const id = randomUUID();
+    const now = new Date();
+    const membership: OrganizationUser = { id, organizationId: orgId, userId, role, joinedAt: now };
+    db.insert(organizationUsers).values(membership).run();
+    return membership;
+  }
+
+  async removeUserFromOrg(orgId: string, userId: string): Promise<boolean> {
+    const result = db
+      .delete(organizationUsers)
+      .where(and(eq(organizationUsers.organizationId, orgId), eq(organizationUsers.userId, userId)))
+      .run();
+    return result.changes > 0;
+  }
+
+  async getOrgUsers(orgId: string): Promise<OrganizationUser[]> {
+    return db
+      .select()
+      .from(organizationUsers)
+      .where(eq(organizationUsers.organizationId, orgId))
+      .all();
+  }
+
+  async getUserOrgs(userId: string): Promise<OrganizationUser[]> {
+    return db
+      .select()
+      .from(organizationUsers)
+      .where(eq(organizationUsers.userId, userId))
+      .all();
+  }
+
+  async updateUserOrgRole(orgId: string, userId: string, role: OrgRole): Promise<OrganizationUser | undefined> {
+    const existing = db
+      .select()
+      .from(organizationUsers)
+      .where(and(eq(organizationUsers.organizationId, orgId), eq(organizationUsers.userId, userId)))
+      .get();
+    if (!existing) return undefined;
+    const updated = { ...existing, role };
+    db.update(organizationUsers)
+      .set({ role })
+      .where(and(eq(organizationUsers.organizationId, orgId), eq(organizationUsers.userId, userId)))
+      .run();
+    return updated;
   }
 }
 
@@ -2552,3 +2713,4 @@ export const subscriptionStorage = new SubscriptionStorage();
 export const recordingStorage = new RecordingStorage();
 export const fileOperationStorage = new FileOperationStorage();
 export const bridgeStorage = new BridgeStorage();
+export const organizationStorage = new OrganizationStorage();
