@@ -72,7 +72,6 @@ function TideCloakAuthBridge({ children, authConfig }: { children: ReactNode; au
   const [vuid, setVuid] = useState<string>("");
   const [initError, setInitError] = useState<Error | null>(null);
   const hasSynced = useRef(false);
-  const enclaveInitialized = useRef(false);
 
   // Sync auth state from TideCloak - only runs once after initialization
   useEffect(() => {
@@ -139,20 +138,17 @@ function TideCloakAuthBridge({ children, authConfig }: { children: ReactNode; au
     }
   }, [tidecloak.isInitializing, tidecloak.authenticated, tidecloak.token, tidecloak]);
 
-  // Initialize the request enclave on the first user gesture after login.
+  // Initialize the request enclave on every user click after login.
   // initRequestEnclave opens an iframe/popup that browsers block unless
-  // triggered by a user gesture, so we retry on each click until it succeeds.
+  // triggered by a user gesture, so we capture clicks to provide that gesture.
   useEffect(() => {
-    if (!state.isAuthenticated || enclaveInitialized.current) return;
+    if (!state.isAuthenticated) return;
 
     const handler = () => {
-      if (enclaveInitialized.current) return;
       try {
         (IAMService as any)._tc?.initRequestEnclave();
-        enclaveInitialized.current = true;
-        document.removeEventListener("click", handler);
       } catch (e) {
-        console.error("[AuthProvider] Failed to init request enclave, will retry on next click:", e);
+        console.error("[AuthProvider] Failed to init request enclave:", e);
       }
     };
 
