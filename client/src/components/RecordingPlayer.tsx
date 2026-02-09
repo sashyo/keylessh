@@ -400,22 +400,22 @@ export function RecordingPlayer({ recording }: RecordingPlayerProps) {
   };
 
   return (
-    <div className="space-y-4 w-full max-w-4xl mx-auto">
-      {/* Terminal Display - Standard size for all recordings */}
+    <div className="space-y-3 sm:space-y-4 w-full max-w-4xl mx-auto">
+      {/* Terminal Display - Responsive height for different screen sizes */}
       <div className="bg-black rounded-lg overflow-hidden border border-border w-full">
-        <div className="bg-gray-800 px-4 py-2 flex items-center gap-2">
+        <div className="bg-gray-800 px-3 sm:px-4 py-1.5 sm:py-2 flex items-center gap-2">
           <div className="flex gap-1.5">
-            <div className="w-3 h-3 rounded-full bg-red-500" />
-            <div className="w-3 h-3 rounded-full bg-yellow-500" />
-            <div className="w-3 h-3 rounded-full bg-green-500" />
+            <div className="w-2.5 h-2.5 sm:w-3 sm:h-3 rounded-full bg-red-500" />
+            <div className="w-2.5 h-2.5 sm:w-3 sm:h-3 rounded-full bg-yellow-500" />
+            <div className="w-2.5 h-2.5 sm:w-3 sm:h-3 rounded-full bg-green-500" />
           </div>
-          <span className="text-gray-400 text-sm ml-2 truncate">
+          <span className="text-gray-400 text-xs sm:text-sm ml-2 truncate">
             {recording.serverName} - {recording.sshUser}@server
           </span>
         </div>
         <pre
           ref={terminalRef}
-          className="p-4 text-gray-300 font-mono text-sm overflow-auto whitespace-pre-wrap h-[400px]"
+          className="p-3 sm:p-4 text-gray-300 font-mono text-xs sm:text-sm overflow-auto whitespace-pre-wrap h-[200px] sm:h-[300px] md:h-[400px]"
           style={{
             backgroundColor: "#1a1a1a",
           }}
@@ -426,8 +426,8 @@ export function RecordingPlayer({ recording }: RecordingPlayerProps) {
 
       {/* Playback Controls */}
       <div className="space-y-2">
-        <div className="flex items-center gap-2 px-2">
-          <span className="text-sm text-muted-foreground w-12">{formatTime(currentTime)}</span>
+        <div className="flex items-center gap-2 px-1 sm:px-2">
+          <span className="text-xs sm:text-sm text-muted-foreground w-10 sm:w-12">{formatTime(currentTime)}</span>
           <Slider
             value={[currentTime]}
             max={duration || 1}
@@ -435,28 +435,28 @@ export function RecordingPlayer({ recording }: RecordingPlayerProps) {
             onValueChange={handleSeek}
             className="flex-1"
           />
-          <span className="text-sm text-muted-foreground w-12 text-right">{formatTime(duration)}</span>
+          <span className="text-xs sm:text-sm text-muted-foreground w-10 sm:w-12 text-right">{formatTime(duration)}</span>
         </div>
 
-        <div className="flex items-center justify-center gap-2">
-          <Button size="sm" variant="outline" onClick={handleReset}>
+        <div className="flex items-center justify-center gap-1.5 sm:gap-2">
+          <Button size="sm" variant="outline" onClick={handleReset} className="h-8 w-8 p-0 sm:h-9 sm:w-auto sm:px-3">
             <RotateCcw className="h-4 w-4" />
           </Button>
-          <Button size="sm" onClick={handlePlayPause}>
+          <Button size="sm" onClick={handlePlayPause} className="h-8 w-8 p-0 sm:h-9 sm:w-auto sm:px-4">
             {isPlaying ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
           </Button>
-          <Button size="sm" variant="outline" onClick={handleSpeedChange} className="min-w-[60px]">
-            <FastForward className="h-4 w-4 mr-1" />
-            {playbackSpeed}x
+          <Button size="sm" variant="outline" onClick={handleSpeedChange} className="h-8 px-2 sm:h-9 sm:px-3 min-w-[52px] sm:min-w-[60px]">
+            <FastForward className="h-3.5 w-3.5 sm:h-4 sm:w-4 mr-0.5 sm:mr-1" />
+            <span className="text-xs sm:text-sm">{playbackSpeed}x</span>
           </Button>
         </div>
       </div>
 
-      {/* Recording Info */}
-      <div className="text-xs text-muted-foreground flex items-center justify-center gap-4">
-        <span>Terminal: {header.width}x{header.height}</span>
+      {/* Recording Info - Hidden on very small screens */}
+      <div className="text-xs text-muted-foreground flex items-center justify-center gap-2 sm:gap-4 flex-wrap">
+        <span className="hidden sm:inline">Terminal: {header.width}x{header.height}</span>
         <span>Duration: {formatTime(duration)}</span>
-        <span>Events: {events.length}</span>
+        <span className="hidden xs:inline">Events: {events.length}</span>
       </div>
     </div>
   );
