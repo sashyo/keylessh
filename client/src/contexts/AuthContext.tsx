@@ -141,21 +141,22 @@ function TideCloakAuthBridge({ children, authConfig }: { children: ReactNode; au
 
   // Initialize the request enclave on the first user gesture after login.
   // initRequestEnclave opens an iframe/popup that browsers block unless
-  // triggered by a user gesture, so we capture the first click post-auth.
+  // triggered by a user gesture, so we retry on each click until it succeeds.
   useEffect(() => {
     if (!state.isAuthenticated || enclaveInitialized.current) return;
 
     const handler = () => {
       if (enclaveInitialized.current) return;
-      enclaveInitialized.current = true;
       try {
         (IAMService as any)._tc?.initRequestEnclave();
+        enclaveInitialized.current = true;
+        document.removeEventListener("click", handler);
       } catch (e) {
-        console.error("[AuthProvider] Failed to init request enclave:", e);
+        console.error("[AuthProvider] Failed to init request enclave, will retry on next click:", e);
       }
     };
 
-    document.addEventListener("click", handler, { once: true });
+    document.addEventListener("click", handler);
     return () => document.removeEventListener("click", handler);
   }, [state.isAuthenticated]);
 
