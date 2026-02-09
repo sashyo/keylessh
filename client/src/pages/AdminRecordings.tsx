@@ -388,22 +388,23 @@ export default function AdminRecordings() {
 
       {/* Recording Playback Dialog */}
       <Dialog open={!!playingRecording} onOpenChange={(open) => !open && setPlayingRecording(null)}>
-        <DialogContent className="w-[95vw] max-w-4xl max-h-[90vh] overflow-hidden p-4 sm:p-6">
-          <DialogHeader>
-            <DialogTitle className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2">
+        <DialogContent className="w-[95vw] max-w-4xl max-h-[85vh] sm:max-h-[90vh] flex flex-col p-3 sm:p-4 md:p-6">
+          <DialogHeader className="pb-2 sm:pb-4 shrink-0">
+            <DialogTitle className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2 text-base sm:text-lg">
               <div className="flex items-center gap-2">
-                <Video className="h-5 w-5" />
-                Session Recording
+                <Video className="h-4 w-4 sm:h-5 sm:w-5" />
+                <span className="hidden sm:inline">Session Recording</span>
+                <span className="sm:hidden">Recording</span>
               </div>
               {playingRecording && (
-                <span className="text-sm font-normal text-muted-foreground">
+                <span className="text-xs sm:text-sm font-normal text-muted-foreground truncate">
                   {playingRecording.serverName} ({playingRecording.sshUser})
                 </span>
               )}
             </DialogTitle>
           </DialogHeader>
           {playingRecording && (
-            <div className="overflow-auto">
+            <div className="flex-1 min-h-0 overflow-y-auto -mx-3 px-3 sm:-mx-4 sm:px-4 md:-mx-6 md:px-6">
               <RecordingPlayer recording={playingRecording} />
             </div>
           )}
