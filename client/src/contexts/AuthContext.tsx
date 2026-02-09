@@ -147,6 +147,7 @@ function TideCloakAuthBridge({ children, authConfig }: { children: ReactNode; au
     const handler = () => {
       try {
         (IAMService as any)._tc?.initRequestEnclave();
+        console.log("[HIT]")
       } catch (e) {
         console.error("[AuthProvider] Failed to init request enclave:", e);
       }
