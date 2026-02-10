@@ -138,26 +138,6 @@ function TideCloakAuthBridge({ children, authConfig }: { children: ReactNode; au
     }
   }, [tidecloak.isInitializing, tidecloak.authenticated, tidecloak.token, tidecloak]);
 
-  // Initialize the request enclave on every user click after login.
-  // initRequestEnclave opens an iframe/popup that browsers block unless
-  // triggered by a user gesture, so we capture clicks to provide that gesture.
-  useEffect(() => {
-    if (!state.isAuthenticated) return;
-
-    const handler = () => {
-      try {
-        (IAMService as any)._tc?.initRequestEnclave();
-        (IAMService as any)._tc?.requestEnclave?.checkEnclaveOpen();
-        console.log("[HIT]")
-      } catch (e) {
-        console.error("[AuthProvider] Failed to init request enclave:", e);
-      }
-    };
-
-    document.addEventListener("click", handler);
-    return () => document.removeEventListener("click", handler);
-  }, [state.isAuthenticated]);
-
   // Set up IAMService event listeners for automatic token refresh
   useEffect(() => {
     // Helper to update token in localStorage and state from IAMService
