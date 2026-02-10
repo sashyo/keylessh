@@ -187,6 +187,7 @@ function Router() {
     <Switch>
       <Route path="/login" component={Login} />
       <Route path="/auth/redirect" component={AuthRedirect} />
+      <Route path="/onboarding" component={Onboarding} />
       {/* All other routes require authentication */}
       <Route>
         <AuthenticatedApp />

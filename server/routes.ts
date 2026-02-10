@@ -319,6 +319,114 @@ export async function registerRoutes(
   });
 
   // ============================================
+  // Public Onboarding (unauthenticated - for initial org setup)
+  // ============================================
+
+  // POST /api/onboarding - Create and provision a new organization (unauthenticated)
+  // This is used for initial organization setup before any users exist
+  // Supports two tiers:
+  //   - "free": Uses shared TideCloak realm with organization_id attribute
+  //   - "paid": Creates dedicated TideCloak realm for full isolation
+  app.post("/api/onboarding", async (req, res) => {
+    try {
+      const { tier, organizationName, organizationSlug, adminEmail, adminFirstName, adminLastName } = req.body;
+
+      // Validate required fields
+      if (!organizationName || !organizationSlug || !adminEmail || !adminFirstName || !adminLastName) {
+        res.status(400).json({ error: "All fields are required: organizationName, organizationSlug, adminEmail, adminFirstName, adminLastName" });
+        return;
+      }
+
+      // Validate tier (default to "free" if not specified)
+      const selectedTier = tier === "paid" ? "paid" : "free";
+
+      // Validate name format (alphanumeric and spaces only)
+      const isValidOrgNamePublic = (name: string): boolean => /^[a-zA-Z0-9 ]+$/.test(name);
+      if (!isValidOrgNamePublic(organizationName)) {
+        res.status(400).json({ error: "Organization name can only contain letters, numbers, and spaces" });
+        return;
+      }
+
+      // Validate slug format (lowercase alphanumeric only)
+      const isValidOrgSlugPublic = (slug: string): boolean => /^[a-z0-9]+$/.test(slug);
+      if (!isValidOrgSlugPublic(organizationSlug)) {
+        res.status(400).json({ error: "Organization slug can only contain lowercase letters and numbers" });
+        return;
+      }
+
+      // Validate email format
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(adminEmail)) {
+        res.status(400).json({ error: "Invalid email format" });
+        return;
+      }
+
+      // Check if slug already exists
+      const existing = await organizationStorage.getOrganizationBySlug(organizationSlug);
+      if (existing) {
+        res.status(409).json({ error: "An organization with that slug already exists" });
+        return;
+      }
+
+      // Step 1: Create organization in database
+      log(`[Onboarding] Creating organization: ${organizationName} (${organizationSlug}) - tier: ${selectedTier}`);
+      const org = await organizationStorage.createOrganization(organizationName, organizationSlug);
+
+      // Step 2: Provision based on tier
+      const clientAppUrl = process.env.APP_URL || `${req.protocol}://${req.get("host")}`;
+      let result;
+
+      if (selectedTier === "paid") {
+        // Paid tier: Create dedicated TideCloak realm
+        log(`[Onboarding] Provisioning dedicated TideCloak realm for: ${org.name}`);
+        const { provisionOrganization } = await import("./lib/provisionOrg");
+        result = await provisionOrganization({
+          organizationId: org.id,
+          organizationSlug: org.slug,
+          organizationName: org.name,
+          adminEmail,
+          adminFirstName,
+          adminLastName,
+          clientAppUrl,
+        });
+      } else {
+        // Free tier: Create user in shared realm with organization_id attribute
+        log(`[Onboarding] Provisioning freemium user in shared realm for: ${org.name}`);
+        const { provisionFreemiumOrganization } = await import("./lib/provisionOrg");
+        result = await provisionFreemiumOrganization({
+          organizationId: org.id,
+          organizationSlug: org.slug,
+          organizationName: org.name,
+          adminEmail,
+          adminFirstName,
+          adminLastName,
+          clientAppUrl,
+        });
+      }
+
+      if (!result.success) {
+        // Rollback: delete the organization from database
+        await organizationStorage.deleteOrganization(org.id);
+        log(`[Onboarding] Provisioning failed, rolled back org: ${result.error}`);
+        res.status(500).json({ error: result.error || "Failed to provision organization" });
+        return;
+      }
+
+      log(`[Onboarding] Organization provisioned successfully: ${org.name} (realm: ${result.realmName}, tier: ${selectedTier})`);
+      res.status(201).json({
+        success: true,
+        organization: org,
+        tier: selectedTier,
+        realmName: result.realmName,
+        inviteLink: result.inviteLink,
+      });
+    } catch (error) {
+      log(`[Onboarding] Failed: ${error}`);
+      res.status(500).json({ error: "Failed to create organization" });
+    }
+  });
+
+  // ============================================
   // User Routes (authenticated users)
   // ============================================
 
@@ -1581,6 +1689,177 @@ export async function registerRoutes(
         res.json({ linkUrl });
       } catch (error) {
         log(`Failed to get Tide link URL: ${error}`);
+        res.status(400).json({ error: "Failed to get Tide link URL" });
+      }
+    }
+  );
+
+  // ============================================
+  // Org-Scoped User Management Routes
+  // These routes allow org-admins to manage users in their organization
+  // without needing TideCloak realm-level permissions.
+  // Uses master admin credentials with organization_id attribute filtering.
+  // ============================================
+
+  // GET /api/org/users - List users in the org-admin's organization
+  app.get(
+    "/api/org/users",
+    authenticate,
+    requireOrgAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const orgId = getOrgId(req);
+        const { getOrgUsers } = await import("./lib/orgUserManagement");
+        const users = await getOrgUsers(orgId);
+        res.json(users);
+      } catch (error) {
+        log(`Failed to fetch org users: ${error}`);
+        res.status(500).json({ error: "Failed to fetch users" });
+      }
+    }
+  );
+
+  // POST /api/org/users - Create a new user in the organization
+  app.post(
+    "/api/org/users",
+    authenticate,
+    requireOrgAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const orgId = getOrgId(req);
+        const { email, firstName, lastName, orgRole } = req.body;
+
+        if (!email || !firstName) {
+          res.status(400).json({ error: "Email and firstName are required" });
+          return;
+        }
+
+        // Check user limit before creating
+        const { getOrgUsers } = await import("./lib/orgUserManagement");
+        const existingUsers = await getOrgUsers(orgId);
+        const limitCheck = await subscriptionStorage.checkCanAdd(orgId, "user", existingUsers.length);
+        if (!limitCheck.allowed) {
+          res.status(403).json({
+            error: "User limit reached",
+            message: `Your ${limitCheck.tierName} plan allows ${limitCheck.limit} users. Upgrade to add more.`,
+            current: limitCheck.current,
+            limit: limitCheck.limit,
+            tier: limitCheck.tier,
+            upgradeRequired: true,
+          });
+          return;
+        }
+
+        const { createOrgUser } = await import("./lib/orgUserManagement");
+        const user = await createOrgUser({
+          email,
+          firstName,
+          lastName: lastName || "",
+          organizationId: orgId,
+          orgRole: orgRole || "user",
+        });
+
+        res.status(201).json(user);
+      } catch (error) {
+        log(`Failed to create org user: ${error}`);
+        res.status(400).json({ error: "Failed to create user" });
+      }
+    }
+  );
+
+  // PUT /api/org/users/:id - Update a user in the organization
+  app.put(
+    "/api/org/users/:id",
+    authenticate,
+    requireOrgAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const orgId = getOrgId(req);
+        const userId = req.params.id;
+        const { firstName, lastName, email, orgRole } = req.body;
+
+        const { updateOrgUser } = await import("./lib/orgUserManagement");
+        await updateOrgUser(userId, orgId, { firstName, lastName, email, orgRole });
+
+        res.json({ success: true });
+      } catch (error) {
+        log(`Failed to update org user: ${error}`);
+        res.status(400).json({ error: "Failed to update user" });
+      }
+    }
+  );
+
+  // PUT /api/org/users/:id/enabled - Enable or disable a user
+  app.put(
+    "/api/org/users/:id/enabled",
+    authenticate,
+    requireOrgAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const orgId = getOrgId(req);
+        const userId = req.params.id;
+        const { enabled } = req.body;
+
+        if (typeof enabled !== "boolean") {
+          res.status(400).json({ error: "enabled must be a boolean" });
+          return;
+        }
+
+        const { setOrgUserEnabled } = await import("./lib/orgUserManagement");
+        await setOrgUserEnabled(userId, orgId, enabled);
+
+        res.json({ success: true, enabled });
+      } catch (error) {
+        log(`Failed to set org user enabled status: ${error}`);
+        res.status(400).json({ error: "Failed to update user status" });
+      }
+    }
+  );
+
+  // DELETE /api/org/users/:id - Delete a user from the organization
+  app.delete(
+    "/api/org/users/:id",
+    authenticate,
+    requireOrgAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const orgId = getOrgId(req);
+        const userId = req.params.id;
+
+        // Prevent self-deletion
+        if (userId === req.user?.id) {
+          res.status(400).json({ error: "Cannot delete yourself" });
+          return;
+        }
+
+        const { deleteOrgUser } = await import("./lib/orgUserManagement");
+        await deleteOrgUser(userId, orgId);
+
+        res.json({ success: true });
+      } catch (error) {
+        log(`Failed to delete org user: ${error}`);
+        res.status(400).json({ error: "Failed to delete user" });
+      }
+    }
+  );
+
+  // GET /api/org/users/:id/tide-link - Get Tide account linking URL
+  app.get(
+    "/api/org/users/:id/tide-link",
+    authenticate,
+    requireOrgAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const orgId = getOrgId(req);
+        const userId = req.params.id;
+        const redirectUri = req.query.redirectUri as string || `${req.protocol}://${req.get("host")}/admin/users`;
+
+        const { getOrgUserTideLinkUrl } = await import("./lib/orgUserManagement");
+        const linkUrl = await getOrgUserTideLinkUrl(userId, orgId, redirectUri);
+
+        res.json({ linkUrl });
+      } catch (error) {
+        log(`Failed to get org user Tide link URL: ${error}`);
         res.status(400).json({ error: "Failed to get Tide link URL" });
       }
     }
@@ -3745,6 +4024,10 @@ export async function registerRoutes(
 
   // ───── Organization Management Routes (global-admin only) ─────
 
+  // Organization name/slug validation: alphanumeric and spaces only (no hyphens, underscores, or special chars)
+  const isValidOrgName = (name: string): boolean => /^[a-zA-Z0-9 ]+$/.test(name);
+  const isValidOrgSlug = (slug: string): boolean => /^[a-z0-9]+$/.test(slug);
+
   // POST /api/admin/organizations - Create a new organization
   app.post(
     "/api/admin/organizations",
@@ -3755,6 +4038,18 @@ export async function registerRoutes(
         const { name, slug } = req.body;
         if (!name || !slug) {
           res.status(400).json({ error: "name and slug are required" });
+          return;
+        }
+
+        // Validate name format (alphanumeric and spaces only)
+        if (!isValidOrgName(name)) {
+          res.status(400).json({ error: "Organization name can only contain letters, numbers, and spaces" });
+          return;
+        }
+
+        // Validate slug format (lowercase alphanumeric only)
+        if (!isValidOrgSlug(slug)) {
+          res.status(400).json({ error: "Organization slug can only contain lowercase letters and numbers (no spaces, hyphens, or special characters)" });
           return;
         }
 
@@ -3817,6 +4112,29 @@ export async function registerRoutes(
     requireGlobalAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
+        const { name, slug } = req.body;
+
+        // Validate name format if provided
+        if (name !== undefined && !isValidOrgName(name)) {
+          res.status(400).json({ error: "Organization name can only contain letters, numbers, and spaces" });
+          return;
+        }
+
+        // Validate slug format if provided
+        if (slug !== undefined && !isValidOrgSlug(slug)) {
+          res.status(400).json({ error: "Organization slug can only contain lowercase letters and numbers (no spaces, hyphens, or special characters)" });
+          return;
+        }
+
+        // Check slug uniqueness if changing
+        if (slug !== undefined) {
+          const existing = await organizationStorage.getOrganizationBySlug(slug);
+          if (existing && existing.id !== req.params.id) {
+            res.status(409).json({ error: "An organization with that slug already exists" });
+            return;
+          }
+        }
+
         const updated = await organizationStorage.updateOrganization(req.params.id, req.body);
         if (!updated) {
           res.status(404).json({ error: "Organization not found" });
@@ -3848,6 +4166,66 @@ export async function registerRoutes(
       } catch (error) {
         log(`Failed to delete organization: ${error}`);
         res.status(500).json({ error: "Failed to delete organization" });
+      }
+    }
+  );
+
+  // POST /api/admin/organizations/:id/provision - Provision TideCloak realm for organization
+  app.post(
+    "/api/admin/organizations/:id/provision",
+    authenticate,
+    requireGlobalAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const { adminEmail, adminFirstName, adminLastName } = req.body;
+
+        if (!adminEmail || !adminFirstName || !adminLastName) {
+          res.status(400).json({ error: "adminEmail, adminFirstName, and adminLastName are required" });
+          return;
+        }
+
+        // Validate email format
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailRegex.test(adminEmail)) {
+          res.status(400).json({ error: "Invalid email format" });
+          return;
+        }
+
+        const org = await organizationStorage.getOrganization(req.params.id);
+        if (!org) {
+          res.status(404).json({ error: "Organization not found" });
+          return;
+        }
+
+        // Import and run provisioning
+        const { provisionOrganization } = await import("./lib/provisionOrg");
+
+        const clientAppUrl = process.env.APP_URL || `${req.protocol}://${req.get("host")}`;
+
+        const result = await provisionOrganization({
+          organizationId: org.id,
+          organizationSlug: org.slug,
+          organizationName: org.name,
+          adminEmail,
+          adminFirstName,
+          adminLastName,
+          clientAppUrl,
+        });
+
+        if (!result.success) {
+          res.status(500).json({ error: result.error || "Provisioning failed" });
+          return;
+        }
+
+        log(`Organization provisioned: ${org.name} (realm: ${result.realmName})`);
+        res.json({
+          success: true,
+          realmName: result.realmName,
+          inviteLink: result.inviteLink,
+        });
+      } catch (error) {
+        log(`Failed to provision organization: ${error}`);
+        res.status(500).json({ error: "Failed to provision organization" });
       }
     }
   );

@@ -473,6 +473,11 @@ export const api = {
           method: "PATCH",
           body: JSON.stringify({ role }),
         }),
+      provision: (orgId: string, data: { adminEmail: string; adminFirstName: string; adminLastName: string }) =>
+        apiRequest<{ success: boolean; inviteLink?: string }>(`/api/admin/organizations/${orgId}/provision`, {
+          method: "POST",
+          body: JSON.stringify(data),
+        }),
     },
   },
 };
