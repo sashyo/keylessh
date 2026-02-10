@@ -250,11 +250,11 @@ export default function AdminRecordings() {
                 <TableHeader>
                   <TableRow>
                     <TableHead>Server</TableHead>
-                    <TableHead>User</TableHead>
+                    <TableHead className="hidden lg:table-cell">User</TableHead>
                     <TableHead>SSH User</TableHead>
                     <TableHead>Date</TableHead>
-                    <TableHead>Duration</TableHead>
-                    <TableHead>Size</TableHead>
+                    <TableHead className="hidden xl:table-cell">Duration</TableHead>
+                    <TableHead className="hidden xl:table-cell">Size</TableHead>
                     <TableHead className="text-right">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -263,20 +263,20 @@ export default function AdminRecordings() {
                     <TableRow key={recording.id}>
                       <TableCell>
                         <div className="flex items-center gap-3">
-                          <div className="flex h-8 w-8 items-center justify-center rounded-md bg-muted">
+                          <div className="flex h-8 w-8 items-center justify-center rounded-md bg-muted shrink-0">
                             <Server className="h-4 w-4 text-muted-foreground" />
                           </div>
-                          <div>
-                            <p className="font-medium">{recording.serverName}</p>
-                            <p className="text-xs text-muted-foreground font-mono">
-                              {recording.serverId.slice(0, 8)}...
+                          <div className="min-w-0">
+                            <p className="font-medium truncate">{recording.serverName}</p>
+                            <p className="text-xs text-muted-foreground font-mono lg:hidden truncate">
+                              {recording.userEmail}
                             </p>
                           </div>
                         </div>
                       </TableCell>
-                      <TableCell>
+                      <TableCell className="hidden lg:table-cell">
                         <div className="space-y-0.5">
-                          <div className="text-sm">{recording.userEmail}</div>
+                          <div className="text-sm truncate max-w-[180px]">{recording.userEmail}</div>
                           <div className="text-xs font-mono text-muted-foreground">
                             {recording.userId.slice(0, 8)}...
                           </div>
@@ -287,40 +287,43 @@ export default function AdminRecordings() {
                           {recording.sshUser}
                         </Badge>
                       </TableCell>
-                      <TableCell className="text-sm">
+                      <TableCell className="text-sm whitespace-nowrap">
                         {formatDate(recording.startedAt)}
                       </TableCell>
-                      <TableCell className="text-sm font-mono">
+                      <TableCell className="hidden xl:table-cell text-sm font-mono">
                         {formatDuration(recording.duration)}
                       </TableCell>
-                      <TableCell className="text-sm">
+                      <TableCell className="hidden xl:table-cell text-sm">
                         {formatBytes(recording.fileSize)}
                       </TableCell>
                       <TableCell className="text-right">
-                        <div className="flex items-center justify-end gap-2">
+                        <div className="flex items-center justify-end gap-1">
                           <Button
                             size="sm"
                             variant="default"
-                            className="gap-1"
+                            className="gap-1 h-8 px-2 lg:px-3"
                             onClick={() => handlePlay(recording)}
                             disabled={loadingRecordingId === recording.id}
+                            title="Play recording"
                           >
                             <Play className="h-4 w-4" />
-                            {loadingRecordingId === recording.id ? "Loading..." : "Play"}
+                            <span className="hidden lg:inline">{loadingRecordingId === recording.id ? "..." : "Play"}</span>
                           </Button>
                           <Button
                             size="sm"
                             variant="outline"
-                            className="gap-1"
+                            className="h-8 w-8 p-0"
                             onClick={() => handleDownload(recording.id)}
+                            title="Download recording"
                           >
                             <Download className="h-4 w-4" />
                           </Button>
                           <Button
                             size="sm"
                             variant="destructive"
-                            className="gap-1"
+                            className="h-8 w-8 p-0"
                             onClick={() => setDeletingRecording(recording)}
+                            title="Delete recording"
                           >
                             <Trash2 className="h-4 w-4" />
                           </Button>
@@ -385,22 +388,23 @@ export default function AdminRecordings() {
 
       {/* Recording Playback Dialog */}
       <Dialog open={!!playingRecording} onOpenChange={(open) => !open && setPlayingRecording(null)}>
-        <DialogContent className="w-[95vw] max-w-4xl max-h-[90vh] overflow-hidden p-4 sm:p-6">
-          <DialogHeader>
-            <DialogTitle className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2">
+        <DialogContent className="w-[95vw] max-w-4xl max-h-[85vh] sm:max-h-[90vh] flex flex-col p-3 sm:p-4 md:p-6">
+          <DialogHeader className="pb-2 sm:pb-4 shrink-0">
+            <DialogTitle className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2 text-base sm:text-lg">
               <div className="flex items-center gap-2">
-                <Video className="h-5 w-5" />
-                Session Recording
+                <Video className="h-4 w-4 sm:h-5 sm:w-5" />
+                <span className="hidden sm:inline">Session Recording</span>
+                <span className="sm:hidden">Recording</span>
               </div>
               {playingRecording && (
-                <span className="text-sm font-normal text-muted-foreground">
+                <span className="text-xs sm:text-sm font-normal text-muted-foreground truncate">
                   {playingRecording.serverName} ({playingRecording.sshUser})
                 </span>
               )}
             </DialogTitle>
           </DialogHeader>
           {playingRecording && (
-            <div className="overflow-auto">
+            <div className="flex-1 min-h-0 overflow-y-auto -mx-3 px-3 sm:-mx-4 sm:px-4 md:-mx-6 md:px-6">
               <RecordingPlayer recording={playingRecording} />
             </div>
           )}
