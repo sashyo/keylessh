@@ -108,13 +108,14 @@ cd ..
 
 # =============================================================================
 print_header "Configuring Azure Build"
-# Enable Oryx build to compile native modules for correct Node version
+# Disable Oryx build - we deploy pre-built artifacts via GitHub Actions
+# Native modules (better-sqlite3) are compiled for Node 20 on Linux in the workflow
 az webapp config appsettings set \
     --name $WEBAPP_NAME \
     --resource-group $RESOURCE_GROUP \
     --settings \
-        SCM_DO_BUILD_DURING_DEPLOYMENT=true \
-        ENABLE_ORYX_BUILD=true \
+        SCM_DO_BUILD_DURING_DEPLOYMENT=false \
+        ENABLE_ORYX_BUILD=false \
     --output none
 
 # =============================================================================
