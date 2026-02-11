@@ -2,6 +2,12 @@ name: Deploy to Azure App Service (Multi-Tenant)
 
 on:
   workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to deploy'
+        required: true
+        default: 'feature/multi-tenancy'
+        type: string
 
 env:
   AZURE_WEBAPP_NAME: keylessh-multi
@@ -14,6 +20,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
