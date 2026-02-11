@@ -57,6 +57,12 @@ jobs:
           cd deploy
           npm ci --omit=dev
 
+          # Verify node_modules exists
+          echo "Checking node_modules..."
+          ls -la node_modules | head -20
+          echo "dotenv check:"
+          ls -la node_modules/dotenv || echo "dotenv NOT FOUND"
+
       # Note: Oryx build must be disabled on the Azure Web App for this to work.
       # Run this once: az webapp config appsettings set --name keylessh-multi --resource-group KeyleSSH --settings SCM_DO_BUILD_DURING_DEPLOYMENT=false ENABLE_ORYX_BUILD=false
       - name: Deploy to Azure Web App
