@@ -36,16 +36,21 @@ jobs:
           cp -r dist deploy/
 
           # Copy data folder (contains tidecloak.json config)
-          cp -r data deploy/
+          if [ -d "data" ]; then
+            cp -r data deploy/
+          fi
 
           # Copy package files for production dependencies
           cp package.json deploy/
           cp package-lock.json deploy/
 
-          # Install production dependencies only
+          # Install production dependencies only (compiled for Node 20 on Linux)
+          # This ensures better-sqlite3 is compiled for the correct Node version
           cd deploy
           npm ci --omit=dev
 
+      # Note: Oryx build must be disabled on the Azure Web App for this to work.
+      # Run this once: az webapp config appsettings set --name keylessh-multi --resource-group KeyleSSH --settings SCM_DO_BUILD_DURING_DEPLOYMENT=false ENABLE_ORYX_BUILD=false
       - name: Deploy to Azure Web App
         uses: azure/webapps-deploy@v3
         with:
