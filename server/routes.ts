@@ -2747,121 +2747,33 @@ export async function registerRoutes(
     }
   );
 
-  // POST /api/admin/policy-templates - Create a new template (requires policy creator role)
+  // POST /api/admin/policy-templates - Disabled: policy template creation is not allowed
   app.post(
     "/api/admin/policy-templates",
     authenticate,
-    requirePolicyCreator,
-    async (req: AuthenticatedRequest, res) => {
-      try {
-        const { name, description, csCode, parameters } = req.body;
-        const user = req.user!;
-
-        if (!name || !description || !csCode) {
-          res.status(400).json({ error: "name, description, and csCode are required" });
-          return;
-        }
-
-        // Check if template with same name exists
-        const existing = await templateStorage.getTemplateByName(name);
-        if (existing) {
-          res.status(400).json({ error: "A template with this name already exists" });
-          return;
-        }
-
-        const template = await templateStorage.createTemplate({
-          name,
-          description,
-          csCode,
-          parameters: parameters || [],
-          createdBy: user.email,
-        });
-
-        log(`Policy template created: ${name} by ${user.email}`);
-        res.json({ template });
-      } catch (error) {
-        log(`Failed to create policy template: ${error}`);
-        res.status(500).json({ error: "Failed to create policy template" });
-      }
+    requireAdmin,
+    (_req: AuthenticatedRequest, res) => {
+      res.status(403).json({ error: "Policy template creation is disabled" });
     }
   );
 
-  // PUT /api/admin/policy-templates/:id - Update a template (requires policy creator role)
+  // PUT /api/admin/policy-templates/:id - Disabled: policy template editing is not allowed
   app.put(
     "/api/admin/policy-templates/:id",
     authenticate,
-    requirePolicyCreator,
-    async (req: AuthenticatedRequest, res) => {
-      try {
-        const { id } = req.params;
-        const { name, description, csCode, parameters } = req.body;
-        const user = req.user!;
-
-        const existing = await templateStorage.getTemplate(id);
-        if (!existing) {
-          res.status(404).json({ error: "Template not found" });
-          return;
-        }
-
-        // If changing name, check for conflicts
-        if (name && name !== existing.name) {
-          const nameConflict = await templateStorage.getTemplateByName(name);
-          if (nameConflict) {
-            res.status(400).json({ error: "A template with this name already exists" });
-            return;
-          }
-        }
-
-        const template = await templateStorage.updateTemplate(id, {
-          name,
-          description,
-          csCode,
-          parameters,
-        });
-
-        log(`Policy template updated: ${template?.name} by ${user.email}`);
-        res.json({ template });
-      } catch (error) {
-        log(`Failed to update policy template: ${error}`);
-        res.status(500).json({ error: "Failed to update policy template" });
-      }
+    requireAdmin,
+    (_req: AuthenticatedRequest, res) => {
+      res.status(403).json({ error: "Policy template editing is disabled" });
     }
   );
 
-  // DELETE /api/admin/policy-templates/:id - Delete a template (requires policy creator role)
+  // DELETE /api/admin/policy-templates/:id - Disabled: policy template deletion is not allowed
   app.delete(
     "/api/admin/policy-templates/:id",
     authenticate,
-    requirePolicyCreator,
-    async (req: AuthenticatedRequest, res) => {
-      try {
-        const { id } = req.params;
-        const user = req.user!;
-
-        const existing = await templateStorage.getTemplate(id);
-        if (!existing) {
-          res.status(404).json({ error: "Template not found" });
-          return;
-        }
-
-        // Prevent deleting system templates
-        if (existing.createdBy === "system") {
-          res.status(403).json({ error: "Cannot delete system templates" });
-          return;
-        }
-
-        const success = await templateStorage.deleteTemplate(id);
-        if (!success) {
-          res.status(500).json({ error: "Failed to delete template" });
-          return;
-        }
-
-        log(`Policy template deleted: ${existing.name} by ${user.email}`);
-        res.json({ success: true });
-      } catch (error) {
-        log(`Failed to delete policy template: ${error}`);
-        res.status(500).json({ error: "Failed to delete policy template" });
-      }
+    requireAdmin,
+    (_req: AuthenticatedRequest, res) => {
+      res.status(403).json({ error: "Policy template deletion is disabled" });
     }
   );
 

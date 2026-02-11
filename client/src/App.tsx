@@ -16,7 +16,6 @@ import AdminDashboard from "@/pages/AdminDashboard";
 import AdminServers from "@/pages/AdminServers";
 import AdminUsers from "@/pages/AdminUsers";
 import AdminRoles from "@/pages/AdminRoles";
-import AdminPolicyTemplates from "@/pages/AdminPolicyTemplates";
 import AdminApprovals from "@/pages/AdminApprovals";
 import AdminSessions from "@/pages/AdminSessions";
 import AdminLogs from "@/pages/AdminLogs";
@@ -154,7 +153,7 @@ function AuthenticatedApp() {
             {isAdmin ? <AdminRoles /> : <Redirect to="/app" />}
           </Route>
           <Route path="/admin/policy-templates">
-            {isAdmin ? <AdminPolicyTemplates /> : <Redirect to="/app" />}
+            <Redirect to="/admin" />
           </Route>
           <Route path="/admin/approvals">
             {isAdmin ? <AdminApprovals /> : <Redirect to="/app" />}
