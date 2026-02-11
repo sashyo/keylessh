@@ -91,16 +91,17 @@ npm run dev
 
 Access the KeyleSSH app in your browser at: `http://localhost:3000`
 
-## First server set-up
+## Example server set-up
 
-Here's how you set up your first SSH server and access it using KeyleSSH:
+Here's how you set up a locally-hosted SSH server and access it using KeyleSSH:
 
 > [!NOTE]
-> This guide assumes you already have a Debian-based server at IP address 192.168.0.10, with a working SSH user named `user` you can access with an SSH client (for configuration).
+> This guide will show you how to spin up a minimal Alpine docker image on your localhost, enable SSH on it on port 2222, set up a new user on it, and enable it for passwordless, key-base authentication.
 
 1. Go to [servers](http://localhost:3000/admin/servers) -> `Add Server` -> 
    - Server Name: _myserver_
-   - Host: _192.168.0.10_
+   - Host: _localhost_
+   - Post: _2222_
    - SSH Users: _user_
    - Click `Add Server` button
    - Status should come up as `Online`
@@ -127,12 +128,39 @@ Here's how you set up your first SSH server and access it using KeyleSSH:
    - In the `Terminal Workspace`, click the `Connect` button
    - Copy the "Tide SSH public key" string (click the `Copy` button)
 
-You will now need to set up the server's user with a public key authentication. Connect to your server using an SSH client (e.g. Use `ssh user@192.168.0.10` in your local terminal) with the user `user` and run the following commands (replace the string `ssh-ed25519 AA....@keylessh` with what you copied in the latest step above):
+Spin up an Alpine server with SSH access allowed for user `root` (password `root` AS AN EXAMPLE ONLY!) by running this on your local machine's command-line:
 ```bash
-mkdir /home/user/.ssh
-echo -e "\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIsXOB07HlSdJFuVm9ysWBN2orUkljwHSl2Mlbf9uI/8 user@keylessh" >> /home/user/.ssh/authorized_keys
-chmod 600 /home/user/.ssh/authorized_keys
+sudo docker run -d \
+  -p 2222:22 \
+  --name tinyssh \
+  alpine sh -c "
+    apk add --no-cache openssh && \
+    ssh-keygen -A && \
+    echo 'root:root' | chpasswd && \
+    sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config && \
+    sed -i 's/PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config && \
+    sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config && \
+    sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config && \
+    /usr/sbin/sshd -D
+  "
+```
+
+Connect to that new server via your command-line SSH:
+```bash
+ssh root@localhost -p 2222
+```
+(use `root` as your password)
+
+In the newly created SSH session, enter the following commands - but use the "Tide SSH public key" you copied earlier instead of the "blahblah" one used in this example:
+```bash
+adduser -D -s /bin/sh user
+passwd -d user
+mkdir -p /home/user/.ssh
 chmod 700 /home/user/.ssh
+chown user:user /home/user/.ssh
+echo "ssh-ed25519 blahblahblah user@keylessh" > /home/user/.ssh/authorized_keys
+chmod 600 /home/user/.ssh/authorized_keys
+chown user:user /home/user/.ssh/authorized_keys
 ```
 
 Now return to the KeyleSSH `Dashboard` page where the "Authorize SSH Session" pop-up is opened, and click the `Authorize & Connect` button.

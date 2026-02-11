@@ -80,14 +80,14 @@ export function getAuthOverrideUrl(): string {
   if (envUrl && envUrl.trim().length > 0) {
     try {
       new URL(envUrl);
-      return envUrl;
+      return envUrl.replace(/\/+$/, "");
     } catch {
       console.warn(
         "[TidecloakConfig] Invalid AUTH_SERVER_OVERRIDE_URL in environment. Falling back to config file."
       );
     }
   }
-  return typedTcData()["auth-server-url"] || "";
+  return (typedTcData()["auth-server-url"] || "").replace(/\/+$/, "");
 }
 
 export function getRealm(): string {

@@ -62,10 +62,10 @@ public class Contract : IAccessPolicy
 {
     // These policy parameters are filled in by the policy "params" map.
     // Marking them Required ensures missing values result in deny/validation failures.
-    [PolicyParam(Required = true, Description = "Role required for SSH access (e.g., ssh:root)")]
+    [PolicyParam(Required = true, Description = "Role required for SSH access (e.g., ssh:root).")]
     public string Role { get; set; }
 
-    [PolicyParam(Required = true, Description = "Resource identifier for role checks")]
+    [PolicyParam(Required = true, Description = "Resource identifier for role checks.")]
     public string Resource { get; set; }
 
     // Called for every request. Validate the request data payload and return Allow/Deny.
