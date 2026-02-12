@@ -30,7 +30,7 @@ app.use(express.urlencoded({ extended: false }));
 app.use((_req, res, next) => {
   res.setHeader(
     "Content-Security-Policy",
-    "frame-src 'self' https://*.tideprotocol.com"
+    "frame-src 'self' https://*.tideprotocol.com https://*.dauth.me"
   );
   next();
 });
