@@ -26,6 +26,15 @@ app.use(
 
 app.use(express.urlencoded({ extended: false }));
 
+// Allow embedding *.tideprotocol.com in iframes within this app
+app.use((_req, res, next) => {
+  res.setHeader(
+    "Content-Security-Policy",
+    "frame-src 'self' https://*.tideprotocol.com"
+  );
+  next();
+});
+
 app.use((req, res, next) => {
   const start = Date.now();
   const path = req.path;
