@@ -5,7 +5,7 @@ on:
 
 env:
   AZURE_WEBAPP_NAME: keylessh
-  NODE_VERSION: '22.x'
+  NODE_VERSION: '20.x'
 
 jobs:
   build-and-deploy:
@@ -45,9 +45,6 @@ jobs:
           # Install production dependencies only
           cd deploy
           npm ci --omit=dev
-
-          # Rebuild native modules for the target Node version
-          npm rebuild better-sqlite3
 
           # Create web.config for IIS (Azure App Service uses this)
           cat > web.config << 'EOF'
