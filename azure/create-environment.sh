@@ -93,7 +93,7 @@ az webapp create \
     --name $WEBAPP_NAME \
     --resource-group $RESOURCE_GROUP \
     --plan $APP_SERVICE_PLAN \
-    --runtime "NODE:20-lts" \
+    --runtime "NODE:22-lts" \
     --output none 2>/dev/null || echo "Web App already exists"
 
 # Enable WebSockets on Web App
