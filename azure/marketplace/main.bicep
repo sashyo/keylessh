@@ -218,13 +218,66 @@ resource bridgeApp 'Microsoft.App/containerApps@2023-05-01' = {
   }
 }
 
+// Conditionally build secrets array (empty strings not allowed)
+var baseSecrets = [
+  {
+    name: 'tidecloak-config'
+    value: tidecloakConfigB64
+  }
+]
+var stripeSecrets = empty(stripeSecretKey) ? [] : [
+  {
+    name: 'stripe-secret-key'
+    value: stripeSecretKey
+  }
+  {
+    name: 'stripe-webhook-secret'
+    value: stripeWebhookSecret
+  }
+]
+var allSecrets = concat(baseSecrets, stripeSecrets)
+
+// Conditionally build env vars
+var baseEnvVars = [
+  {
+    name: 'NODE_ENV'
+    value: 'production'
+  }
+  {
+    name: 'PORT'
+    value: '3000'
+  }
+  {
+    name: 'DATABASE_URL'
+    value: '/app/data/keylessh.db'
+  }
+  {
+    name: 'BRIDGE_URL'
+    value: 'wss://${bridgeApp.properties.configuration.ingress.fqdn}'
+  }
+  {
+    name: 'TIDECLOAK_CONFIG_B64'
+    secretRef: 'tidecloak-config'
+  }
+]
+var stripeEnvVars = empty(stripeSecretKey) ? [] : [
+  {
+    name: 'STRIPE_SECRET_KEY'
+    secretRef: 'stripe-secret-key'
+  }
+  {
+    name: 'STRIPE_WEBHOOK_SECRET'
+    secretRef: 'stripe-webhook-secret'
+  }
+]
+var allEnvVars = concat(baseEnvVars, stripeEnvVars)
+
 // KeyleSSH Main Container App
 resource keylesshApp 'Microsoft.App/containerApps@2023-05-01' = {
   name: keylesshAppName
   location: location
   dependsOn: [
     storageMount
-    bridgeApp
   ]
   properties: {
     managedEnvironmentId: containerEnv.id
@@ -235,20 +288,7 @@ resource keylesshApp 'Microsoft.App/containerApps@2023-05-01' = {
         transport: 'http'
         allowInsecure: false
       }
-      secrets: [
-        {
-          name: 'tidecloak-config'
-          value: tidecloakConfigB64
-        }
-        {
-          name: 'stripe-secret-key'
-          value: stripeSecretKey
-        }
-        {
-          name: 'stripe-webhook-secret'
-          value: stripeWebhookSecret
-        }
-      ]
+      secrets: allSecrets
     }
     template: {
       containers: [
@@ -259,36 +299,7 @@ resource keylesshApp 'Microsoft.App/containerApps@2023-05-01' = {
             cpu: json(keylesshCpu)
             memory: keylesshMemory
           }
-          env: [
-            {
-              name: 'NODE_ENV'
-              value: 'production'
-            }
-            {
-              name: 'PORT'
-              value: '3000'
-            }
-            {
-              name: 'DATABASE_URL'
-              value: '/app/data/keylessh.db'
-            }
-            {
-              name: 'BRIDGE_URL'
-              value: 'wss://${bridgeApp.properties.configuration.ingress.fqdn}'
-            }
-            {
-              name: 'TIDECLOAK_CONFIG_B64'
-              secretRef: 'tidecloak-config'
-            }
-            {
-              name: 'STRIPE_SECRET_KEY'
-              secretRef: 'stripe-secret-key'
-            }
-            {
-              name: 'STRIPE_WEBHOOK_SECRET'
-              secretRef: 'stripe-webhook-secret'
-            }
-          ]
+          env: allEnvVars
           volumeMounts: [
             {
               volumeName: 'data-volume'
