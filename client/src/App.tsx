@@ -88,12 +88,11 @@ function ConsoleLegacyRedirect() {
  * so SSH connections persist across page navigation.
  */
 function AuthenticatedApp() {
-  const { isAuthenticated, isLoading, hasRole, orgRole } = useAuth();
+  const { isAuthenticated, isLoading, hasRole } = useAuth();
   const [location] = useLocation();
   const [, setLocation] = useLocation();
   const [showRetry, setShowRetry] = useState(false);
-  // Allow admin access for: legacy admin role, org-admin, or global-admin
-  const isAdmin = hasRole("admin") || orgRole === "org-admin" || orgRole === "global-admin";
+  const isAdmin = hasRole("admin");
 
   useEffect(() => {
     if (!isLoading && !isAuthenticated) {
@@ -187,7 +186,6 @@ function Router() {
     <Switch>
       <Route path="/login" component={Login} />
       <Route path="/auth/redirect" component={AuthRedirect} />
-      <Route path="/onboarding" component={Onboarding} />
       {/* All other routes require authentication */}
       <Route>
         <AuthenticatedApp />

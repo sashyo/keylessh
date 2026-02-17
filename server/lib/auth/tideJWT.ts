@@ -27,9 +27,6 @@ export interface TokenPayload {
   allowed_servers?: string[];
   exp?: number;
   iat?: number;
-  // Multi-tenancy claims
-  organization_id?: string;
-  org_role?: string; // "global-admin" | "org-admin" | "user"
   [key: string]: any;
 }
 

@@ -1,9 +1,9 @@
 import { useAuth } from "@/contexts/AuthContext";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Terminal, Shield, Server, Key, ArrowRight, Building2 } from "lucide-react";
+import { Terminal, Shield, Server, Key, ArrowRight } from "lucide-react";
 import { useEffect, useState } from "react";
-import { useLocation, Link } from "wouter";
+import { useLocation } from "wouter";
 
 function KeyleSSHLogo({ className = "" }: { className?: string }) {
   return (
@@ -177,16 +177,6 @@ export default function Login() {
                 <p className="text-xs text-muted-foreground">
                   By signing in, you agree to your organization's security policies
                 </p>
-              </div>
-
-              <div className="pt-4 border-t border-border">
-                <div className="flex items-center justify-center gap-2 mb-4">
-                  <Building2 className="h-4 w-4 text-muted-foreground" />
-                  <span className="text-sm text-muted-foreground">New to KeyleSSH?</span>
-                  <Link href="/onboarding" className="text-sm text-primary hover:underline font-medium">
-                    Register your organization
-                  </Link>
-                </div>
               </div>
 
               <div className="pt-4 border-t border-border">

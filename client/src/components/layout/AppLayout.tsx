@@ -104,11 +104,10 @@ const adminNavGroups = [
 ];
 
 export function AppLayout({ children }: AppLayoutProps) {
-  const { user, logout, hasRole, refreshToken, orgRole } = useAuth();
+  const { user, logout, hasRole, refreshToken } = useAuth();
   const { toast } = useToast();
   const [location] = useLocation();
-  // Allow admin access for: legacy admin role (tide-realm-admin), org-admin, or global-admin
-  const isAdmin = hasRole("admin") || orgRole === "org-admin" || orgRole === "global-admin";
+  const isAdmin = hasRole("admin");
   const [isBrowserOnline, setIsBrowserOnline] = useState(() => navigator.onLine);
 
   // Check if Stripe is configured to determine if License page should be shown

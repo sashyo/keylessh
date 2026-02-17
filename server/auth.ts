@@ -1,8 +1,7 @@
 import type { Request, Response, NextFunction } from "express";
-import type { OIDCUser, UserRole, OrgRole } from "@shared/schema";
+import type { OIDCUser, UserRole } from "@shared/schema";
 import { Roles } from "@shared/config/roles";
 import { verifyTideCloakToken, TokenPayload } from "./lib/auth/tideJWT";
-import { ENABLE_MULTI_TENANT, DEFAULT_ORG_ID } from "./config";
 import {
   GetUsers,
   GetUserRoleMappings,
@@ -45,32 +44,13 @@ function extractUserFromPayload(payload: TokenPayload): OIDCUser {
   // Check both locations for backwards compatibility
   const isAdmin = clientRoles.includes(ADMIN_ROLE) || realmRoles.includes(ADMIN_ROLE);
 
-  // Determine organization context
-  let organizationId: string;
-  let orgRole: OrgRole;
-
-  if (ENABLE_MULTI_TENANT) {
-    organizationId = payload.organization_id || DEFAULT_ORG_ID;
-    orgRole = (payload.org_role as OrgRole) || (isAdmin ? "org-admin" : "user");
-  } else {
-    organizationId = DEFAULT_ORG_ID;
-    orgRole = isAdmin ? "org-admin" : "user";
-  }
-
   return {
     id: payload.sub || "",
     username: payload.preferred_username || payload.name || "",
     email: payload.email || "",
     role: isAdmin ? "admin" : ("user" as UserRole),
     allowedServers: payload.allowed_servers || [],
-    organizationId,
-    orgRole,
   };
-}
-
-/** Extract the organization ID from an authenticated request. */
-export function getOrgId(req: AuthenticatedRequest): string {
-  return req.user?.organizationId || DEFAULT_ORG_ID;
 }
 
 // Middleware to authenticate requests using JWT with TideCloak verification
@@ -126,44 +106,6 @@ export function requireAdmin(
 
   if (req.user.role !== "admin") {
     res.status(403).json({ message: "Admin access required" });
-    return;
-  }
-
-  next();
-}
-
-// Middleware to require org-admin or global-admin role
-export function requireOrgAdmin(
-  req: AuthenticatedRequest,
-  res: Response,
-  next: NextFunction
-) {
-  if (!req.user) {
-    res.status(401).json({ message: "Authentication required" });
-    return;
-  }
-
-  if (req.user.orgRole !== "org-admin" && req.user.orgRole !== "global-admin") {
-    res.status(403).json({ message: "Organization admin access required" });
-    return;
-  }
-
-  next();
-}
-
-// Middleware to require global-admin role (cross-org operations)
-export function requireGlobalAdmin(
-  req: AuthenticatedRequest,
-  res: Response,
-  next: NextFunction
-) {
-  if (!req.user) {
-    res.status(401).json({ message: "Authentication required" });
-    return;
-  }
-
-  if (req.user.orgRole !== "global-admin") {
-    res.status(403).json({ message: "Global admin access required" });
     return;
   }
 
