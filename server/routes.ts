@@ -141,6 +141,18 @@ export async function registerRoutes(
   app: Express
 ): Promise<Server> {
   // ============================================
+  // Health Check (unauthenticated, for load balancers and monitoring)
+  // ============================================
+
+  app.get("/health", (_req, res) => {
+    res.json({ status: "ok", timestamp: new Date().toISOString() });
+  });
+
+  app.get("/api/health", (_req, res) => {
+    res.json({ status: "ok", timestamp: new Date().toISOString() });
+  });
+
+  // ============================================
   // Stripe Webhook (unauthenticated, must come before auth middleware)
   // ============================================
 
