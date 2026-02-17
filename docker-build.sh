@@ -8,17 +8,10 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# Configuration
-IMAGE_NAME="${IMAGE_NAME:-keylessh}"
+# Configuration - defaults to Docker Hub tideorg/keylessh
+IMAGE_NAME="${IMAGE_NAME:-tideorg/keylessh}"
 IMAGE_TAG="${IMAGE_TAG:-latest}"
-REGISTRY="${REGISTRY:-}"  # e.g., ghcr.io/tide-foundation or your-acr.azurecr.io
-
-# Full image name
-if [ -n "$REGISTRY" ]; then
-    FULL_IMAGE="$REGISTRY/$IMAGE_NAME:$IMAGE_TAG"
-else
-    FULL_IMAGE="$IMAGE_NAME:$IMAGE_TAG"
-fi
+FULL_IMAGE="$IMAGE_NAME:$IMAGE_TAG"
 
 print_header() {
     echo ""
@@ -55,9 +48,9 @@ echo "To push to registry:"
 echo "  docker push $FULL_IMAGE"
 echo ""
 
-# Optional: push to registry
-if [ "$PUSH" = "true" ] && [ -n "$REGISTRY" ]; then
-    print_header "Pushing to Registry"
+# Optional: push to Docker Hub
+if [ "$PUSH" = "true" ]; then
+    print_header "Pushing to Docker Hub"
     docker push "$FULL_IMAGE"
     echo "Pushed: $FULL_IMAGE"
 fi
