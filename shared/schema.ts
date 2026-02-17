@@ -1,43 +1,43 @@
-import { sqliteTable, text, integer } from "drizzle-orm/sqlite-core";
+import { pgTable, text, integer, boolean, timestamp, jsonb } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
-export const users = sqliteTable("users", {
+export const users = pgTable("users", {
   id: text("id").primaryKey(),
   username: text("username").notNull().unique(),
   email: text("email").notNull(),
   role: text("role").notNull().default("user"),
-  allowedServers: text("allowed_servers", { mode: "json" }).$type<string[]>().notNull().default([]),
+  allowedServers: jsonb("allowed_servers").$type<string[]>().notNull().default([]),
 });
 
 // SSH bridges - WebSocket-to-TCP relay endpoints
-export const bridges = sqliteTable("bridges", {
+export const bridges = pgTable("bridges", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
   url: text("url").notNull(), // WebSocket URL, e.g., wss://bridge.example.com/ws/tcp
   description: text("description"),
-  enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
-  isDefault: integer("is_default", { mode: "boolean" }).notNull().default(false),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+  enabled: boolean("enabled").notNull().default(true),
+  isDefault: boolean("is_default").notNull().default(false),
+  createdAt: timestamp("created_at").notNull(),
 });
 
-export const servers = sqliteTable("servers", {
+export const servers = pgTable("servers", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
   host: text("host").notNull(),
   port: integer("port").notNull().default(22),
   environment: text("environment").notNull().default("production"),
-  tags: text("tags", { mode: "json" }).$type<string[]>().notNull().default([]),
-  enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
-  sshUsers: text("ssh_users", { mode: "json" }).$type<string[]>().notNull().default([]),
+  tags: jsonb("tags").$type<string[]>().notNull().default([]),
+  enabled: boolean("enabled").notNull().default(true),
+  sshUsers: jsonb("ssh_users").$type<string[]>().notNull().default([]),
   // Session recording settings
-  recordingEnabled: integer("recording_enabled", { mode: "boolean" }).notNull().default(false),
-  recordedUsers: text("recorded_users", { mode: "json" }).$type<string[]>().notNull().default([]), // Empty = all users when enabled
+  recordingEnabled: boolean("recording_enabled").notNull().default(false),
+  recordedUsers: jsonb("recorded_users").$type<string[]>().notNull().default([]), // Empty = all users when enabled
   // Bridge association - null means use default/embedded bridge
   bridgeId: text("bridge_id"),
 });
 
-export const sessions = sqliteTable("sessions", {
+export const sessions = pgTable("sessions", {
   id: text("id").primaryKey(),
   userId: text("user_id").notNull(),
   userUsername: text("user_username"),
@@ -45,13 +45,13 @@ export const sessions = sqliteTable("sessions", {
   serverId: text("server_id").notNull(),
   sshUser: text("ssh_user").notNull(),
   status: text("status").notNull().default("active"),
-  startedAt: integer("started_at", { mode: "timestamp" }).notNull(),
-  endedAt: integer("ended_at", { mode: "timestamp" }),
+  startedAt: timestamp("started_at").notNull(),
+  endedAt: timestamp("ended_at"),
   recordingId: text("recording_id"), // Link to recording if session was recorded
 });
 
 // File operations log - tracks SFTP/SCP file transfers
-export const fileOperations = sqliteTable("file_operations", {
+export const fileOperations = pgTable("file_operations", {
   id: text("id").primaryKey(),
   sessionId: text("session_id").notNull(),
   serverId: text("server_id").notNull(),
@@ -65,11 +65,11 @@ export const fileOperations = sqliteTable("file_operations", {
   mode: text("mode").notNull(), // "sftp" | "scp"
   status: text("status").notNull(), // "success" | "error"
   errorMessage: text("error_message"),
-  timestamp: integer("timestamp", { mode: "timestamp" }).notNull(),
+  timestamp: timestamp("timestamp").notNull(),
 });
 
 // Session recordings table - stores terminal I/O for playback
-export const recordings = sqliteTable("recordings", {
+export const recordings = pgTable("recordings", {
   id: text("id").primaryKey(),
   sessionId: text("session_id").notNull(),
   serverId: text("server_id").notNull(),
@@ -77,8 +77,8 @@ export const recordings = sqliteTable("recordings", {
   userId: text("user_id").notNull(),
   userEmail: text("user_email").notNull(),
   sshUser: text("ssh_user").notNull(),
-  startedAt: integer("started_at", { mode: "timestamp" }).notNull(),
-  endedAt: integer("ended_at", { mode: "timestamp" }),
+  startedAt: timestamp("started_at").notNull(),
+  endedAt: timestamp("ended_at"),
   duration: integer("duration"), // Duration in seconds
   terminalWidth: integer("terminal_width").notNull().default(80),
   terminalHeight: integer("terminal_height").notNull().default(24),
@@ -100,7 +100,7 @@ export type SubscriptionTier = keyof typeof subscriptionTiers;
 export type SubscriptionStatus = 'active' | 'canceled' | 'past_due' | 'trialing';
 
 // Organization subscription table
-export const subscriptions = sqliteTable("subscriptions", {
+export const subscriptions = pgTable("subscriptions", {
   id: text("id").primaryKey(),
   tier: text("tier").notNull().default("free"),
   stripeCustomerId: text("stripe_customer_id"),
@@ -108,13 +108,13 @@ export const subscriptions = sqliteTable("subscriptions", {
   stripePriceId: text("stripe_price_id"),
   status: text("status").notNull().default("active"),
   currentPeriodEnd: integer("current_period_end"),
-  cancelAtPeriodEnd: integer("cancel_at_period_end", { mode: "boolean" }).default(false),
+  cancelAtPeriodEnd: boolean("cancel_at_period_end").default(false),
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at"),
 });
 
 // Billing history table
-export const billingHistory = sqliteTable("billing_history", {
+export const billingHistory = pgTable("billing_history", {
   id: text("id").primaryKey(),
   subscriptionId: text("subscription_id").notNull(),
   stripeInvoiceId: text("stripe_invoice_id"),
