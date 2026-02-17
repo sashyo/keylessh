@@ -46,6 +46,9 @@ jobs:
           cd deploy
           npm ci --omit=dev
 
+          # Rebuild native modules for the target Node version
+          npm rebuild better-sqlite3
+
           # Create web.config for IIS (Azure App Service uses this)
           cat > web.config << 'EOF'
           <?xml version="1.0" encoding="utf-8"?>
