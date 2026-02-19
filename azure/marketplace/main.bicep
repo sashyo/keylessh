@@ -63,7 +63,7 @@ var fileShareName = 'keylessh-data'
 var logAnalyticsName = '${namePrefix}-logs'
 
 // Log Analytics Workspace (required for Container Apps)
-resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2022-10-01' = {
+resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2025-02-01' = {
   name: logAnalyticsName
   location: location
   properties: {
@@ -75,7 +75,7 @@ resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2022-10-01' = {
 }
 
 // Storage Account for persistent data
-resource storageAccount 'Microsoft.Storage/storageAccounts@2023-01-01' = {
+resource storageAccount 'Microsoft.Storage/storageAccounts@2025-01-01' = {
   name: storageAccountName
   location: location
   sku: {
@@ -90,13 +90,13 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-01-01' = {
 }
 
 // File Services
-resource fileServices 'Microsoft.Storage/storageAccounts/fileServices@2023-01-01' = {
+resource fileServices 'Microsoft.Storage/storageAccounts/fileServices@2025-01-01' = {
   parent: storageAccount
   name: 'default'
 }
 
 // File Share for KeyleSSH data (SQLite DB + config)
-resource fileShare 'Microsoft.Storage/storageAccounts/fileServices/shares@2023-01-01' = {
+resource fileShare 'Microsoft.Storage/storageAccounts/fileServices/shares@2025-01-01' = {
   parent: fileServices
   name: fileShareName
   properties: {
@@ -105,7 +105,7 @@ resource fileShare 'Microsoft.Storage/storageAccounts/fileServices/shares@2023-0
 }
 
 // Container Apps Environment
-resource containerEnv 'Microsoft.App/managedEnvironments@2023-05-01' = {
+resource containerEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
   name: containerEnvName
   location: location
   properties: {
@@ -126,7 +126,7 @@ resource containerEnv 'Microsoft.App/managedEnvironments@2023-05-01' = {
 }
 
 // Storage mount for Container Apps Environment
-resource storageMount 'Microsoft.App/managedEnvironments/storages@2023-05-01' = {
+resource storageMount 'Microsoft.App/managedEnvironments/storages@2024-03-01' = {
   parent: containerEnv
   name: 'keylessh-storage'
   properties: {
@@ -140,7 +140,7 @@ resource storageMount 'Microsoft.App/managedEnvironments/storages@2023-05-01' = 
 }
 
 // TCP Bridge Container App
-resource bridgeApp 'Microsoft.App/containerApps@2023-05-01' = {
+resource bridgeApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: bridgeAppName
   location: location
   properties: {
@@ -273,7 +273,7 @@ var stripeEnvVars = empty(stripeSecretKey) ? [] : [
 var allEnvVars = concat(baseEnvVars, stripeEnvVars)
 
 // KeyleSSH Main Container App
-resource keylesshApp 'Microsoft.App/containerApps@2023-05-01' = {
+resource keylesshApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: keylesshAppName
   location: location
   dependsOn: [
@@ -354,8 +354,8 @@ resource keylesshApp 'Microsoft.App/containerApps@2023-05-01' = {
 }
 
 // Outputs
-output keylesshUrl string = 'https://${keylesshApp.properties.configuration.ingress.fqdn}'
-output bridgeUrl string = 'wss://${bridgeApp.properties.configuration.ingress.fqdn}'
+output keylesshFqdn string = keylesshApp.properties.configuration.ingress.fqdn
+output bridgeFqdn string = bridgeApp.properties.configuration.ingress.fqdn
 output storageAccountName string = storageAccount.name
 output fileShareName string = fileShareName
 output resourceGroupName string = resourceGroup().name
