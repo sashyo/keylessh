@@ -110,7 +110,6 @@ else
 fi
 
 # Initialize Tide realm + IGA
-TOKEN="$(get_admin_token)"
 echo "🔐 Initializing Tide realm + IGA..."
 
 # Prompt for email
@@ -139,6 +138,7 @@ while true; do
 done
 echo ""
 
+TOKEN="$(get_admin_token)"
 curl -s $CURL_OPTS -X POST "${TIDECLOAK_LOCAL_URL}/admin/realms/${REALM_NAME}/vendorResources/setUpTideRealm" \
     -H "Authorization: Bearer $TOKEN" \
     -H "Content-Type: application/x-www-form-urlencoded" \
