@@ -2,8 +2,8 @@
 set -e
 
 # Configuration - update these values
-RESOURCE_GROUP="keylessh-rg"
-LOCATION="eastus"
+RESOURCE_GROUP="KeyleSSH"
+LOCATION="australiaeast"
 ENVIRONMENT_NAME="keylessh-env"
 ACR_NAME="keylesshacr"
 APP_NAME="keylessh-tcp-bridge"

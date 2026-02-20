@@ -1,0 +1,23 @@
+{
+  "realm": "keylessh-demo",
+  "auth-server-url": "https://staging.dauth.me",
+  "ssl-required": "external",
+  "resource": "keylessh",
+  "public-client": true,
+  "confidential-port": 0,
+  "jwk": {
+    "keys": [
+      {
+        "kid": "TPlidYX-_Jaw8wTsthyDEQIwIxqbJkyoJBW6qN4InTQ",
+        "kty": "OKP",
+        "alg": "EdDSA",
+        "use": "sig",
+        "crv": "Ed25519",
+        "x": "75TGtIj59SC5jCYJFMkuq-bjhdbHFXWniyZ1dc3BV2E"
+      }
+    ]
+  },
+  "vendorId": "1733346450789363168521270047753438572443843535289873339799948679139837616382",
+  "homeOrkUrl": "https://sork1.tideprotocol.com",
+  "client-origin-auth-https://demo.keylessh.com": "dOuMBHE+g+lawboJwJIN7EqmVPdckJOLMIdGGqNznn411f2HOYeNUZU59YpnSwr3mNciCHBW0NLJx7orRAwkBQ=="
+}

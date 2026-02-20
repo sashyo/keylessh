@@ -1,0 +1,50 @@
+# KeyleSSH Docker Compose Configuration
+# For local development and testing
+
+services:
+  keylessh:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: keylessh:latest
+    container_name: keylessh
+    ports:
+      - "3000:3000"
+    volumes:
+      # Persist database and configuration
+      - ./data:/app/data
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - DATABASE_URL=/app/data/keylessh.db
+      # External TCP bridge URL (optional - for production scaling)
+      # - BRIDGE_URL=wss://your-bridge-url
+      # Stripe configuration (optional - for SaaS mode)
+      # - STRIPE_SECRET_KEY=sk_test_...
+      # - STRIPE_WEBHOOK_SECRET=whsec_...
+      # - STRIPE_PRICE_ID_PRO=price_...
+      # - STRIPE_PRICE_ID_ENTERPRISE=price_...
+      # - APP_URL=https://your-domain.com
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get({host:'127.0.0.1',port:3000,path:'/health',timeout:2000},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  # Optional: TCP Bridge for SSH tunneling (if not using external bridge)
+  # Uncomment if you want to run the bridge locally
+  # tcp-bridge:
+  #   build:
+  #     context: ./tcp-bridge
+  #     dockerfile: Dockerfile
+  #   image: keylessh-bridge:latest
+  #   container_name: keylessh-bridge
+  #   ports:
+  #     - "8080:8080"
+  #   volumes:
+  #     - ./data/tidecloak.json:/app/tidecloak.json:ro
+  #   environment:
+  #     - PORT=8080
+  #   restart: unless-stopped
