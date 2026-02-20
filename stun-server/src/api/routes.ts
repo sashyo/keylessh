@@ -106,6 +106,33 @@ export function createApiHandler(registry: Registry, adminAuth?: AdminAuth, tide
       return true;
     }
 
+    // ── API: Select WAF (GET — single redirect, sets cookies) ──
+    if (path === "/api/select" && req.method === "GET") {
+      const params = new URLSearchParams(url.split("?")[1] || "");
+      const wafId = params.get("waf");
+      const backend = params.get("backend");
+      if (!wafId || !registry.getWaf(wafId)) {
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "WAF not found" }));
+        return true;
+      }
+      // Only need waf_relay cookie for STUN relay routing.
+      // Backend routing is path-based: /__b/<name>/
+      const cookies: string[] = [
+        `waf_relay=${wafId}; Path=/; HttpOnly; SameSite=Lax`,
+      ];
+      // Redirect to /__b/<name>/ so the WAF routes to the right backend
+      const location = backend
+        ? `/__b/${encodeURIComponent(backend)}/`
+        : "/";
+      res.writeHead(302, {
+        Location: location,
+        "Set-Cookie": cookies,
+      });
+      res.end();
+      return true;
+    }
+
     // ── API: Clear selection (reset cookies, back to portal) ──
     if (path === "/api/clear-selection" && req.method === "POST") {
       res.writeHead(200, {

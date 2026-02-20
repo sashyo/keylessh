@@ -223,20 +223,9 @@
       }
 
       window.selectWaf = function(wafId, backend) {
-        fetch("/api/select-waf", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ wafId: wafId, backend: backend }),
-        }).then(function(res) {
-          if (res.ok) {
-            // Navigate to /__b/<name>/ which sets waf_backend cookie and redirects to /
-            window.location.href = "/__b/" + encodeURIComponent(backend) + "/";
-          } else {
-            return res.json().then(function(d) { alert(d.error || "Failed"); });
-          }
-        }).catch(function() {
-          alert("Connection failed");
-        });
+        // Single GET redirect: sets cookies and navigates in one step
+        window.location.href = "/api/select?waf=" + encodeURIComponent(wafId) +
+          "&backend=" + encodeURIComponent(backend);
       };
 
       function loadWafs() {

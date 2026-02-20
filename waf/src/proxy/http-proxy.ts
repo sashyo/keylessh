@@ -218,14 +218,41 @@ export function createProxy(options: ProxyOptions): {
     });
   }
 
-  function resolveBackend(req: IncomingMessage): URL {
-    // Check x-waf-backend header (set by STUN relay) first
+  /**
+   * Prepend /__b/<name> prefix to absolute paths in HTML attributes
+   * (href="/...", src="/...", action="/...") so links stay within
+   * the correct backend namespace. Skips protocol-relative (//)
+   * and already-prefixed (/__b/) paths.
+   */
+  function prependPrefix(html: string, prefix: string): string {
+    return html.replace(
+      /((?:href|src|action|formaction)\s*=\s*["'])(\/(?!\/|__b\/))/gi,
+      `$1${prefix}$2`
+    );
+  }
+
+  // Floating button injected into HTML pages so users can switch backend
+  // without manually clearing cookies. Navigates to /portal on the STUN
+  // server which clears selection cookies and shows the portal UI.
+  const switchButtonHtml = `<div id="kls-switch" style="position:fixed;bottom:16px;right:16px;z-index:99999;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif">` +
+    `<a href="/portal" style="display:inline-flex;align-items:center;gap:6px;padding:8px 14px;background:#1e293b;color:#f8fafc;border:1px solid #334155;border-radius:8px;font-size:13px;font-weight:500;text-decoration:none;box-shadow:0 2px 8px rgba(0,0,0,.3);transition:background .15s" ` +
+    `onmouseover="this.style.background='#334155'" onmouseout="this.style.background='#1e293b'">` +
+    `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/></svg>` +
+    `Switch</a></div>`;
+
+  function resolveBackend(req: IncomingMessage, activeBackend?: string): URL {
+    // 1. Path-based /__b/<name> prefix (highest priority)
+    if (activeBackend) {
+      const found = backendMap.get(activeBackend);
+      if (found) return found;
+    }
+    // 2. x-waf-backend header (set by STUN relay)
     const headerBackend = req.headers["x-waf-backend"] as string | undefined;
     if (headerBackend) {
       const found = backendMap.get(headerBackend);
       if (found) return found;
     }
-    // Check waf_backend cookie (direct access)
+    // 3. waf_backend cookie (fallback for prefix-less requests like JS fetch)
     const cookies = parseCookies(req.headers.cookie);
     const cookieBackend = cookies["waf_backend"];
     if (cookieBackend) {
@@ -264,8 +291,29 @@ export function createProxy(options: ProxyOptions): {
   }
 
   const requestHandler = async (req: IncomingMessage, res: ServerResponse) => {
-      const url = req.url || "/";
-      const path = url.split("?")[0];
+      let url = req.url || "/";
+      let path = url.split("?")[0];
+      let backendPrefix = ""; // e.g. "/__b/MediaBox"
+      let activeBackend = ""; // e.g. "MediaBox"
+
+      // ── Path-based backend routing ──────────────────────
+      // Strip /__b/<name>/ prefix so all routes work normally.
+      // The backend is determined by path, not cookies.
+      if (path.startsWith("/__b/")) {
+        const rest = path.slice("/__b/".length);
+        const slashIdx = rest.indexOf("/");
+        const encodedName = slashIdx >= 0 ? rest.slice(0, slashIdx) : rest;
+        const name = decodeURIComponent(encodedName);
+        if (backendMap.has(name)) {
+          activeBackend = name;
+          backendPrefix = `/__b/${encodedName}`;
+          const stripped = slashIdx >= 0 ? rest.slice(slashIdx) : "/";
+          const query = url.includes("?") ? url.slice(url.indexOf("?")) : "";
+          url = stripped + query;
+          path = stripped;
+          req.url = url;
+        }
+      }
 
       // ── Public routes ────────────────────────────────────
 
@@ -428,32 +476,6 @@ export function createProxy(options: ProxyOptions): {
         return;
       }
 
-      // ── Backend switch (path-based routing) ──────────────
-      // /__b/<name>/path sets waf_backend cookie and redirects to /path.
-      // Cross-backend localhost:PORT refs in HTML are rewritten to these
-      // paths, so clicking them switches backend context automatically.
-      if (path.startsWith("/__b/")) {
-        const rest = path.slice("/__b/".length);
-        const slashIdx = rest.indexOf("/");
-        const encodedName = slashIdx >= 0 ? rest.slice(0, slashIdx) : rest;
-        const backendName = decodeURIComponent(encodedName);
-        const targetPath = slashIdx >= 0 ? rest.slice(slashIdx) : "/";
-
-        if (backendMap.has(backendName)) {
-          const query = url.includes("?") ? url.slice(url.indexOf("?")) : "";
-          res.writeHead(302, {
-            Location: targetPath + query,
-            "Set-Cookie": buildCookieHeader(
-              "waf_backend",
-              encodeURIComponent(backendName),
-              86400
-            ),
-          });
-          res.end();
-          return;
-        }
-      }
-
       // ── Reverse-proxy TideCloak (/realms/*, /resources/*) ──
       // Public — TideCloak handles its own auth on these paths.
       // This keeps the browser on the WAF origin so DataChannel
@@ -567,7 +589,8 @@ export function createProxy(options: ProxyOptions): {
         stats.rejectedRequests++;
 
         if (isBrowserRequest(req)) {
-          const redirectTarget = encodeURIComponent(url);
+          const fullUrl = backendPrefix + url;
+          const redirectTarget = encodeURIComponent(fullUrl);
           redirect(res, `/login?redirect=${redirectTarget}&error=expired`);
         } else {
           res.writeHead(401, { "Content-Type": "application/json" });
@@ -594,7 +617,7 @@ export function createProxy(options: ProxyOptions): {
       proxyHeaders["x-forwarded-for"] =
         req.socket.remoteAddress || "unknown";
 
-      const targetBackend = resolveBackend(req);
+      const targetBackend = resolveBackend(req, activeBackend);
       const targetIsHttps = targetBackend.protocol === "https:";
       const makeBackendReq = targetIsHttps ? httpsRequest : httpRequest;
 
@@ -615,35 +638,63 @@ export function createProxy(options: ProxyOptions): {
           // Rewrite redirects: TideCloak → relative, localhost:PORT → /__b/<name>
           rewriteRedirects(headers, tcProxyUrl.origin, portToBackend);
 
+          // Prepend /__b/<name> prefix to relative redirects so backend
+          // redirects stay within the correct path namespace
+          if (backendPrefix && headers.location && typeof headers.location === "string") {
+            const loc = headers.location;
+            if (loc.startsWith("/") && !loc.startsWith("/__b/")) {
+              headers.location = backendPrefix + loc;
+            }
+          }
+
+          // Set waf_backend cookie as fallback for prefix-less requests
+          // (JS fetch, XHR, etc. that use absolute paths without /__b/)
+          const cookieArr: string[] = [];
+          if (activeBackend) {
+            cookieArr.push(buildCookieHeader("waf_backend", encodeURIComponent(activeBackend), 86400));
+          }
+
           // Append refresh cookies if token was refreshed
           const refreshCookies = (res as any).__refreshCookies as
             | string[]
             | undefined;
           if (refreshCookies) {
+            cookieArr.push(...refreshCookies);
+          }
+
+          if (cookieArr.length) {
             const existing = headers["set-cookie"] || [];
             const existingArr = Array.isArray(existing)
               ? existing
-              : [existing as string];
-            headers["set-cookie"] = [...existingArr, ...refreshCookies];
+              : existing ? [existing as string] : [];
+            headers["set-cookie"] = [...existingArr, ...cookieArr];
           }
 
-          // Buffer HTML to rewrite localhost URLs and inject WebRTC script
+          // Buffer HTML to rewrite URLs and inject scripts
           const contentType = (headers["content-type"] || "") as string;
           if (contentType.includes("text/html")) {
             const chunks: Buffer[] = [];
             proxyRes.on("data", (chunk: Buffer) => chunks.push(chunk));
             proxyRes.on("end", () => {
               let html = Buffer.concat(chunks).toString("utf-8");
-              // Rewrite localhost:PORT refs so they stay in DataChannel
+              // Rewrite localhost:PORT refs → /__b/<name>
               html = rewriteLocalhostInHtml(html);
+              // Prepend /__b/<name> to absolute paths in HTML attributes
+              if (backendPrefix) {
+                html = prependPrefix(html, backendPrefix);
+              }
               // Inject WebRTC upgrade script
               if (options.iceServers?.length) {
-                const script = `<script src="/js/webrtc-upgrade.js" defer></script>`;
+                const script = `<script src="${backendPrefix}/js/webrtc-upgrade.js" defer></script>`;
                 if (html.includes("</body>")) {
                   html = html.replace("</body>", `${script}\n</body>`);
                 } else {
                   html += script;
                 }
+              }
+              // Inject floating "Switch" button for multi-backend WAFs
+              if (backendMap.size > 1 && html.includes("</body>")) {
+                html = html.replace("</body>", `${switchButtonHtml}\n</body>`);
               }
               delete headers["content-length"];
               res.writeHead(proxyRes.statusCode || 502, headers);
