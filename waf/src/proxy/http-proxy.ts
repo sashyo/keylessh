@@ -246,18 +246,10 @@ export function createProxy(options: ProxyOptions): {
       const found = backendMap.get(activeBackend);
       if (found) return found;
     }
-    // 2. x-waf-backend header (set by STUN relay)
+    // 2. x-waf-backend header (set by STUN relay from /__b/ prefix in URL)
     const headerBackend = req.headers["x-waf-backend"] as string | undefined;
     if (headerBackend) {
       const found = backendMap.get(headerBackend);
-      if (found) return found;
-    }
-    // 3. waf_backend cookie (fallback for prefix-less requests like JS fetch)
-    const cookies = parseCookies(req.headers.cookie);
-    const cookieBackend = cookies["waf_backend"];
-    if (cookieBackend) {
-      const decoded = decodeURIComponent(cookieBackend);
-      const found = backendMap.get(decoded);
       if (found) return found;
     }
     return defaultBackendUrl;
@@ -647,27 +639,16 @@ export function createProxy(options: ProxyOptions): {
             }
           }
 
-          // Set waf_backend cookie as fallback for prefix-less requests
-          // (JS fetch, XHR, etc. that use absolute paths without /__b/)
-          const cookieArr: string[] = [];
-          if (activeBackend) {
-            cookieArr.push(buildCookieHeader("waf_backend", encodeURIComponent(activeBackend), 86400));
-          }
-
           // Append refresh cookies if token was refreshed
           const refreshCookies = (res as any).__refreshCookies as
             | string[]
             | undefined;
           if (refreshCookies) {
-            cookieArr.push(...refreshCookies);
-          }
-
-          if (cookieArr.length) {
             const existing = headers["set-cookie"] || [];
             const existingArr = Array.isArray(existing)
               ? existing
               : existing ? [existing as string] : [];
-            headers["set-cookie"] = [...existingArr, ...cookieArr];
+            headers["set-cookie"] = [...existingArr, ...refreshCookies];
           }
 
           // Buffer HTML to rewrite URLs and inject scripts
@@ -682,6 +663,24 @@ export function createProxy(options: ProxyOptions): {
               // Prepend /__b/<name> to absolute paths in HTML attributes
               if (backendPrefix) {
                 html = prependPrefix(html, backendPrefix);
+                // Inject fetch/XHR interceptor so JS-initiated requests
+                // with absolute paths (e.g. fetch("/api/data")) get the
+                // /__b/<name> prefix prepended automatically.
+                const patchScript = `<script>(function(){` +
+                  `var P="${backendPrefix}";` +
+                  `var F=window.fetch;window.fetch=function(u,i){` +
+                    `if(typeof u==="string"&&u[0]==="/"&&u.indexOf("/__b/")!==0)u=P+u;` +
+                    `else if(u instanceof Request){var r=new URL(u.url);if(r.origin===location.origin&&r.pathname.indexOf("/__b/")!==0){r.pathname=P+r.pathname;u=new Request(r,u)}}` +
+                    `return F.call(this,u,i)};` +
+                  `var O=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){` +
+                    `if(typeof u==="string"&&u[0]==="/"&&u.indexOf("/__b/")!==0)arguments[1]=P+u;` +
+                    `return O.apply(this,arguments)};` +
+                  `})()</script>`;
+                if (html.includes("<head>")) {
+                  html = html.replace("<head>", `<head>${patchScript}`);
+                } else {
+                  html = patchScript + html;
+                }
               }
               // Inject WebRTC upgrade script
               if (options.iceServers?.length) {

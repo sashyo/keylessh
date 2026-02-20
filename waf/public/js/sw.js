@@ -5,9 +5,9 @@
  * the page's WebRTC DataChannel. If the DataChannel isn't available
  * (no page client, DC not open), falls back to normal fetch (HTTP relay).
  *
- * Stateless design — no in-memory flags. The page decides whether to use
- * the DataChannel or respond with an error (triggering relay fallback).
- * This avoids issues with browser terminating idle SWs and losing state.
+ * Also handles path-based backend routing: if the requesting page is
+ * under /__b/<name>/, prefixless absolute paths (e.g. /api/data) are
+ * rewritten to include the prefix (/__b/<name>/api/data).
  */
 
 self.addEventListener("install", () => {
@@ -30,8 +30,46 @@ self.addEventListener("fetch", (event) => {
   if (url.pathname.startsWith("/auth/")) return;
   if (url.pathname === "/login") return;
 
-  event.respondWith(handleViaDataChannel(event.request));
+  event.respondWith(rewriteAndHandle(event));
 });
+
+/**
+ * Extract /__b/<name> prefix from a pathname.
+ * Returns the prefix (e.g. "/__b/MediaBox") or null.
+ */
+function extractPrefix(pathname) {
+  const match = pathname.match(/^\/__b\/[^/]+/);
+  return match ? match[0] : null;
+}
+
+/**
+ * Rewrite the request URL to include the /__b/<name> prefix if
+ * the requesting client is under one and the request lacks it.
+ * Then route through DataChannel or fall back to normal fetch.
+ */
+async function rewriteAndHandle(event) {
+  let request = event.request;
+  const url = new URL(request.url);
+
+  // If the request already has the prefix, pass through
+  if (!url.pathname.startsWith("/__b/") && event.clientId) {
+    try {
+      const client = await self.clients.get(event.clientId);
+      if (client) {
+        const prefix = extractPrefix(new URL(client.url).pathname);
+        if (prefix) {
+          const newUrl = new URL(request.url);
+          newUrl.pathname = prefix + newUrl.pathname;
+          request = new Request(newUrl.toString(), request);
+        }
+      }
+    } catch {
+      // Ignore — proceed with original request
+    }
+  }
+
+  return handleViaDataChannel(request);
+}
 
 async function handleViaDataChannel(request) {
   // Clone before consuming, so fallback fetch() still works

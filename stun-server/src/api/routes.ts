@@ -87,15 +87,9 @@ export function createApiHandler(registry: Registry, adminAuth?: AdminAuth, tide
             res.end(JSON.stringify({ error: "WAF not found" }));
             return;
           }
-          const cookies: string[] = [
-            `waf_relay=${wafId}; Path=/; HttpOnly; SameSite=Lax`,
-          ];
-          if (backend) {
-            cookies.push(`waf_backend=${encodeURIComponent(backend)}; Path=/; HttpOnly; SameSite=Lax`);
-          }
           res.writeHead(200, {
             "Content-Type": "application/json",
-            "Set-Cookie": cookies,
+            "Set-Cookie": `waf_relay=${wafId}; Path=/; HttpOnly; SameSite=Lax`,
           });
           res.end(JSON.stringify({ success: true, wafId, backend: backend || null }));
         } catch {
@@ -137,10 +131,7 @@ export function createApiHandler(registry: Registry, adminAuth?: AdminAuth, tide
     if (path === "/api/clear-selection" && req.method === "POST") {
       res.writeHead(200, {
         "Content-Type": "application/json",
-        "Set-Cookie": [
-          "waf_relay=; Path=/; HttpOnly; Max-Age=0",
-          "waf_backend=; Path=/; HttpOnly; Max-Age=0",
-        ],
+        "Set-Cookie": "waf_relay=; Path=/; HttpOnly; Max-Age=0",
       });
       res.end(JSON.stringify({ success: true }));
       return true;
@@ -148,13 +139,10 @@ export function createApiHandler(registry: Registry, adminAuth?: AdminAuth, tide
 
     // ── Portal page ──────────────────────────────────
     if (path === "/portal" && req.method === "GET") {
-      // Clear selection cookies so user lands on portal even from /
+      // Clear WAF affinity cookie so user lands on portal
       res.writeHead(200, {
         "Content-Type": "text/html; charset=utf-8",
-        "Set-Cookie": [
-          "waf_relay=; Path=/; HttpOnly; Max-Age=0",
-          "waf_backend=; Path=/; HttpOnly; Max-Age=0",
-        ],
+        "Set-Cookie": "waf_relay=; Path=/; HttpOnly; Max-Age=0",
       });
       try {
         const content = readFileSync(join(PUBLIC_DIR, "portal.html"));
