@@ -141,14 +141,13 @@ function getCallbackUrl(req: IncomingMessage, isTls: boolean): string {
 
 /**
  * Rewrite `Location` headers that point to localhost or the TideCloak
- * origin into relative paths. This keeps DataChannel and remote
- * connections working — the browser resolves the path against the
- * current origin, so the service worker / DataChannel can intercept
- * it and the WAF's reverse-proxy routes handle the rest.
+ * origin. localhost:PORT refs become /__b/<name> paths (path-based
+ * backend routing), keeping DataChannel and remote connections working.
  */
 function rewriteRedirects(
   headers: Record<string, any>,
-  tcOrigin: string
+  tcOrigin: string,
+  portMap?: Map<string, string>
 ): void {
   if (!headers.location || typeof headers.location !== "string") return;
 
@@ -156,12 +155,23 @@ function rewriteRedirects(
   if (tcOrigin && headers.location.startsWith(tcOrigin)) {
     headers.location = headers.location.slice(tcOrigin.length) || "/";
   }
-  // Also rewrite localhost variants
+  // Rewrite localhost:PORT → /__b/<name> (known backend) or strip (unknown)
   headers.location = headers.location.replace(
     /^https?:\/\/localhost(:\d+)?/,
-    ""
+    (_match: string, portGroup?: string) => {
+      if (portGroup && portMap) {
+        const port = portGroup.slice(1);
+        const name = portMap.get(port);
+        if (name) return `/__b/${encodeURIComponent(name)}`;
+      }
+      return "";
+    }
   );
 }
+
+// Regex matching http(s)://localhost:PORT — used to rewrite backend
+// cross-references in HTML so they stay within the DataChannel.
+const LOCALHOST_URL_RE = /https?:\/\/localhost(:\d+)?/g;
 
 // ── Main proxy factory ───────────────────────────────────────────
 
@@ -183,6 +193,30 @@ export function createProxy(options: ProxyOptions): {
     }
   }
   const defaultBackendUrl = new URL(options.backendUrl);
+
+  // Reverse map: "localhost:PORT" → backend name (for cross-backend routing)
+  const portToBackend = new Map<string, string>();
+  for (const [name, url] of backendMap) {
+    if (url.hostname === "localhost" || url.hostname === "127.0.0.1") {
+      portToBackend.set(url.port || (url.protocol === "https:" ? "443" : "80"), name);
+    }
+  }
+
+  /**
+   * Rewrite all localhost:PORT URLs in HTML to /__b/<name> paths.
+   * This keeps links, form actions, and JS references within the
+   * DataChannel and routes them to the correct backend.
+   */
+  function rewriteLocalhostInHtml(html: string): string {
+    return html.replace(LOCALHOST_URL_RE, (_match: string, portGroup?: string) => {
+      if (portGroup) {
+        const port = portGroup.slice(1);
+        const name = portToBackend.get(port);
+        if (name) return `/__b/${encodeURIComponent(name)}`;
+      }
+      return "";
+    });
+  }
 
   function resolveBackend(req: IncomingMessage): URL {
     // Check x-waf-backend header (set by STUN relay) first
@@ -394,6 +428,32 @@ export function createProxy(options: ProxyOptions): {
         return;
       }
 
+      // ── Backend switch (path-based routing) ──────────────
+      // /__b/<name>/path sets waf_backend cookie and redirects to /path.
+      // Cross-backend localhost:PORT refs in HTML are rewritten to these
+      // paths, so clicking them switches backend context automatically.
+      if (path.startsWith("/__b/")) {
+        const rest = path.slice("/__b/".length);
+        const slashIdx = rest.indexOf("/");
+        const encodedName = slashIdx >= 0 ? rest.slice(0, slashIdx) : rest;
+        const backendName = decodeURIComponent(encodedName);
+        const targetPath = slashIdx >= 0 ? rest.slice(slashIdx) : "/";
+
+        if (backendMap.has(backendName)) {
+          const query = url.includes("?") ? url.slice(url.indexOf("?")) : "";
+          res.writeHead(302, {
+            Location: targetPath + query,
+            "Set-Cookie": buildCookieHeader(
+              "waf_backend",
+              encodeURIComponent(backendName),
+              86400
+            ),
+          });
+          res.end();
+          return;
+        }
+      }
+
       // ── Reverse-proxy TideCloak (/realms/*, /resources/*) ──
       // Public — TideCloak handles its own auth on these paths.
       // This keeps the browser on the WAF origin so DataChannel
@@ -552,8 +612,8 @@ export function createProxy(options: ProxyOptions): {
         (proxyRes) => {
           const headers = { ...proxyRes.headers };
 
-          // Rewrite any localhost redirects from the backend
-          rewriteRedirects(headers, tcProxyUrl.origin);
+          // Rewrite redirects: TideCloak → relative, localhost:PORT → /__b/<name>
+          rewriteRedirects(headers, tcProxyUrl.origin, portToBackend);
 
           // Append refresh cookies if token was refreshed
           const refreshCookies = (res as any).__refreshCookies as
@@ -567,18 +627,23 @@ export function createProxy(options: ProxyOptions): {
             headers["set-cookie"] = [...existingArr, ...refreshCookies];
           }
 
-          // Inject WebRTC upgrade script into HTML responses
+          // Buffer HTML to rewrite localhost URLs and inject WebRTC script
           const contentType = (headers["content-type"] || "") as string;
-          if (options.iceServers?.length && contentType.includes("text/html")) {
+          if (contentType.includes("text/html")) {
             const chunks: Buffer[] = [];
             proxyRes.on("data", (chunk: Buffer) => chunks.push(chunk));
             proxyRes.on("end", () => {
               let html = Buffer.concat(chunks).toString("utf-8");
-              const script = `<script src="/js/webrtc-upgrade.js" defer></script>`;
-              if (html.includes("</body>")) {
-                html = html.replace("</body>", `${script}\n</body>`);
-              } else {
-                html += script;
+              // Rewrite localhost:PORT refs so they stay in DataChannel
+              html = rewriteLocalhostInHtml(html);
+              // Inject WebRTC upgrade script
+              if (options.iceServers?.length) {
+                const script = `<script src="/js/webrtc-upgrade.js" defer></script>`;
+                if (html.includes("</body>")) {
+                  html = html.replace("</body>", `${script}\n</body>`);
+                } else {
+                  html += script;
+                }
               }
               delete headers["content-length"];
               res.writeHead(proxyRes.statusCode || 502, headers);

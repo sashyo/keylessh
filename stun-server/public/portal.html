@@ -229,7 +229,8 @@
           body: JSON.stringify({ wafId: wafId, backend: backend }),
         }).then(function(res) {
           if (res.ok) {
-            window.location.href = "/";
+            // Navigate to /__b/<name>/ which sets waf_backend cookie and redirects to /
+            window.location.href = "/__b/" + encodeURIComponent(backend) + "/";
           } else {
             return res.json().then(function(d) { alert(d.error || "Failed"); });
           }
