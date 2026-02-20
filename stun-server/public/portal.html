@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>KeyleSSH Portal</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0f172a;
+      --card-bg: #1e293b;
+      --border: #334155;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --primary: #3b82f6;
+      --primary-hover: #2563eb;
+      --green: #22c55e;
+      --red: #ef4444;
+      --gray: #64748b;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    .header {
+      text-align: center;
+      padding: 3rem 2rem 1.5rem;
+    }
+
+    .header h1 {
+      font-size: 1.75rem;
+      font-weight: 700;
+      letter-spacing: -0.025em;
+    }
+
+    .header p {
+      color: var(--text-muted);
+      font-size: 0.875rem;
+      margin-top: 0.5rem;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+      gap: 1rem;
+      width: 100%;
+      max-width: 960px;
+      padding: 0 2rem 2rem;
+    }
+
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 0.75rem;
+      padding: 1.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+
+    .card-header {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .status-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .status-dot.online { background: var(--green); }
+    .status-dot.offline { background: var(--red); }
+
+    .card-header h2 {
+      font-size: 1.125rem;
+      font-weight: 600;
+    }
+
+    .card-desc {
+      color: var(--text-muted);
+      font-size: 0.875rem;
+      line-height: 1.4;
+    }
+
+    .card-meta {
+      color: var(--gray);
+      font-size: 0.75rem;
+      display: flex;
+      gap: 1rem;
+    }
+
+    .btn {
+      display: block;
+      width: 100%;
+      padding: 0.625rem 1rem;
+      background: var(--primary);
+      color: #fff;
+      border: none;
+      border-radius: 0.5rem;
+      font-size: 0.875rem;
+      font-weight: 600;
+      text-align: center;
+      cursor: pointer;
+      transition: background 0.15s;
+      margin-top: auto;
+    }
+
+    .btn:hover { background: var(--primary-hover); }
+    .btn:disabled { background: var(--gray); cursor: not-allowed; }
+
+    .empty {
+      text-align: center;
+      color: var(--text-muted);
+      padding: 3rem 2rem;
+      font-size: 0.875rem;
+    }
+
+    .empty p { margin-bottom: 0.5rem; }
+
+    .footer {
+      text-align: center;
+      padding: 1.5rem;
+      color: var(--text-muted);
+      font-size: 0.75rem;
+    }
+
+    .footer a {
+      color: var(--primary);
+      text-decoration: none;
+    }
+
+    .footer a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>KeyleSSH</h1>
+    <p>Select an endpoint to connect</p>
+  </div>
+
+  <div class="grid" id="waf-grid">
+    <div class="empty" id="loading">
+      <p>Loading endpoints...</p>
+    </div>
+  </div>
+
+  <div class="footer">
+    Powered by KeyleSSH &middot; <a href="/admin">Admin</a>
+  </div>
+
+  <script>
+    (function() {
+      var grid = document.getElementById("waf-grid");
+
+      function render(wafs) {
+        if (!wafs || wafs.length === 0) {
+          grid.innerHTML = '<div class="empty"><p>No endpoints available</p><p>Start a WAF instance to see it here</p></div>';
+          return;
+        }
+
+        grid.innerHTML = wafs.map(function(waf) {
+          var statusClass = waf.online ? "online" : "offline";
+          var statusText = waf.online ? "Online" : "Offline";
+          var desc = waf.description || "No description";
+          var clients = waf.clientCount === 1 ? "1 client" : waf.clientCount + " clients";
+
+          return '<div class="card">' +
+            '<div class="card-header">' +
+              '<span class="status-dot ' + statusClass + '"></span>' +
+              '<h2>' + escapeHtml(waf.displayName) + '</h2>' +
+            '</div>' +
+            '<div class="card-desc">' + escapeHtml(desc) + '</div>' +
+            '<div class="card-meta">' +
+              '<span>' + statusText + '</span>' +
+              '<span>' + clients + '</span>' +
+            '</div>' +
+            '<button class="btn" ' +
+              (waf.online ? 'onclick="selectWaf(\'' + escapeAttr(waf.id) + '\')"' : 'disabled') +
+            '>Connect</button>' +
+          '</div>';
+        }).join("");
+      }
+
+      function escapeHtml(s) {
+        var div = document.createElement("div");
+        div.textContent = s;
+        return div.innerHTML;
+      }
+
+      function escapeAttr(s) {
+        return s.replace(/'/g, "\\'").replace(/"/g, "&quot;");
+      }
+
+      window.selectWaf = function(wafId) {
+        fetch("/api/select-waf", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ wafId: wafId }),
+        }).then(function(res) {
+          if (res.ok) {
+            window.location.href = "/";
+          } else {
+            return res.json().then(function(d) { alert(d.error || "Failed"); });
+          }
+        }).catch(function() {
+          alert("Connection failed");
+        });
+      };
+
+      function loadWafs() {
+        fetch("/api/wafs")
+          .then(function(r) { return r.json(); })
+          .then(function(data) { render(data.wafs); })
+          .catch(function() {
+            grid.innerHTML = '<div class="empty"><p>Failed to load endpoints</p></div>';
+          });
+      }
+
+      loadWafs();
+      setInterval(loadWafs, 5000);
+    })();
+  </script>
+</body>
+</html>

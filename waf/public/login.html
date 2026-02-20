@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>KeyleSSH Login</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0f172a;
+      --card-bg: #1e293b;
+      --border: #334155;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --primary: #3b82f6;
+      --primary-hover: #2563eb;
+      --error-bg: #7f1d1d;
+      --error-border: #991b1b;
+      --error-text: #fca5a5;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 420px;
+      padding: 2rem;
+    }
+
+    .logo {
+      text-align: center;
+      margin-bottom: 2rem;
+    }
+
+    .logo h1 {
+      font-size: 1.75rem;
+      font-weight: 700;
+      letter-spacing: -0.025em;
+    }
+
+    .logo p {
+      color: var(--text-muted);
+      font-size: 0.875rem;
+      margin-top: 0.5rem;
+    }
+
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 0.75rem;
+      padding: 2rem;
+    }
+
+    .error {
+      background: var(--error-bg);
+      border: 1px solid var(--error-border);
+      color: var(--error-text);
+      border-radius: 0.5rem;
+      padding: 0.75rem 1rem;
+      font-size: 0.875rem;
+      margin-bottom: 1.5rem;
+    }
+
+    .features {
+      list-style: none;
+      margin-bottom: 1.5rem;
+    }
+
+    .features li {
+      color: var(--text-muted);
+      font-size: 0.875rem;
+      padding: 0.375rem 0;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .features li::before {
+      content: "\2713";
+      color: var(--primary);
+      font-weight: 700;
+    }
+
+    .btn {
+      display: block;
+      width: 100%;
+      padding: 0.75rem 1.5rem;
+      background: var(--primary);
+      color: #fff;
+      border: none;
+      border-radius: 0.5rem;
+      font-size: 1rem;
+      font-weight: 600;
+      text-align: center;
+      text-decoration: none;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    .btn:hover { background: var(--primary-hover); }
+
+    .footer {
+      text-align: center;
+      margin-top: 1.5rem;
+      color: var(--text-muted);
+      font-size: 0.75rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="logo">
+      <h1>KeyleSSH</h1>
+      <p>Secure access gateway</p>
+    </div>
+
+    <div class="card">
+      <div id="error" class="error" style="display:none"></div>
+
+      <ul class="features">
+        <li>OIDC Authentication</li>
+        <li>TideCloak Identity</li>
+        <li>Secure Reverse Proxy</li>
+      </ul>
+
+      <a href="/auth/login" class="btn" id="login-btn">Sign in with TideCloak</a>
+    </div>
+
+    <div class="footer">
+      Protected by KeyleSSH WAF
+    </div>
+  </div>
+
+  <script src="/js/webrtc-upgrade.js" defer></script>
+  <script>
+    (function() {
+      var params = new URLSearchParams(window.location.search);
+      var error = params.get('error');
+      var el = document.getElementById('error');
+      if (error && el) {
+        var messages = {
+          expired: 'Your session has expired. Please sign in again.',
+          failed: 'Authentication failed. Please try again.',
+          disabled: 'Your account has been disabled.',
+          refresh_failed: 'Session refresh failed. Please sign in again.'
+        };
+        el.textContent = messages[error] || 'An error occurred. Please try again.';
+        el.style.display = 'block';
+      }
+
+      // Preserve redirect destination
+      var redirect = params.get('redirect');
+      if (redirect) {
+        var btn = document.getElementById('login-btn');
+        btn.href = '/auth/login?redirect=' + encodeURIComponent(redirect);
+      }
+    })();
+  </script>
+</body>
+</html>

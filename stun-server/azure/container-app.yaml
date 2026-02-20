@@ -1,0 +1,31 @@
+# Azure VM deployment reference for STUN/TURN server
+#
+# Uses a VM (not Container Apps) because:
+#   1. STUN/TURN requires UDP port 3478
+#   2. Caddy provides automatic TLS for WSS signaling
+#
+# Architecture:
+#   Internet → Caddy (:443 wss) → STUN server (:9090 ws)
+#   Internet → STUN server (:3478 udp/tcp) directly
+#
+# Deploy with: DOMAIN=stun.example.com ./deploy.sh
+#
+# VM setup (via cloud-init):
+#   - Docker: runs stun-server container with --network host
+#   - Caddy: reverse proxy with auto-TLS (Let's Encrypt)
+#
+# Required DNS:
+#   A record: stun.example.com → <VM public IP>
+#
+# Ports:
+#   443/tcp  - WSS signaling (Caddy → localhost:9090)
+#   3478/udp - STUN/TURN protocol
+#   3478/tcp - TURN TCP fallback
+#   80/tcp   - ACME HTTP challenge (Caddy)
+#
+# Environment variables:
+#   STUN_PORT=3478
+#   SIGNAL_PORT=9090
+#   REALM=keylessh
+#   EXTERNAL_IP=<auto-detected>
+#   TURN_SECRET=<shared secret for TURN auth>

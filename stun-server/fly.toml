@@ -1,0 +1,44 @@
+# fly.toml app configuration file generated for keylessh-stun on 2026-02-19T21:59:48+10:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'keylessh-stun'
+primary_region = 'syd'
+
+[build]
+
+[env]
+  REALM = 'keylessh'
+  SIGNAL_PORT = '9090'
+  STUN_PORT = '3478'
+
+[http_service]
+  internal_port = 9090
+  force_https = true
+  auto_stop_machines = 'off'
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type = 'connections'
+    hard_limit = 200
+    soft_limit = 100
+
+  [[http_service.checks]]
+    interval = '30s'
+    timeout = '3s'
+    grace_period = '5s'
+    method = 'get'
+    path = '/health'
+
+[[services]]
+  protocol = 'udp'
+  internal_port = 3478
+
+  [[services.ports]]
+    port = 3478
+
+[[vm]]
+  size = 'shared-cpu-1x'
+  memory = '512mb'

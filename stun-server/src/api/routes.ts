@@ -1,0 +1,147 @@
+/**
+ * API endpoints and static file serving for the portal and admin UI.
+ *
+ * Returns true if the request was handled, false to fall through to relay.
+ */
+
+import type { IncomingMessage, ServerResponse } from "http";
+import { readFileSync, existsSync } from "fs";
+import { join, resolve, extname } from "path";
+import { fileURLToPath } from "url";
+import type { Registry } from "../signaling/registry.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = resolve(__filename, "..");
+const PUBLIC_DIR = resolve(__dirname, "..", "..", "public");
+console.log(`[API] Public dir: ${PUBLIC_DIR} (exists: ${existsSync(PUBLIC_DIR)})`);
+
+const MIME_TYPES: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".js": "application/javascript; charset=utf-8",
+  ".json": "application/json",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".ico": "image/x-icon",
+};
+
+export function createApiHandler(registry: Registry) {
+  return function handleApiRequest(
+    req: IncomingMessage,
+    res: ServerResponse
+  ): boolean {
+    const url = req.url || "/";
+    // Normalize: strip trailing slash (except root "/")
+    const rawPath = url.split("?")[0];
+    const path = rawPath.length > 1 && rawPath.endsWith("/")
+      ? rawPath.slice(0, -1)
+      : rawPath;
+
+    // ── API: List WAFs (for portal) ──────────────────
+    if (path === "/api/wafs" && req.method === "GET") {
+      const wafs = registry.getAllWafs().map((w) => ({
+        id: w.id,
+        displayName: w.metadata.displayName || w.id,
+        description: w.metadata.description || "",
+        clientCount: w.pairedClients.size,
+        online: w.ws.readyState === w.ws.OPEN,
+      }));
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ wafs }));
+      return true;
+    }
+
+    // ── API: Detailed stats (for admin) ──────────────
+    if (path === "/api/admin/stats" && req.method === "GET") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(registry.getDetailedStats()));
+      return true;
+    }
+
+    // ── API: Select WAF (sets cookie, returns OK) ────
+    if (path === "/api/select-waf" && req.method === "POST") {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk: Buffer) => chunks.push(chunk));
+      req.on("end", () => {
+        try {
+          const { wafId } = JSON.parse(Buffer.concat(chunks).toString());
+          const waf = registry.getWaf(wafId);
+          if (!waf) {
+            res.writeHead(404, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "WAF not found" }));
+            return;
+          }
+          res.writeHead(200, {
+            "Content-Type": "application/json",
+            "Set-Cookie": `waf_relay=${wafId}; Path=/; HttpOnly; SameSite=Lax`,
+          });
+          res.end(JSON.stringify({ success: true, wafId }));
+        } catch {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Invalid request body" }));
+        }
+      });
+      return true;
+    }
+
+    // ── Portal page ──────────────────────────────────
+    if (path === "/portal" && req.method === "GET") {
+      serveStaticFile(res, "portal.html");
+      return true;
+    }
+
+    // ── Root: portal if no cookie, else fall through to relay
+    if (path === "/" && req.method === "GET") {
+      const hasCookie = parseCookie(req.headers.cookie, "waf_relay");
+      if (!hasCookie) {
+        serveStaticFile(res, "portal.html");
+        return true;
+      }
+      return false; // Has cookie → relay to WAF
+    }
+
+    // ── Admin dashboard ──────────────────────────────
+    if (path === "/admin" && req.method === "GET") {
+      serveStaticFile(res, "admin.html");
+      return true;
+    }
+
+    // ── Static assets ────────────────────────────────
+    if (path.startsWith("/static/")) {
+      const filePath = path.slice("/static/".length);
+      if (filePath.includes("..")) {
+        res.writeHead(403);
+        res.end("Forbidden");
+        return true;
+      }
+      serveStaticFile(res, filePath);
+      return true;
+    }
+
+    return false;
+  };
+
+  function serveStaticFile(res: ServerResponse, filename: string): void {
+    const filePath = join(PUBLIC_DIR, filename);
+    try {
+      const content = readFileSync(filePath);
+      const ext = extname(filename);
+      const contentType = MIME_TYPES[ext] || "application/octet-stream";
+      res.writeHead(200, { "Content-Type": contentType });
+      res.end(content);
+    } catch {
+      res.writeHead(404, { "Content-Type": "text/plain" });
+      res.end("Not found");
+    }
+  }
+}
+
+function parseCookie(header: string | undefined, name: string): string | null {
+  if (!header) return null;
+  for (const pair of header.split(";")) {
+    const eq = pair.indexOf("=");
+    if (eq < 0) continue;
+    if (pair.slice(0, eq).trim() === name) return pair.slice(eq + 1).trim();
+  }
+  return null;
+}

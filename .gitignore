@@ -15,3 +15,4 @@ data/
 .env
 .env.local
 .env.*.local
+.stun-deploy.env

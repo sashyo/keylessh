@@ -1,0 +1,21 @@
+{
+  "name": "keylessh-stun-server",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "STUN/TURN relay server with signaling for NAT traversal and P2P connectivity",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.0",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.20.5",
+    "typescript": "^5.6.3"
+  }
+}

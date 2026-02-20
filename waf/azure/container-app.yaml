@@ -1,0 +1,72 @@
+# Azure Container Apps configuration for WAF gateway
+# Deploy with: az containerapp create --yaml container-app.yaml
+
+name: keylessh-waf
+type: Microsoft.App/containerApps
+location: eastus
+properties:
+  managedEnvironmentId: /subscriptions/<SUBSCRIPTION_ID>/resourceGroups/<RESOURCE_GROUP>/providers/Microsoft.App/managedEnvironments/<ENVIRONMENT_NAME>
+
+  configuration:
+    # Internal ingress — only reachable within the Container Apps environment
+    ingress:
+      external: false
+      targetPort: 7891
+      transport: http
+
+    # Secrets
+    secrets:
+      - name: tidecloak-config
+        value: <BASE64_ENCODED_TIDECLOAK_JSON>
+      - name: turn-secret
+        value: <TURN_SECRET>
+
+  template:
+    containers:
+      - name: waf
+        image: <ACR_NAME>.azurecr.io/keylessh-waf:latest
+        resources:
+          cpu: 0.25
+          memory: 0.5Gi
+        env:
+          - name: TIDECLOAK_CONFIG_B64
+            secretRef: tidecloak-config
+          - name: TURN_SECRET
+            secretRef: turn-secret
+          - name: LISTEN_PORT
+            value: "7891"
+          - name: HEALTH_PORT
+            value: "7892"
+          - name: BACKEND_URL
+            value: "<BACKEND_URL>"
+          - name: STUN_SERVER_URL
+            value: "<STUN_SERVER_WS_URL>"
+          - name: ICE_SERVERS
+            value: "<stun:STUN_HOST:3478>"
+          - name: TURN_SERVER
+            value: "<turn:STUN_HOST:3478>"
+          - name: WAF_DISPLAY_NAME
+            value: "Azure WAF"
+        probes:
+          - type: liveness
+            httpGet:
+              path: /health
+              port: 7892
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          - type: readiness
+            httpGet:
+              path: /health
+              port: 7892
+            initialDelaySeconds: 3
+            periodSeconds: 10
+
+    # Auto-scaling configuration
+    scale:
+      minReplicas: 0  # Scale to zero when no traffic
+      maxReplicas: 100
+      rules:
+        - name: http-connections
+          http:
+            metadata:
+              concurrentRequests: "10"

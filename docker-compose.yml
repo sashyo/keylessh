@@ -1,0 +1,36 @@
+version: "3.8"
+
+services:
+  stun-server:
+    build: ./stun-server
+    ports:
+      - "9090:9090"       # HTTP relay + WebSocket signaling
+      - "3478:3478/udp"   # STUN/TURN (UDP)
+      - "3478:3478/tcp"   # STUN/TURN (TCP fallback)
+    environment:
+      - SIGNAL_PORT=9090
+      - STUN_PORT=3478
+      - EXTERNAL_IP=${EXTERNAL_IP:-}
+      - REALM=keylessh
+    healthcheck:
+      test: ["CMD", "/nodejs/bin/node", "-e", "require('http').get({host:'127.0.0.1',port:9090,path:'/health',timeout:2000},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
+
+  waf:
+    build: ./waf
+    environment:
+      - LISTEN_PORT=7891
+      - HEALTH_PORT=7892
+      - BACKEND_URL=${BACKEND_URL:-http://host.docker.internal:3000}
+      - STUN_SERVER_URL=ws://stun-server:9090
+      - TIDECLOAK_CONFIG_B64=${TIDECLOAK_CONFIG_B64:-}
+      - ICE_SERVERS=stun:${EXTERNAL_IP:-stun-server}:3478
+      - AUTH_SERVER_PUBLIC_URL=${AUTH_SERVER_PUBLIC_URL:-}
+      - STRIP_AUTH_HEADER=${STRIP_AUTH_HEADER:-false}
+    depends_on:
+      stun-server:
+        condition: service_healthy
+    restart: unless-stopped
