@@ -314,6 +314,7 @@ export function createProxy(options: ProxyOptions): {
         // Allow SW to control root scope even though it lives under /js/
         if (path === "/js/sw.js") {
           res.setHeader("Service-Worker-Allowed", "/");
+          res.setHeader("Cache-Control", "no-cache");
         }
         serveFile(res, path.slice(1), "application/javascript; charset=utf-8");
         return;
@@ -666,14 +667,18 @@ export function createProxy(options: ProxyOptions): {
                 // Inject fetch/XHR interceptor so JS-initiated requests
                 // with absolute paths (e.g. fetch("/api/data")) get the
                 // /__b/<name> prefix prepended automatically.
+                // WAF-internal paths (/auth/*, /js/*, /realms/*, etc.) are
+                // skipped — they work without the prefix.
                 const patchScript = `<script>(function(){` +
                   `var P="${backendPrefix}";` +
+                  `var W=/^\\/(js\\/|auth\\/|login|webrtc-config|realms\\/|resources\\/|portal|health)/;` +
+                  `function n(u){return typeof u==="string"&&u[0]==="/"&&u.indexOf("/__b/")!==0&&!W.test(u)}` +
                   `var F=window.fetch;window.fetch=function(u,i){` +
-                    `if(typeof u==="string"&&u[0]==="/"&&u.indexOf("/__b/")!==0)u=P+u;` +
-                    `else if(u instanceof Request){var r=new URL(u.url);if(r.origin===location.origin&&r.pathname.indexOf("/__b/")!==0){r.pathname=P+r.pathname;u=new Request(r,u)}}` +
+                    `if(n(u))u=P+u;` +
+                    `else if(u instanceof Request){var r=new URL(u.url);if(r.origin===location.origin&&n(r.pathname)){r.pathname=P+r.pathname;u=new Request(r,u)}}` +
                     `return F.call(this,u,i)};` +
                   `var O=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){` +
-                    `if(typeof u==="string"&&u[0]==="/"&&u.indexOf("/__b/")!==0)arguments[1]=P+u;` +
+                    `if(n(u))arguments[1]=P+u;` +
                     `return O.apply(this,arguments)};` +
                   `})()</script>`;
                 if (html.includes("<head>")) {

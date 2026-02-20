@@ -159,7 +159,11 @@
       console.log("[WebRTC] DataChannel OPEN — direct connection established!");
       // Fetch session token (via relay, cookies attached) BEFORE registering SW
       await fetchSessionToken();
-      registerServiceWorker();
+      await registerServiceWorker();
+      // Tell SW this client has an active DataChannel
+      if (navigator.serviceWorker.controller) {
+        navigator.serviceWorker.controller.postMessage({ type: "dc_ready" });
+      }
     };
 
     dataChannel.onmessage = (event) => {
@@ -209,6 +213,10 @@
 
     dataChannel.onclose = () => {
       console.log("[WebRTC] DataChannel closed");
+      // Tell SW this client no longer has DataChannel
+      if (navigator.serviceWorker.controller) {
+        navigator.serviceWorker.controller.postMessage({ type: "dc_closed" });
+      }
     };
 
     dataChannel.onerror = (err) => {
@@ -277,7 +285,7 @@
     }
 
     try {
-      await navigator.serviceWorker.register("/js/sw.js", { scope: "/" });
+      await navigator.serviceWorker.register("/js/sw.js", { scope: "/", updateViaCache: "none" });
       console.log("[WebRTC] Service Worker registered");
 
       // Listen for fetch requests from Service Worker
