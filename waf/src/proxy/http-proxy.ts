@@ -54,8 +54,6 @@ export interface ProxyOptions {
   turnServer?: string;
   /** Shared secret for TURN REST API ephemeral credentials */
   turnSecret?: string;
-  /** Local TideCloak URL for /realms/* proxy (when different from auth-server-url) */
-  localAuthUrl?: string;
   /** TLS key + cert for HTTPS. If provided, server uses HTTPS. */
   tls?: { key: string; cert: string };
 }
@@ -139,23 +137,26 @@ function getCallbackUrl(req: IncomingMessage, isTls: boolean): string {
   return `${proto}://${host}/auth/callback`;
 }
 
-// ── Localhost redirect rewriting ─────────────────────────────
+// ── Redirect rewriting ──────────────────────────────────────
 
 /**
- * Rewrite any `Location` header that points to localhost (any port)
- * into a relative path. This keeps DataChannel and remote connections
- * working — the browser resolves the path against the current origin,
- * so the service worker / DataChannel can intercept it and the WAF's
- * reverse-proxy routes (/realms/*, /resources/*, etc.) handle the rest.
+ * Rewrite `Location` headers that point to localhost or the TideCloak
+ * origin into relative paths. This keeps DataChannel and remote
+ * connections working — the browser resolves the path against the
+ * current origin, so the service worker / DataChannel can intercept
+ * it and the WAF's reverse-proxy routes handle the rest.
  */
-function rewriteLocalhostRedirects(
+function rewriteRedirects(
   headers: Record<string, any>,
-  _req: IncomingMessage,
-  _isTls: boolean
+  tcOrigin: string
 ): void {
   if (!headers.location || typeof headers.location !== "string") return;
 
-  // Only rewrite the Location URL's own origin, not localhost refs in query params
+  // Rewrite TideCloak origin to relative path
+  if (tcOrigin && headers.location.startsWith(tcOrigin)) {
+    headers.location = headers.location.slice(tcOrigin.length) || "/";
+  }
+  // Also rewrite localhost variants
   headers.location = headers.location.replace(
     /^https?:\/\/localhost(:\d+)?/,
     ""
@@ -202,11 +203,8 @@ export function createProxy(options: ProxyOptions): {
   }
 
   // TideCloak URL for reverse-proxying auth pages (/realms/*, /resources/*).
-  // Uses LOCAL_AUTH_URL if set (for when the backend's TideCloak differs from
-  // the WAF's own auth-server-url), otherwise falls back to auth-server-url.
-  const tcProxyUrl = new URL(
-    options.localAuthUrl || options.tcConfig["auth-server-url"]
-  );
+  // Always derived from auth-server-url in the tidecloak config.
+  const tcProxyUrl = new URL(options.tcConfig["auth-server-url"]);
   const tcProxyIsHttps = tcProxyUrl.protocol === "https:";
   const makeTcRequest = tcProxyIsHttps ? httpsRequest : httpRequest;
 
@@ -222,11 +220,13 @@ export function createProxy(options: ProxyOptions): {
   _useSecureCookies = isTls;
 
   /** Get browser-facing OIDC endpoints.
-   *  Uses authServerPublicUrl if set, otherwise falls back to config auth-server-url.
-   *  The /realms/* proxy + rewriteLocalhostRedirects handle remote access separately. */
+   *  Uses authServerPublicUrl if explicitly set, otherwise returns relative
+   *  paths (/realms/...) so auth traffic stays on the WAF origin.
+   *  The /realms/* proxy forwards these to the real TideCloak server. */
   function getBrowserEndpoints(_req: IncomingMessage): OidcEndpoints {
     if (fixedBrowserEndpoints) return fixedBrowserEndpoints;
-    return getOidcEndpoints(options.tcConfig);
+    // Empty base → relative paths: /realms/wafwaf/protocol/openid-connect/auth
+    return getOidcEndpoints(options.tcConfig, "");
   }
 
   const requestHandler = async (req: IncomingMessage, res: ServerResponse) => {
@@ -412,9 +412,24 @@ export function createProxy(options: ProxyOptions): {
           },
           (tcProxyRes) => {
             const headers = { ...tcProxyRes.headers };
-            rewriteLocalhostRedirects(headers, req, isTls);
-            res.writeHead(tcProxyRes.statusCode || 502, headers);
-            tcProxyRes.pipe(res);
+            rewriteRedirects(headers, tcProxyUrl.origin);
+
+            const contentType = (headers["content-type"] || "") as string;
+            if (contentType.includes("text/html")) {
+              // Rewrite HTML so TideCloak's forms/links stay on WAF origin
+              const chunks: Buffer[] = [];
+              tcProxyRes.on("data", (chunk: Buffer) => chunks.push(chunk));
+              tcProxyRes.on("end", () => {
+                let html = Buffer.concat(chunks).toString("utf-8");
+                html = html.replaceAll(tcProxyUrl.origin, "");
+                delete headers["content-length"];
+                res.writeHead(tcProxyRes.statusCode || 502, headers);
+                res.end(html);
+              });
+            } else {
+              res.writeHead(tcProxyRes.statusCode || 502, headers);
+              tcProxyRes.pipe(res);
+            }
           }
         );
 
@@ -538,7 +553,7 @@ export function createProxy(options: ProxyOptions): {
           const headers = { ...proxyRes.headers };
 
           // Rewrite any localhost redirects from the backend
-          rewriteLocalhostRedirects(headers, req, isTls);
+          rewriteRedirects(headers, tcProxyUrl.origin);
 
           // Append refresh cookies if token was refreshed
           const refreshCookies = (res as any).__refreshCookies as

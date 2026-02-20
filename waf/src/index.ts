@@ -45,7 +45,6 @@ async function main() {
     iceServers: config.iceServers,
     turnServer: config.turnServer,
     turnSecret: config.turnSecret,
-    localAuthUrl: config.localAuthUrl,
     tls,
   });
 

@@ -106,9 +106,35 @@ export function createApiHandler(registry: Registry, adminAuth?: AdminAuth, tide
       return true;
     }
 
+    // ── API: Clear selection (reset cookies, back to portal) ──
+    if (path === "/api/clear-selection" && req.method === "POST") {
+      res.writeHead(200, {
+        "Content-Type": "application/json",
+        "Set-Cookie": [
+          "waf_relay=; Path=/; HttpOnly; Max-Age=0",
+          "waf_backend=; Path=/; HttpOnly; Max-Age=0",
+        ],
+      });
+      res.end(JSON.stringify({ success: true }));
+      return true;
+    }
+
     // ── Portal page ──────────────────────────────────
     if (path === "/portal" && req.method === "GET") {
-      serveStaticFile(res, "portal.html");
+      // Clear selection cookies so user lands on portal even from /
+      res.writeHead(200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Set-Cookie": [
+          "waf_relay=; Path=/; HttpOnly; Max-Age=0",
+          "waf_backend=; Path=/; HttpOnly; Max-Age=0",
+        ],
+      });
+      try {
+        const content = readFileSync(join(PUBLIC_DIR, "portal.html"));
+        res.end(content);
+      } catch {
+        res.end("Not found");
+      }
       return true;
     }
 

@@ -165,52 +165,9 @@
     Powered by KeyleSSH &middot; <a href="/admin">Admin</a>
   </div>
 
-  <script src="/admin-config"></script>
   <script>
     (function() {
       var grid = document.getElementById("waf-grid");
-      var keycloak = null;
-
-      // Require auth before showing portal
-      function initAuth() {
-        if (typeof window.__ADMIN_AUTH__ === "undefined" || !window.__ADMIN_AUTH__) {
-          // No auth configured — load directly
-          loadWafs();
-          setInterval(loadWafs, 5000);
-          return;
-        }
-
-        var cfg = window.__ADMIN_AUTH__;
-        grid.innerHTML = '<div class="empty"><p>Authenticating...</p></div>';
-
-        var script = document.createElement("script");
-        script.src = cfg.authServerUrl + "/js/keycloak.js";
-        script.onload = function() {
-          keycloak = new Keycloak({
-            url: cfg.authServerUrl,
-            realm: cfg.realm,
-            clientId: cfg.clientId,
-          });
-
-          keycloak.init({ onLoad: "login-required", checkLoginIframe: false })
-            .then(function(authenticated) {
-              if (!authenticated) {
-                grid.innerHTML = '<div class="empty"><p>Authentication failed</p></div>';
-                return;
-              }
-              loadWafs();
-              setInterval(loadWafs, 5000);
-            })
-            .catch(function(err) {
-              grid.innerHTML = '<div class="empty"><p>Authentication error</p></div>';
-              console.error("[Portal] Keycloak init failed:", err);
-            });
-        };
-        script.onerror = function() {
-          grid.innerHTML = '<div class="empty"><p>Auth service unavailable</p></div>';
-        };
-        document.head.appendChild(script);
-      }
 
       function render(wafs) {
         if (!wafs || wafs.length === 0) {
@@ -290,7 +247,8 @@
           });
       }
 
-      initAuth();
+      loadWafs();
+      setInterval(loadWafs, 5000);
     })();
   </script>
 </body>

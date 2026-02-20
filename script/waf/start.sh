@@ -77,7 +77,6 @@ else
 fi
 
 # ── WAF configuration ──────────────────────────────────────────
-export LOCAL_AUTH_URL="http://localhost:${TC_PORT}"
 export STUN_SERVER_URL="${STUN_SERVER_URL:-wss://tidestun.codesyo.com:9090}"
 export ICE_SERVERS="${ICE_SERVERS:-stun:20.211.145.216:3478}"
 export BACKEND_URL="${BACKEND_URL:-http://localhost:3000}"
@@ -87,7 +86,6 @@ export HEALTH_PORT="${HEALTH_PORT:-7892}"
 export TURN_SERVER="${TURN_SERVER:-turn:20.211.145.216:3478}"
 
 echo "[WAF] Starting with:"
-echo "  LOCAL_AUTH_URL=$LOCAL_AUTH_URL"
 echo "  STUN_SERVER_URL=$STUN_SERVER_URL"
 echo "  BACKEND_URL=$BACKEND_URL"
 echo "  BACKENDS=${BACKENDS:-<from BACKEND_URL>}"
