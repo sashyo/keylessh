@@ -1,0 +1,25 @@
+{
+  "realm": "wafwaf",
+  "auth-server-url": "https://login.dauth.me",
+  "ssl-required": "external",
+  "resource": "ststun",
+  "public-client": true,
+  "confidential-port": 0,
+  "jwk": {
+    "keys": [
+      {
+        "kid": "S1fP36iA3FUqaNsnbgtGqnm7qlsC3ZR87XF6e96u94k",
+        "kty": "OKP",
+        "alg": "EdDSA",
+        "use": "sig",
+        "crv": "Ed25519",
+        "x": "dWp2yqVvSMCQsEMmYDRbAayV473BF1WkJngrJBH-DKA"
+      }
+    ]
+  },
+  "vendorId": "2651510718299200963922599098674056439068413447744589258001801320489840365674",
+  "homeOrkUrl": "https://ork1.tideprotocol.com",
+  "client-origin-auth-http://localhost:9090": "8jD/22tzT8KPU6yn1CbftI9Br4QFeQyj2xqyHfcOU0oNHpvrHf0k9Qx8TC/YAQpCnyCNLeL8nJkDj7jLZx2ACQ==",
+  "client-origin-auth-http://localhost:8090": "BkP0ydvY9Wvsg9Z00ptLdhRKdylTp6HFdZZ42CbyaqULCwpcmrvLFG2GgwiCoSB4nY2+3V4RkC4UKNKLxdCjCQ==",
+  "client-origin-auth-https://dfc5-103-141-155-17.ngrok-free.app": "wwYEhNmFr0byHRV9/6v6eIz14c4R6l9qoFkBdDr8tUn7oUfiBMRiy8voCgh7FGcxjTax28uAUecl2ngwt2E1Ag=="
+}
