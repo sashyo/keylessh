@@ -42,7 +42,7 @@ function parseCookie(header: string | undefined, name: string): string | null {
 
 // ── Relay handler ────────────────────────────────────────────────
 
-export function createHttpRelay(registry: Registry) {
+export function createHttpRelay(registry: Registry, useTls = false) {
   return async function handleRelayRequest(
     req: IncomingMessage,
     res: ServerResponse
@@ -70,12 +70,16 @@ export function createHttpRelay(registry: Registry) {
 
     // Build relay message
     const requestId = randomUUID();
+    const headers = { ...req.headers } as Record<string, string | string[] | undefined>;
+    if (useTls && !headers["x-forwarded-proto"]) {
+      headers["x-forwarded-proto"] = "https";
+    }
     const relayMsg = {
       type: "http_request",
       id: requestId,
       method: req.method || "GET",
       url: req.url || "/",
-      headers: req.headers as Record<string, string | string[] | undefined>,
+      headers,
       body,
     };
 

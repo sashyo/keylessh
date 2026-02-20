@@ -182,10 +182,10 @@ const tcpServer = createTcpServer({
 // ── Signaling + Health HTTP Server ───────────────────────────────
 
 const registry = createRegistry();
-const relayHandler = createHttpRelay(registry);
 const apiHandler = createApiHandler(registry);
 
 const useTls = !!(config.tlsCertPath && config.tlsKeyPath);
+const relayHandler = createHttpRelay(registry, useTls);
 
 const requestHandler = (req: import("http").IncomingMessage, res: import("http").ServerResponse) => {
   if (req.url === "/health") {

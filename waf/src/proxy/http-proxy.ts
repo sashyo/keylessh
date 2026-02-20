@@ -53,6 +53,8 @@ export interface ProxyOptions {
   turnServer?: string;
   /** Shared secret for TURN REST API ephemeral credentials */
   turnSecret?: string;
+  /** Local TideCloak URL for /realms/* proxy (when different from auth-server-url) */
+  localAuthUrl?: string;
   /** TLS key + cert for HTTPS. If provided, server uses HTTPS. */
   tls?: { key: string; cert: string };
 }
@@ -140,26 +142,22 @@ function getCallbackUrl(req: IncomingMessage, isTls: boolean): string {
 
 /**
  * Rewrite any `Location` header that points to localhost (any port)
- * so the browser stays on the WAF's own origin. This keeps DataChannel
- * and remote connections working through auth redirects.
+ * into a relative path. This keeps DataChannel and remote connections
+ * working — the browser resolves the path against the current origin,
+ * so the service worker / DataChannel can intercept it and the WAF's
+ * reverse-proxy routes (/realms/*, /resources/*, etc.) handle the rest.
  */
 function rewriteLocalhostRedirects(
   headers: Record<string, any>,
-  req: IncomingMessage,
-  isTls: boolean
+  _req: IncomingMessage,
+  _isTls: boolean
 ): void {
   if (!headers.location || typeof headers.location !== "string") return;
-  if (!/^https?:\/\/localhost(:\d+)?/.test(headers.location)) return;
 
-  const proto =
-    (req.headers["x-forwarded-proto"] as string) || (isTls ? "https" : "http");
-  const host = req.headers.host || "localhost";
-  const wafOrigin = `${proto}://${host}`;
-
-  // Replace all localhost:PORT occurrences (covers redirect_uri in query params too)
+  // Only rewrite the Location URL's own origin, not localhost refs in query params
   headers.location = headers.location.replace(
-    /https?:\/\/localhost(:\d+)?/g,
-    wafOrigin
+    /^https?:\/\/localhost(:\d+)?/,
+    ""
   );
 }
 
@@ -179,10 +177,14 @@ export function createProxy(options: ProxyOptions): {
   const isHttps = backendUrl.protocol === "https:";
   const makeRequest = isHttps ? httpsRequest : httpRequest;
 
-  // TideCloak URL for reverse-proxying auth pages (/realms/*, /resources/*)
-  const tcUrl = new URL(options.tcConfig["auth-server-url"]);
-  const tcIsHttps = tcUrl.protocol === "https:";
-  const makeTcRequest = tcIsHttps ? httpsRequest : httpRequest;
+  // TideCloak URL for reverse-proxying auth pages (/realms/*, /resources/*).
+  // Uses LOCAL_AUTH_URL if set (for when the backend's TideCloak differs from
+  // the WAF's own auth-server-url), otherwise falls back to auth-server-url.
+  const tcProxyUrl = new URL(
+    options.localAuthUrl || options.tcConfig["auth-server-url"]
+  );
+  const tcProxyIsHttps = tcProxyUrl.protocol === "https:";
+  const makeTcRequest = tcProxyIsHttps ? httpsRequest : httpRequest;
 
   // Browser-facing endpoints use public URL if explicitly set;
   // otherwise derived per-request from Host header (see getBrowserEndpoints)
@@ -195,13 +197,12 @@ export function createProxy(options: ProxyOptions): {
   const isTls = !!options.tls;
   _useSecureCookies = isTls;
 
-  /** Get browser-facing OIDC endpoints — uses the request's own origin so
-   *  auth redirects stay on the same host (works through STUN relay). */
-  function getBrowserEndpoints(req: IncomingMessage): OidcEndpoints {
+  /** Get browser-facing OIDC endpoints.
+   *  Uses authServerPublicUrl if set, otherwise falls back to config auth-server-url.
+   *  The /realms/* proxy + rewriteLocalhostRedirects handle remote access separately. */
+  function getBrowserEndpoints(_req: IncomingMessage): OidcEndpoints {
     if (fixedBrowserEndpoints) return fixedBrowserEndpoints;
-    const proto = (req.headers["x-forwarded-proto"] as string) || (isTls ? "https" : "http");
-    const host = req.headers.host || "localhost";
-    return getOidcEndpoints(options.tcConfig, `${proto}://${host}`);
+    return getOidcEndpoints(options.tcConfig);
   }
 
   const requestHandler = async (req: IncomingMessage, res: ServerResponse) => {
@@ -375,12 +376,12 @@ export function createProxy(options: ProxyOptions): {
       // and remote access don't break on auth redirects.
       if (path.startsWith("/realms/") || path.startsWith("/resources/")) {
         const tcProxyHeaders = { ...req.headers };
-        tcProxyHeaders.host = tcUrl.host;
+        tcProxyHeaders.host = tcProxyUrl.host;
 
         const tcProxyReq = makeTcRequest(
           {
-            hostname: tcUrl.hostname,
-            port: tcUrl.port || (tcIsHttps ? 443 : 80),
+            hostname: tcProxyUrl.hostname,
+            port: tcProxyUrl.port || (tcProxyIsHttps ? 443 : 80),
             path: url,
             method: req.method,
             headers: tcProxyHeaders,

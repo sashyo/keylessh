@@ -30,6 +30,7 @@ services:
       - ICE_SERVERS=stun:${EXTERNAL_IP:-stun-server}:3478
       - AUTH_SERVER_PUBLIC_URL=${AUTH_SERVER_PUBLIC_URL:-}
       - STRIP_AUTH_HEADER=${STRIP_AUTH_HEADER:-false}
+      - LOCAL_AUTH_URL=${LOCAL_AUTH_URL:-}
     depends_on:
       stun-server:
         condition: service_healthy

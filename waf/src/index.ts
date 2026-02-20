@@ -44,6 +44,7 @@ async function main() {
     iceServers: config.iceServers,
     turnServer: config.turnServer,
     turnSecret: config.turnSecret,
+    localAuthUrl: config.localAuthUrl,
     tls,
   });
 
@@ -60,6 +61,7 @@ async function main() {
     stunServerUrl: config.stunServerUrl,
     wafId: config.wafId,
     listenPort: config.listenPort,
+    useTls: !!tls,
     iceServers: config.iceServers,
     turnServer: config.turnServer,
     turnSecret: config.turnSecret,

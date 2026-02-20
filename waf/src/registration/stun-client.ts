@@ -8,6 +8,7 @@
 
 import WebSocket from "ws";
 import { request as httpRequest } from "http";
+import { request as httpsRequest } from "https";
 import { createPeerHandler, type PeerHandler } from "../webrtc/peer-handler.js";
 
 export interface StunRegistrationOptions {
@@ -22,6 +23,8 @@ export interface StunRegistrationOptions {
   turnServer?: string;
   /** Shared secret for TURN REST API ephemeral credentials */
   turnSecret?: string;
+  /** Whether the WAF's HTTP server uses TLS */
+  useTls?: boolean;
   /** Metadata for portal display */
   metadata?: { displayName?: string; description?: string };
   onPaired?: (client: { id: string; reflexiveAddress: string | null }) => void;
@@ -150,14 +153,16 @@ export function registerWithStun(
 
     const bodyBuf = bodyB64 ? Buffer.from(bodyB64, "base64") : undefined;
 
-    // Make local HTTP request to the WAF's own listen port
-    const req = httpRequest(
+    // Make local request to the WAF's own listen port
+    const makeReq = options.useTls ? httpsRequest : httpRequest;
+    const req = makeReq(
       {
         hostname: "127.0.0.1",
         port: options.listenPort,
         path: url,
         method,
         headers: headers as Record<string, string | string[]>,
+        rejectUnauthorized: false, // self-signed cert
       },
       (res) => {
         const chunks: Buffer[] = [];
