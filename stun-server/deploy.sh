@@ -52,7 +52,7 @@ REALM="${REALM:-keylessh}"
 
 # ── Build ────────────────────────────────────────────────────
 echo "[Deploy] Building Docker image..."
-docker build -t "$IMAGE_NAME" "$SCRIPT_DIR"
+docker build --network host -t "$IMAGE_NAME" "$SCRIPT_DIR"
 
 # ── Stop old container ───────────────────────────────────────
 if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
