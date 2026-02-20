@@ -109,6 +109,15 @@ if docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
   echo "[Deploy] API_SECRET=${API_SECRET:+set (use same value in WAF)}"
   echo "[Deploy] TURN_SECRET=${TURN_SECRET:+set}"
   echo "[Deploy] Admin auth: ${TIDECLOAK_CONFIG_B64:+enabled}${TIDECLOAK_CONFIG_B64:-disabled (set TIDECLOAK_CONFIG_B64 in .env)}"
+  # Generate test TURN credentials (valid 24h)
+  if [ -n "${TURN_SECRET:-}" ]; then
+    TURN_USER="$(date -d '+1 day' +%s):test"
+    TURN_PASS=$(echo -n "$TURN_USER" | openssl dgst -sha1 -hmac "$TURN_SECRET" -binary | base64)
+    echo ""
+    echo "[Deploy] TURN test credentials (valid 24h):"
+    echo "  Username: $TURN_USER"
+    echo "  Password: $TURN_PASS"
+  fi
 else
   echo "[Deploy] ERROR: Container failed to start"
   docker logs "$CONTAINER_NAME" --tail 20
