@@ -109,12 +109,16 @@ if docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
   echo "[Deploy] API_SECRET=${API_SECRET:+set (use same value in WAF)}"
   echo "[Deploy] TURN_SECRET=${TURN_SECRET:+set}"
   echo "[Deploy] Admin auth: ${TIDECLOAK_CONFIG_B64:+enabled}${TIDECLOAK_CONFIG_B64:-disabled (set TIDECLOAK_CONFIG_B64 in .env)}"
-  # Generate test TURN credentials (valid 24h)
+  # Generate test TURN credentials (valid 24h) and save to .env
   if [ -n "${TURN_SECRET:-}" ]; then
     TURN_USER="$(date -d '+1 day' +%s):test"
     TURN_PASS=$(echo -n "$TURN_USER" | openssl dgst -sha1 -hmac "$TURN_SECRET" -binary | base64)
+    # Update .env with test credentials
+    sed -i '/^TURN_USER=/d; /^TURN_PASS=/d' "$ENV_FILE"
+    echo "TURN_USER=${TURN_USER}" >> "$ENV_FILE"
+    echo "TURN_PASS=${TURN_PASS}" >> "$ENV_FILE"
     echo ""
-    echo "[Deploy] TURN test credentials (valid 24h):"
+    echo "[Deploy] TURN test credentials (valid 24h) — saved to .env:"
     echo "  Username: $TURN_USER"
     echo "  Password: $TURN_PASS"
   fi
