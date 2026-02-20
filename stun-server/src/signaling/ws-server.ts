@@ -2,11 +2,11 @@
  * WebSocket server for registration, signaling, and admin monitoring.
  *
  * Handles messages:
- *   { type: "register", role: "waf"|"client", id, addresses?, metadata?, targetWafId? }
+ *   { type: "register", role: "waf"|"client", id, secret?, addresses?, metadata?, targetWafId? }
  *   { type: "candidate", targetId, candidate }
  *   { type: "sdp_offer"|"sdp_answer", targetId, fromId, sdp }
- *   { type: "subscribe_stats" }
- *   { type: "admin_action", action: "disconnect_client"|"drain_waf", targetId }
+ *   { type: "subscribe_stats", token }
+ *   { type: "admin_action", action: "disconnect_client"|"drain_waf", targetId, token }
  */
 
 import { WebSocketServer, WebSocket } from "ws";
@@ -14,6 +14,7 @@ import type { IncomingMessage } from "http";
 import type { Server as HttpServer } from "http";
 import type { Registry } from "./registry.js";
 import type { WafMetadata, ConnectionType } from "./registry.js";
+import type { AdminAuth } from "../auth/jwt.js";
 import { pairClient, pairClientWithWaf, forwardCandidate, forwardSdp } from "./pairing.js";
 import { handleHttpResponse } from "../relay/http-relay.js";
 
@@ -21,6 +22,8 @@ interface SignalMessage {
   type: string;
   role?: "waf" | "client";
   id?: string;
+  secret?: string;
+  token?: string;
   addresses?: string[];
   metadata?: WafMetadata;
   targetId?: string;
@@ -34,9 +37,15 @@ interface SignalMessage {
   connectionType?: ConnectionType;
 }
 
+export interface SignalingOptions {
+  apiSecret: string;
+  adminAuth?: AdminAuth;
+}
+
 export function createSignalingServer(
   httpServer: HttpServer,
-  registry: Registry
+  registry: Registry,
+  options: SignalingOptions
 ): WebSocketServer {
   const wss = new WebSocketServer({ server: httpServer });
   const adminSubscribers = new Set<WebSocket>();
@@ -82,7 +91,7 @@ export function createSignalingServer(
 
       switch (msg.type) {
         case "register":
-          handleRegister(ws, msg, registry);
+          handleRegister(ws, msg, registry, options);
           break;
         case "candidate":
           handleCandidate(ws, msg, registry);
@@ -100,11 +109,17 @@ export function createSignalingServer(
           });
           break;
         case "subscribe_stats":
-          adminSubscribers.add(ws);
-          safeSend(ws, { type: "stats_update", ...registry.getDetailedStats() });
+          verifyAdminToken(ws, msg, options).then((ok) => {
+            if (!ok) return;
+            adminSubscribers.add(ws);
+            safeSend(ws, { type: "stats_update", ...registry.getDetailedStats() });
+          });
           break;
         case "admin_action":
-          handleAdminAction(ws, msg, registry);
+          verifyAdminToken(ws, msg, options).then((ok) => {
+            if (!ok) return;
+            handleAdminAction(ws, msg, registry);
+          });
           break;
         case "client_status":
           // WAF reports a client's connection type (p2p, turn, relay)
@@ -134,7 +149,8 @@ export function createSignalingServer(
 function handleRegister(
   ws: WebSocket,
   msg: SignalMessage,
-  registry: Registry
+  registry: Registry,
+  options: SignalingOptions
 ): void {
   if (!msg.id || !msg.role) {
     safeSend(ws, { type: "error", message: "Missing id or role" });
@@ -142,6 +158,14 @@ function handleRegister(
   }
 
   if (msg.role === "waf") {
+    // WAF registration requires API_SECRET
+    if (options.apiSecret && msg.secret !== options.apiSecret) {
+      console.log(`[Signal] WAF registration rejected: invalid secret (id: ${msg.id})`);
+      safeSend(ws, { type: "error", message: "Invalid API secret" });
+      ws.close(4001, "Unauthorized");
+      return;
+    }
+
     registry.registerWaf(msg.id, msg.addresses || [], ws, msg.metadata);
     safeSend(ws, { type: "registered", role: "waf", id: msg.id });
   } else if (msg.role === "client") {
@@ -189,6 +213,24 @@ function handleCandidate(
 
   const fromId = msg.fromId || "unknown";
   forwardCandidate(registry, fromId, msg.targetId, msg.candidate);
+}
+
+async function verifyAdminToken(
+  ws: WebSocket,
+  msg: SignalMessage,
+  options: SignalingOptions
+): Promise<boolean> {
+  if (!options.adminAuth) return true; // No auth configured
+  if (!msg.token) {
+    safeSend(ws, { type: "error", message: "Authentication required" });
+    return false;
+  }
+  const payload = await options.adminAuth.verifyAdmin(msg.token);
+  if (!payload) {
+    safeSend(ws, { type: "error", message: "Invalid or insufficient permissions" });
+    return false;
+  }
+  return true;
 }
 
 function handleAdminAction(

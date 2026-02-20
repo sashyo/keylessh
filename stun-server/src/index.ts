@@ -43,6 +43,7 @@ import { createRegistry } from "./signaling/registry.js";
 import { createSignalingServer } from "./signaling/ws-server.js";
 import { createHttpRelay } from "./relay/http-relay.js";
 import { createApiHandler } from "./api/routes.js";
+import { createAdminAuth } from "./auth/jwt.js";
 
 // ── Configuration ────────────────────────────────────────────────
 
@@ -182,7 +183,12 @@ const tcpServer = createTcpServer({
 // ── Signaling + Health HTTP Server ───────────────────────────────
 
 const registry = createRegistry();
-const apiHandler = createApiHandler(registry);
+
+const adminAuth = config.tidecloakConfig
+  ? createAdminAuth(config.tidecloakConfig)
+  : undefined;
+
+const apiHandler = createApiHandler(registry, adminAuth, config.tidecloakConfig);
 
 const useTls = !!(config.tlsCertPath && config.tlsKeyPath);
 const relayHandler = createHttpRelay(registry, useTls);
@@ -219,7 +225,10 @@ const httpServer = useTls
     )
   : createHttpServer(requestHandler);
 
-const signalingWss = createSignalingServer(httpServer, registry);
+const signalingWss = createSignalingServer(httpServer, registry, {
+  apiSecret: config.apiSecret,
+  adminAuth,
+});
 
 const scheme = useTls ? "https" : "http";
 const wsScheme = useTls ? "wss" : "ws";
@@ -243,6 +252,9 @@ console.log(
 if (useTls) {
   console.log(`[STUN] TLS: ${config.tlsCertPath}`);
 }
+console.log(`[STUN] API Secret: ${config.apiSecret ? "set" : "disabled (open)"}`);
+console.log(`[STUN] Admin auth: ${adminAuth ? "TideCloak JWT" : "disabled (open)"}`);
+console.log(`[STUN] TURN Secret: ${config.turnSecret ? "set" : "disabled (open)"}`);
 console.log(`[STUN] External IP: ${config.externalIp}`);
 console.log(
   `[STUN] Relay ports: ${config.relayPortMin}-${config.relayPortMax}`

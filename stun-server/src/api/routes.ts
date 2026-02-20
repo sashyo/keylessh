@@ -9,6 +9,8 @@ import { readFileSync, existsSync } from "fs";
 import { join, resolve, extname } from "path";
 import { fileURLToPath } from "url";
 import type { Registry } from "../signaling/registry.js";
+import type { AdminAuth } from "../auth/jwt.js";
+import type { TidecloakConfig } from "../config.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = resolve(__filename, "..");
@@ -25,7 +27,12 @@ const MIME_TYPES: Record<string, string> = {
   ".ico": "image/x-icon",
 };
 
-export function createApiHandler(registry: Registry) {
+export interface ApiOptions {
+  adminAuth?: AdminAuth;
+  tidecloakConfig?: TidecloakConfig;
+}
+
+export function createApiHandler(registry: Registry, adminAuth?: AdminAuth, tidecloakConfig?: TidecloakConfig) {
   return function handleApiRequest(
     req: IncomingMessage,
     res: ServerResponse
@@ -53,8 +60,16 @@ export function createApiHandler(registry: Registry) {
 
     // ── API: Detailed stats (for admin) ──────────────
     if (path === "/api/admin/stats" && req.method === "GET") {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(registry.getDetailedStats()));
+      if (adminAuth) {
+        verifyBearerToken(req, res, adminAuth).then((ok) => {
+          if (!ok) return;
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(registry.getDetailedStats()));
+        });
+      } else {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(registry.getDetailedStats()));
+      }
       return true;
     }
 
@@ -100,6 +115,24 @@ export function createApiHandler(registry: Registry) {
       return false; // Has cookie → relay to WAF
     }
 
+    // ── Admin auth config (injected as JS) ──────────
+    if (path === "/admin-config" && req.method === "GET") {
+      let js: string;
+      if (tidecloakConfig) {
+        const cfg = JSON.stringify({
+          authServerUrl: tidecloakConfig["auth-server-url"].replace(/\/$/, ""),
+          realm: tidecloakConfig.realm,
+          clientId: tidecloakConfig.resource,
+        });
+        js = `window.__ADMIN_AUTH__ = ${cfg};`;
+      } else {
+        js = `window.__ADMIN_AUTH__ = null;`;
+      }
+      res.writeHead(200, { "Content-Type": "application/javascript; charset=utf-8" });
+      res.end(js);
+      return true;
+    }
+
     // ── Admin dashboard ──────────────────────────────
     if (path === "/admin" && req.method === "GET") {
       serveStaticFile(res, "admin.html");
@@ -134,6 +167,27 @@ export function createApiHandler(registry: Registry) {
       res.end("Not found");
     }
   }
+}
+
+async function verifyBearerToken(
+  req: IncomingMessage,
+  res: ServerResponse,
+  adminAuth: AdminAuth
+): Promise<boolean> {
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith("Bearer ")) {
+    res.writeHead(401, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Authentication required" }));
+    return false;
+  }
+  const token = authHeader.slice(7);
+  const payload = await adminAuth.verifyAdmin(token);
+  if (!payload) {
+    res.writeHead(403, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Invalid or insufficient permissions" }));
+    return false;
+  }
+  return true;
 }
 
 function parseCookie(header: string | undefined, name: string): string | null {

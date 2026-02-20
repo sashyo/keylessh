@@ -28,6 +28,8 @@ export interface ServerConfig {
   turnServer?: string;
   /** Shared secret for TURN REST API ephemeral credentials (same as TURN server's TURN_SECRET) */
   turnSecret: string;
+  /** Shared secret for STUN server API authentication (API_SECRET) */
+  apiSecret: string;
   /** Local TideCloak URL for proxying /realms/* and /resources/* (LOCAL_AUTH_URL).
    *  Use when the backend's TideCloak is a different instance from the WAF's auth-server-url. */
   localAuthUrl?: string;
@@ -85,6 +87,7 @@ export function loadConfig(): ServerConfig {
       : deriveIceServers(stunServerUrl),
     turnServer: process.env.TURN_SERVER || undefined,
     turnSecret: process.env.TURN_SECRET || "",
+    apiSecret: process.env.API_SECRET || "",
     localAuthUrl: process.env.LOCAL_AUTH_URL || undefined,
     displayName: process.env.WAF_DISPLAY_NAME || undefined,
     description: process.env.WAF_DESCRIPTION || undefined,

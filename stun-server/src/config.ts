@@ -4,6 +4,23 @@
 
 import { networkInterfaces } from "os";
 
+export interface TidecloakConfig {
+  realm: string;
+  "auth-server-url": string;
+  resource: string;
+  jwk: {
+    keys: Array<{
+      kid: string;
+      kty: string;
+      alg: string;
+      use: string;
+      crv: string;
+      x: string;
+    }>;
+  };
+  [key: string]: unknown;
+}
+
 export interface ServerConfig {
   stunPort: number;
   signalPort: number;
@@ -14,6 +31,10 @@ export interface ServerConfig {
   realm: string;
   /** Shared secret for TURN REST API ephemeral credentials. If empty, TURN auth is disabled. */
   turnSecret: string;
+  /** Shared secret for WAF registration. If empty, WAF auth is disabled. */
+  apiSecret: string;
+  /** TideCloak config for admin JWT validation. If undefined, admin auth is disabled. */
+  tidecloakConfig?: TidecloakConfig;
   /** Path to TLS certificate file. If set with tlsKeyPath, signaling uses HTTPS/WSS. */
   tlsCertPath?: string;
   /** Path to TLS private key file. */
@@ -38,9 +59,28 @@ export function loadConfig(): ServerConfig {
     defaultLifetime: parseInt(process.env.DEFAULT_LIFETIME || "600", 10),
     realm: process.env.REALM || "keylessh",
     turnSecret: process.env.TURN_SECRET || "",
+    apiSecret: process.env.API_SECRET || "",
+    tidecloakConfig: loadTidecloakConfig(),
     tlsCertPath: process.env.TLS_CERT_PATH || undefined,
     tlsKeyPath: process.env.TLS_KEY_PATH || undefined,
   };
+}
+
+function loadTidecloakConfig(): TidecloakConfig | undefined {
+  const b64 = process.env.TIDECLOAK_CONFIG_B64;
+  if (!b64) return undefined;
+  try {
+    const config = JSON.parse(Buffer.from(b64, "base64").toString("utf-8")) as TidecloakConfig;
+    if (!config.jwk?.keys?.length) {
+      console.warn("[Config] TIDECLOAK_CONFIG_B64 has no JWKS keys — admin auth disabled");
+      return undefined;
+    }
+    console.log("[Config] TideCloak JWKS loaded for admin auth");
+    return config;
+  } catch (err) {
+    console.warn("[Config] Failed to parse TIDECLOAK_CONFIG_B64:", err);
+    return undefined;
+  }
 }
 
 /**

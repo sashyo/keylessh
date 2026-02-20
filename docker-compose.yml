@@ -12,6 +12,9 @@ services:
       - STUN_PORT=3478
       - EXTERNAL_IP=${EXTERNAL_IP:-}
       - REALM=keylessh
+      - API_SECRET=${API_SECRET:-}
+      - TURN_SECRET=${TURN_SECRET:-}
+      - TIDECLOAK_CONFIG_B64=${TIDECLOAK_CONFIG_B64:-}
     healthcheck:
       test: ["CMD", "/nodejs/bin/node", "-e", "require('http').get({host:'127.0.0.1',port:9090,path:'/health',timeout:2000},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
       interval: 30s
@@ -31,6 +34,7 @@ services:
       - AUTH_SERVER_PUBLIC_URL=${AUTH_SERVER_PUBLIC_URL:-}
       - STRIP_AUTH_HEADER=${STRIP_AUTH_HEADER:-false}
       - LOCAL_AUTH_URL=${LOCAL_AUTH_URL:-}
+      - API_SECRET=${API_SECRET:-}
     depends_on:
       stun-server:
         condition: service_healthy

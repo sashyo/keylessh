@@ -14,6 +14,7 @@ export BACKEND_URL="${BACKEND_URL:-http://localhost:3000}"
 export LOCAL_AUTH_URL="${LOCAL_AUTH_URL:-http://localhost:${TC_PORT}}"
 export LISTEN_PORT="${LISTEN_PORT:-7891}"
 export HEALTH_PORT="${HEALTH_PORT:-7892}"
+export API_SECRET="${API_SECRET:-}"
 
 cd "$(dirname "$0")"
 
@@ -27,5 +28,6 @@ echo "  BACKEND_URL=$BACKEND_URL"
 echo "  LOCAL_AUTH_URL=$LOCAL_AUTH_URL"
 echo "  LISTEN_PORT=$LISTEN_PORT"
 echo "  HEALTH_PORT=$HEALTH_PORT"
+echo "  API_SECRET=${API_SECRET:+set}"
 
 npm start

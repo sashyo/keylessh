@@ -65,6 +65,7 @@ async function main() {
     iceServers: config.iceServers,
     turnServer: config.turnServer,
     turnSecret: config.turnSecret,
+    apiSecret: config.apiSecret,
     metadata: { displayName: config.displayName, description: config.description },
     addresses: [`${getLocalAddress()}:${config.listenPort}`],
     onPaired(client) {

@@ -25,6 +25,8 @@ export interface StunRegistrationOptions {
   turnSecret?: string;
   /** Whether the WAF's HTTP server uses TLS */
   useTls?: boolean;
+  /** Shared secret for STUN server API authentication */
+  apiSecret?: string;
   /** Metadata for portal display */
   metadata?: { displayName?: string; description?: string };
   onPaired?: (client: { id: string; reflexiveAddress: string | null }) => void;
@@ -72,6 +74,7 @@ export function registerWithStun(
         type: "register",
         role: "waf",
         id: options.wafId,
+        secret: options.apiSecret || undefined,
         addresses: options.addresses,
         metadata: options.metadata,
       });

@@ -261,6 +261,7 @@
     <a href="/portal">Portal</a> &middot; Powered by KeyleSSH
   </div>
 
+  <script src="/admin-config"></script>
   <script>
     (function() {
       var wafBody = document.getElementById("waf-body");
@@ -271,6 +272,56 @@
       var connText = document.getElementById("conn-text");
       var ws = null;
       var reconnectTimer = null;
+      var keycloak = null;
+      var authToken = null;
+
+      // Initialize Keycloak if config is available
+      function initAuth() {
+        if (typeof window.__ADMIN_AUTH__ === "undefined" || !window.__ADMIN_AUTH__) {
+          // No auth configured — connect directly
+          connect();
+          return;
+        }
+
+        var cfg = window.__ADMIN_AUTH__;
+        var script = document.createElement("script");
+        script.src = cfg.authServerUrl + "/js/keycloak.js";
+        script.onload = function() {
+          keycloak = new Keycloak({
+            url: cfg.authServerUrl,
+            realm: cfg.realm,
+            clientId: cfg.clientId,
+          });
+
+          keycloak.init({ onLoad: "login-required", checkLoginIframe: false })
+            .then(function(authenticated) {
+              if (!authenticated) {
+                connText.textContent = "Not authenticated";
+                return;
+              }
+              authToken = keycloak.token;
+              connect();
+
+              // Refresh token periodically
+              setInterval(function() {
+                keycloak.updateToken(30).then(function(refreshed) {
+                  if (refreshed) {
+                    authToken = keycloak.token;
+                  }
+                });
+              }, 30000);
+            })
+            .catch(function(err) {
+              connText.textContent = "Auth failed";
+              console.error("[Admin] Keycloak init failed:", err);
+            });
+        };
+        script.onerror = function() {
+          connText.textContent = "Auth unavailable";
+          console.error("[Admin] Failed to load Keycloak JS");
+        };
+        document.head.appendChild(script);
+      }
 
       function connect() {
         var proto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -279,7 +330,7 @@
         ws.onopen = function() {
           connDot.className = "conn-dot connected";
           connText.textContent = "Connected";
-          ws.send(JSON.stringify({ type: "subscribe_stats" }));
+          ws.send(JSON.stringify({ type: "subscribe_stats", token: authToken }));
         };
 
         ws.onmessage = function(e) {
@@ -288,6 +339,9 @@
           if (msg.type === "stats_update") {
             renderWafs(msg.wafs || []);
             renderClients(msg.clients || []);
+          }
+          if (msg.type === "error") {
+            connText.textContent = "Error: " + msg.message;
           }
         };
 
@@ -388,18 +442,18 @@
       window.drainWaf = function(wafId) {
         if (!confirm("Drain WAF " + wafId.substring(0, 12) + "...? This will disconnect all its clients and remove the WAF.")) return;
         if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: "admin_action", action: "drain_waf", targetId: wafId }));
+          ws.send(JSON.stringify({ type: "admin_action", action: "drain_waf", targetId: wafId, token: authToken }));
         }
       };
 
       window.disconnectClient = function(clientId) {
         if (!confirm("Disconnect client " + clientId.substring(0, 12) + "...?")) return;
         if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: "admin_action", action: "disconnect_client", targetId: clientId }));
+          ws.send(JSON.stringify({ type: "admin_action", action: "disconnect_client", targetId: clientId, token: authToken }));
         }
       };
 
-      connect();
+      initAuth();
     })();
   </script>
 </body>
