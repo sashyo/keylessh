@@ -286,6 +286,8 @@
           handleSwFetch(event.data, event.ports[0]);
         }
       });
+      // Start receiving messages — addEventListener alone queues them
+      navigator.serviceWorker.startMessages();
     } catch (err) {
       console.error("[WebRTC] Service Worker registration failed:", err);
     }

@@ -60,6 +60,7 @@ export function registerWithStun(
           turnServer: options.turnServer,
           turnSecret: options.turnSecret,
           listenPort: options.listenPort,
+          useTls: options.useTls,
           wafId: options.wafId,
           sendSignaling: safeSend,
         });

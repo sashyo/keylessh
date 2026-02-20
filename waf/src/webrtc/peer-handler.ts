@@ -11,6 +11,7 @@
 import { createHmac } from "crypto";
 import { PeerConnection, DataChannel } from "node-datachannel";
 import { request as httpRequest } from "http";
+import { request as httpsRequest } from "https";
 
 export interface PeerHandlerOptions {
   /** STUN server for ICE, e.g. "stun:relay.example.com:3478" */
@@ -21,6 +22,8 @@ export interface PeerHandlerOptions {
   turnSecret?: string;
   /** WAF's HTTP port for local requests */
   listenPort: number;
+  /** Whether the WAF is using HTTPS (self-signed) */
+  useTls?: boolean;
   /** Send signaling messages (SDP answers, ICE candidates) back via WebSocket */
   sendSignaling: (msg: unknown) => void;
   /** WAF ID — used as fromId in signaling messages */
@@ -162,13 +165,15 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
 
     const bodyBuf = bodyB64 ? Buffer.from(bodyB64, "base64") : undefined;
 
-    const req = httpRequest(
+    const makeReq = options.useTls ? httpsRequest : httpRequest;
+    const req = makeReq(
       {
         hostname: "127.0.0.1",
         port: options.listenPort,
         path: url,
         method,
         headers: headers as Record<string, string | string[]>,
+        rejectUnauthorized: false,
       },
       (res) => {
         const chunks: Buffer[] = [];
