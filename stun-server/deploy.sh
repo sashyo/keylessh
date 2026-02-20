@@ -20,6 +20,12 @@ else
   echo "[Deploy] Generating new secrets..."
   API_SECRET=$(openssl rand -hex 32)
   TURN_SECRET=$(openssl rand -hex 32)
+  # Auto-detect tidecloak.json
+  TC_JSON="${SCRIPT_DIR}/../waf/data/tidecloak.json"
+  if [ -f "$TC_JSON" ]; then
+    TIDECLOAK_CONFIG_B64=$(base64 -w0 < "$TC_JSON")
+    echo "[Deploy] Auto-detected tidecloak.json"
+  fi
   cat > "$ENV_FILE" <<EOF
 API_SECRET=${API_SECRET}
 TURN_SECRET=${TURN_SECRET}
@@ -33,7 +39,7 @@ EOF
   echo ""
   echo "[Deploy] IMPORTANT: Copy API_SECRET to your WAF's start.sh or env vars."
   echo "[Deploy] To set TIDECLOAK_CONFIG_B64, run:"
-  echo "  echo 'TIDECLOAK_CONFIG_B64='\"$(base64 -w0 < /path/to/tidecloak.json)\" >> ${ENV_FILE}"
+  echo "  echo 'TIDECLOAK_CONFIG_B64='\"$(base64 -w0 < ../waf/data/tidecloak.json)\" >> ${ENV_FILE}"
   echo ""
   source "$ENV_FILE"
 fi
