@@ -28,10 +28,10 @@ using System.Text;
 /// </summary>
 public class Contract : IAccessPolicy
 {
-    [PolicyParam(Required = true, Description = "Role required for SSH access")]
+    [PolicyParam(Required = true, Description = "Role required for SSH access.")]
     public string Role { get; set; }
 
-    [PolicyParam(Required = true, Description = "Resource identifier for role check")]
+    [PolicyParam(Required = true, Description = "Resource identifier for role check.")]
     public string Resource { get; set; }
 
     /// <summary>
