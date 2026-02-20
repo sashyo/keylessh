@@ -28,7 +28,7 @@ export interface StunRegistrationOptions {
   /** Shared secret for STUN server API authentication */
   apiSecret?: string;
   /** Metadata for portal display */
-  metadata?: { displayName?: string; description?: string };
+  metadata?: { displayName?: string; description?: string; backends?: { name: string }[] };
   onPaired?: (client: { id: string; reflexiveAddress: string | null }) => void;
   onCandidate?: (fromId: string, candidate: unknown) => void;
 }

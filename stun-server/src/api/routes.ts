@@ -50,6 +50,7 @@ export function createApiHandler(registry: Registry, adminAuth?: AdminAuth, tide
         id: w.id,
         displayName: w.metadata.displayName || w.id,
         description: w.metadata.description || "",
+        backends: w.metadata.backends || [],
         clientCount: w.pairedClients.size,
         online: w.ws.readyState === w.ws.OPEN,
       }));
@@ -79,18 +80,24 @@ export function createApiHandler(registry: Registry, adminAuth?: AdminAuth, tide
       req.on("data", (chunk: Buffer) => chunks.push(chunk));
       req.on("end", () => {
         try {
-          const { wafId } = JSON.parse(Buffer.concat(chunks).toString());
+          const { wafId, backend } = JSON.parse(Buffer.concat(chunks).toString());
           const waf = registry.getWaf(wafId);
           if (!waf) {
             res.writeHead(404, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ error: "WAF not found" }));
             return;
           }
+          const cookies: string[] = [
+            `waf_relay=${wafId}; Path=/; HttpOnly; SameSite=Lax`,
+          ];
+          if (backend) {
+            cookies.push(`waf_backend=${encodeURIComponent(backend)}; Path=/; HttpOnly; SameSite=Lax`);
+          }
           res.writeHead(200, {
             "Content-Type": "application/json",
-            "Set-Cookie": `waf_relay=${wafId}; Path=/; HttpOnly; SameSite=Lax`,
+            "Set-Cookie": cookies,
           });
-          res.end(JSON.stringify({ success: true, wafId }));
+          res.end(JSON.stringify({ success: true, wafId, backend: backend || null }));
         } catch {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Invalid request body" }));

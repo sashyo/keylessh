@@ -74,6 +74,12 @@ export function createHttpRelay(registry: Registry, useTls = false) {
     if (useTls && !headers["x-forwarded-proto"]) {
       headers["x-forwarded-proto"] = "https";
     }
+    // Pass selected backend to WAF via header
+    const backendName = parseCookie(req.headers.cookie, "waf_backend");
+    if (backendName) {
+      headers["x-waf-backend"] = decodeURIComponent(backendName);
+    }
+
     const relayMsg = {
       type: "http_request",
       id: requestId,
@@ -99,9 +105,12 @@ export function createHttpRelay(registry: Registry, useTls = false) {
     try {
       const response = await waitForResponse(requestId);
 
-      // Set session affinity cookie
+      // Set session affinity cookies
       const setCookies: string[] = [];
       setCookies.push(`waf_relay=${waf.id}; Path=/; HttpOnly; SameSite=Lax`);
+      if (backendName) {
+        setCookies.push(`waf_backend=${backendName}; Path=/; HttpOnly; SameSite=Lax`);
+      }
 
       // Merge WAF's Set-Cookie headers with our affinity cookie
       const wafSetCookie = response.headers["set-cookie"];

@@ -37,6 +37,7 @@ async function main() {
   const { server: proxyServer, getStats } = createProxy({
     listenPort: config.listenPort,
     backendUrl: config.backendUrl,
+    backends: config.backends,
     auth,
     stripAuthHeader: config.stripAuthHeader,
     tcConfig,
@@ -66,7 +67,11 @@ async function main() {
     turnServer: config.turnServer,
     turnSecret: config.turnSecret,
     apiSecret: config.apiSecret,
-    metadata: { displayName: config.displayName, description: config.description },
+    metadata: {
+      displayName: config.displayName,
+      description: config.description,
+      backends: config.backends.map((b) => ({ name: b.name })),
+    },
     addresses: [`${getLocalAddress()}:${config.listenPort}`],
     onPaired(client) {
       console.log(
@@ -86,7 +91,13 @@ async function main() {
   console.log(`[WAF] Login: ${scheme}://localhost:${config.listenPort}/login`);
   console.log(`[WAF] Proxy: ${scheme}://localhost:${config.listenPort}`);
   console.log(`[WAF] Health: http://localhost:${config.healthPort}/health`);
-  console.log(`[WAF] Backend: ${config.backendUrl}`);
+  if (config.backends.length > 1) {
+    for (const b of config.backends) {
+      console.log(`[WAF] Backend: ${b.name} → ${b.url}`);
+    }
+  } else {
+    console.log(`[WAF] Backend: ${config.backendUrl}`);
+  }
   console.log(`[WAF] STUN Server: ${config.stunServerUrl}`);
   console.log(`[WAF] WAF ID: ${config.wafId}`);
 

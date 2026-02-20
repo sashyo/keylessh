@@ -7,6 +7,7 @@ import type { WebSocket } from "ws";
 export interface WafMetadata {
   displayName?: string;
   description?: string;
+  backends?: { name: string }[];
 }
 
 export interface RegisteredWaf {
@@ -34,6 +35,7 @@ export interface DetailedStats {
     id: string;
     displayName: string;
     description: string;
+    backends: { name: string }[];
     addresses: string[];
     clientCount: number;
     registeredAt: number;
@@ -177,6 +179,7 @@ export function createRegistry(): Registry {
           id: w.id,
           displayName: w.metadata.displayName || w.id,
           description: w.metadata.description || "",
+          backends: w.metadata.backends || [],
           addresses: w.addresses,
           clientCount: w.pairedClients.size,
           registeredAt: w.registeredAt,

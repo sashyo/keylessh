@@ -13,10 +13,16 @@ import { networkInterfaces } from "os";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
+export interface BackendEntry {
+  name: string;
+  url: string;
+}
+
 export interface ServerConfig {
   listenPort: number;
   healthPort: number;
   backendUrl: string;
+  backends: BackendEntry[];
   stunServerUrl: string;
   wafId: string;
   stripAuthHeader: boolean;
@@ -62,15 +68,19 @@ export interface TidecloakConfig {
 }
 
 export function loadConfig(): ServerConfig {
-  const backendUrl = process.env.BACKEND_URL;
-  if (!backendUrl) {
-    console.error("[WAF] BACKEND_URL is required");
-    process.exit(1);
-  }
-
   const stunServerUrl = process.env.STUN_SERVER_URL;
   if (!stunServerUrl) {
     console.error("[WAF] STUN_SERVER_URL is required");
+    process.exit(1);
+  }
+
+  // Parse BACKENDS env var: "Name=http://host:port,Other=http://host2:port2"
+  // Falls back to BACKEND_URL for backwards compat
+  const backends = parseBackends();
+  const backendUrl = backends[0]?.url || "";
+
+  if (!backendUrl) {
+    console.error("[WAF] BACKENDS or BACKEND_URL is required");
     process.exit(1);
   }
 
@@ -78,6 +88,7 @@ export function loadConfig(): ServerConfig {
     listenPort: parseInt(process.env.LISTEN_PORT || "7891", 10),
     healthPort: parseInt(process.env.HEALTH_PORT || "7892", 10),
     backendUrl,
+    backends,
     stunServerUrl,
     wafId: process.env.WAF_ID || `waf-${Math.random().toString(36).slice(2, 8)}`,
     stripAuthHeader: process.env.STRIP_AUTH_HEADER === "true",
@@ -94,6 +105,25 @@ export function loadConfig(): ServerConfig {
     https: process.env.HTTPS !== "false",
     tlsHostname: process.env.TLS_HOSTNAME || "localhost",
   };
+}
+
+function parseBackends(): BackendEntry[] {
+  const backendsEnv = process.env.BACKENDS;
+  if (backendsEnv) {
+    return backendsEnv.split(",").map((entry) => {
+      const eq = entry.indexOf("=");
+      if (eq < 0) return { name: "Default", url: entry.trim() };
+      return { name: entry.slice(0, eq).trim(), url: entry.slice(eq + 1).trim() };
+    }).filter((b) => b.url);
+  }
+
+  const backendUrl = process.env.BACKEND_URL;
+  if (backendUrl) {
+    const name = process.env.WAF_DISPLAY_NAME || "Default";
+    return [{ name, url: backendUrl }];
+  }
+
+  return [];
 }
 
 /**

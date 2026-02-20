@@ -42,6 +42,7 @@ import {
 export interface ProxyOptions {
   listenPort: number;
   backendUrl: string;
+  backends?: { name: string; url: string }[];
   auth: TidecloakAuth;
   stripAuthHeader: boolean;
   tcConfig: TidecloakConfig;
@@ -173,9 +174,32 @@ export function createProxy(options: ProxyOptions): {
     rejectedRequests: 0,
   };
 
-  const backendUrl = new URL(options.backendUrl);
-  const isHttps = backendUrl.protocol === "https:";
-  const makeRequest = isHttps ? httpsRequest : httpRequest;
+  // Build backend lookup map (name → URL)
+  const backendMap = new Map<string, URL>();
+  if (options.backends?.length) {
+    for (const b of options.backends) {
+      backendMap.set(b.name, new URL(b.url));
+    }
+  }
+  const defaultBackendUrl = new URL(options.backendUrl);
+
+  function resolveBackend(req: IncomingMessage): URL {
+    // Check x-waf-backend header (set by STUN relay) first
+    const headerBackend = req.headers["x-waf-backend"] as string | undefined;
+    if (headerBackend) {
+      const found = backendMap.get(headerBackend);
+      if (found) return found;
+    }
+    // Check waf_backend cookie (direct access)
+    const cookies = parseCookies(req.headers.cookie);
+    const cookieBackend = cookies["waf_backend"];
+    if (cookieBackend) {
+      const decoded = decodeURIComponent(cookieBackend);
+      const found = backendMap.get(decoded);
+      if (found) return found;
+    }
+    return defaultBackendUrl;
+  }
 
   // TideCloak URL for reverse-proxying auth pages (/realms/*, /resources/*).
   // Uses LOCAL_AUTH_URL if set (for when the backend's TideCloak differs from
@@ -495,10 +519,17 @@ export function createProxy(options: ProxyOptions): {
       proxyHeaders["x-forwarded-for"] =
         req.socket.remoteAddress || "unknown";
 
-      const proxyReq = makeRequest(
+      const targetBackend = resolveBackend(req);
+      const targetIsHttps = targetBackend.protocol === "https:";
+      const makeBackendReq = targetIsHttps ? httpsRequest : httpRequest;
+
+      // Strip x-waf-backend header (internal routing, not for backend)
+      delete proxyHeaders["x-waf-backend"];
+
+      const proxyReq = makeBackendReq(
         {
-          hostname: backendUrl.hostname,
-          port: backendUrl.port || (isHttps ? 443 : 80),
+          hostname: targetBackend.hostname,
+          port: targetBackend.port || (targetIsHttps ? 443 : 80),
           path: req.url,
           method: req.method,
           headers: proxyHeaders,
@@ -563,7 +594,13 @@ export function createProxy(options: ProxyOptions): {
   const scheme = isTls ? "https" : "http";
   server.listen(options.listenPort, () => {
     console.log(`[Proxy] Listening on ${scheme}://localhost:${options.listenPort}`);
-    console.log(`[Proxy] Backend: ${options.backendUrl}`);
+    if (options.backends && options.backends.length > 1) {
+      for (const b of options.backends) {
+        console.log(`[Proxy] Backend: ${b.name} → ${b.url}`);
+      }
+    } else {
+      console.log(`[Proxy] Backend: ${options.backendUrl}`);
+    }
     console.log(`[Proxy] Login: ${scheme}://localhost:${options.listenPort}/login`);
   });
 

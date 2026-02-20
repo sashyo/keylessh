@@ -100,6 +100,13 @@
       gap: 1rem;
     }
 
+    .backends {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      margin-top: auto;
+    }
+
     .btn {
       display: block;
       width: 100%;
@@ -113,7 +120,6 @@
       text-align: center;
       cursor: pointer;
       transition: background 0.15s;
-      margin-top: auto;
     }
 
     .btn:hover { background: var(--primary-hover); }
@@ -217,6 +223,22 @@
           var statusText = waf.online ? "Online" : "Offline";
           var desc = waf.description || "No description";
           var clients = waf.clientCount === 1 ? "1 client" : waf.clientCount + " clients";
+          var backends = waf.backends && waf.backends.length > 0 ? waf.backends : [{ name: "Default" }];
+
+          var buttonsHtml;
+          if (backends.length === 1) {
+            buttonsHtml = '<button class="btn" ' +
+              (waf.online ? 'onclick="selectWaf(\'' + escapeAttr(waf.id) + '\', \'' + escapeAttr(backends[0].name) + '\')"' : 'disabled') +
+              '>Connect</button>';
+          } else {
+            buttonsHtml = '<div class="backends">' +
+              backends.map(function(b) {
+                return '<button class="btn" ' +
+                  (waf.online ? 'onclick="selectWaf(\'' + escapeAttr(waf.id) + '\', \'' + escapeAttr(b.name) + '\')"' : 'disabled') +
+                  '>' + escapeHtml(b.name) + '</button>';
+              }).join("") +
+            '</div>';
+          }
 
           return '<div class="card">' +
             '<div class="card-header">' +
@@ -228,9 +250,7 @@
               '<span>' + statusText + '</span>' +
               '<span>' + clients + '</span>' +
             '</div>' +
-            '<button class="btn" ' +
-              (waf.online ? 'onclick="selectWaf(\'' + escapeAttr(waf.id) + '\')"' : 'disabled') +
-            '>Connect</button>' +
+            buttonsHtml +
           '</div>';
         }).join("");
       }
@@ -245,11 +265,11 @@
         return s.replace(/'/g, "\\'").replace(/"/g, "&quot;");
       }
 
-      window.selectWaf = function(wafId) {
+      window.selectWaf = function(wafId, backend) {
         fetch("/api/select-waf", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ wafId: wafId }),
+          body: JSON.stringify({ wafId: wafId, backend: backend }),
         }).then(function(res) {
           if (res.ok) {
             window.location.href = "/";
