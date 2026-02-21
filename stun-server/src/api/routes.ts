@@ -185,6 +185,12 @@ export function createApiHandler(registry: Registry, adminAuth?: AdminAuth, tide
       return true;
     }
 
+    // ── Silent SSO check (required by TideCloak) ────
+    if (path === "/silent-check-sso.html" && req.method === "GET") {
+      serveStaticFile(res, "silent-check-sso.html");
+      return true;
+    }
+
     // ── Static assets ────────────────────────────────
     if (path.startsWith("/static/")) {
       const filePath = path.slice("/static/".length);

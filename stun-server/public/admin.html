@@ -285,7 +285,10 @@
         var script = document.createElement("script");
         script.src = "/static/tidecloak.js";
         script.onload = function() {
-          IAMService.initIAM(window.__AUTH_CONFIG__, function(authenticated) {
+          var cfg = Object.assign({}, window.__AUTH_CONFIG__, {
+            redirectUri: window.location.origin + "/admin"
+          });
+          IAMService.initIAM(cfg, function(authenticated) {
             if (!authenticated) {
               IAMService.doLogin();
               return;
