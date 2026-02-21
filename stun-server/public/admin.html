@@ -272,53 +272,41 @@
       var connText = document.getElementById("conn-text");
       var ws = null;
       var reconnectTimer = null;
-      var keycloak = null;
       var authToken = null;
 
-      // Initialize Keycloak if config is available
+      // Initialize TideCloak if config is available
       function initAuth() {
-        if (typeof window.__ADMIN_AUTH__ === "undefined" || !window.__ADMIN_AUTH__) {
+        if (typeof window.__AUTH_CONFIG__ === "undefined" || !window.__AUTH_CONFIG__) {
           // No auth configured — connect directly
           connect();
           return;
         }
 
-        var cfg = window.__ADMIN_AUTH__;
         var script = document.createElement("script");
         script.src = "/static/tidecloak.js";
         script.onload = function() {
-          keycloak = new Keycloak({
-            url: cfg.authServerUrl,
-            realm: cfg.realm,
-            clientId: cfg.clientId,
-          });
-
-          keycloak.init({ onLoad: "login-required", checkLoginIframe: false })
-            .then(function(authenticated) {
-              if (!authenticated) {
-                connText.textContent = "Not authenticated";
-                return;
-              }
-              authToken = keycloak.token;
+          IAMService.initIAM(window.__AUTH_CONFIG__, function(authenticated) {
+            if (!authenticated) {
+              IAMService.doLogin();
+              return;
+            }
+            IAMService.getToken().then(function(token) {
+              authToken = token;
               connect();
-
-              // Refresh token periodically
-              setInterval(function() {
-                keycloak.updateToken(30).then(function(refreshed) {
-                  if (refreshed) {
-                    authToken = keycloak.token;
-                  }
-                });
-              }, 30000);
-            })
-            .catch(function(err) {
-              connText.textContent = "Auth failed";
-              console.error("[Admin] Keycloak init failed:", err);
             });
+
+            // Refresh token on refresh events
+            IAMService.on("authRefreshSuccess", function() {
+              IAMService.getToken().then(function(token) { authToken = token; });
+            });
+          }).catch(function(err) {
+            connText.textContent = "Auth failed";
+            console.error("[Admin] TideCloak init failed:", err);
+          });
         };
         script.onerror = function() {
           connText.textContent = "Auth unavailable";
-          console.error("[Admin] Failed to load Keycloak JS");
+          console.error("[Admin] Failed to load TideCloak JS");
         };
         document.head.appendChild(script);
       }

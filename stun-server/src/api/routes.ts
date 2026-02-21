@@ -163,18 +163,16 @@ export function createApiHandler(registry: Registry, adminAuth?: AdminAuth, tide
       return false; // Has cookie → relay to WAF
     }
 
-    // ── Admin auth config (injected as JS) ──────────
+    // ── Auth config (injected as JS) ─────────────────
     if (path === "/admin-config" && req.method === "GET") {
       let js: string;
       if (tidecloakConfig) {
-        const cfg = JSON.stringify({
-          authServerUrl: tidecloakConfig["auth-server-url"].replace(/\/$/, ""),
-          realm: tidecloakConfig.realm,
-          clientId: tidecloakConfig.resource,
-        });
-        js = `window.__ADMIN_AUTH__ = ${cfg};`;
+        // Serve full TideCloak config (minus jwk which is server-side only)
+        const { jwk, ...clientConfig } = tidecloakConfig;
+        const cfg = JSON.stringify(clientConfig);
+        js = `window.__AUTH_CONFIG__ = ${cfg};`;
       } else {
-        js = `window.__ADMIN_AUTH__ = null;`;
+        js = `window.__AUTH_CONFIG__ = null;`;
       }
       res.writeHead(200, { "Content-Type": "application/javascript; charset=utf-8" });
       res.end(js);

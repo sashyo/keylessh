@@ -1,4 +1,3 @@
-// Entry point for browser bundle — exposes Keycloak as window.Keycloak
-// Standard keycloak-js adapter works with TideCloak (Keycloak-compatible)
-import Keycloak from "keycloak-js";
-window.Keycloak = Keycloak;
+// Browser bundle for @tidecloak/js — exposes IAMService as global
+import { IAMService } from "@tidecloak/js";
+window.IAMService = IAMService;
