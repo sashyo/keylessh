@@ -32,6 +32,8 @@ export interface TurnAuthResult {
   reason?: string;
   /** The validated username, if authenticated */
   username?: string;
+  /** The long-term credential key for signing responses (MD5(username:realm:password)) */
+  key?: Buffer;
 }
 
 /**
@@ -98,7 +100,7 @@ export function validateTurnCredentials(
     return { authenticated: false, reason: "integrity_mismatch" };
   }
 
-  return { authenticated: true, username };
+  return { authenticated: true, username, key };
 }
 
 /**

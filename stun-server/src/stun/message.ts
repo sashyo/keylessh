@@ -11,7 +11,7 @@ import {
   buildErrorCode,
   buildSoftware,
 } from "./attributes.js";
-import { appendFingerprint } from "./integrity.js";
+import { appendFingerprint, appendMessageIntegrity } from "./integrity.js";
 
 export interface StunMessage {
   header: StunHeader;
@@ -46,20 +46,32 @@ export function parseMessage(buf: Buffer): StunMessage | null {
  * @param msgClass - STUN class (request, indication, success, error)
  * @param transactionId - 12-byte transaction ID
  * @param attrBuffers - Pre-built attribute buffers (from buildXxx functions)
- * @param addFingerprint - Whether to append a FINGERPRINT attribute
+ * @param options - addFingerprint (default true), integrityKey (optional HMAC key for MESSAGE-INTEGRITY)
  */
 export function buildMessage(
   method: number,
   msgClass: number,
   transactionId: Buffer,
   attrBuffers: Buffer[],
-  addFingerprint: boolean = true
+  options?: boolean | { addFingerprint?: boolean; integrityKey?: Buffer }
 ): Buffer {
+  const opts =
+    typeof options === "boolean"
+      ? { addFingerprint: options }
+      : options ?? {};
+  const addFp = opts.addFingerprint !== false;
+  const integrityKey = opts.integrityKey;
+
   const body = Buffer.concat(attrBuffers);
   const header = buildHeader(method, msgClass, transactionId, body.length);
   let message = Buffer.from(Buffer.concat([header, body]));
 
-  if (addFingerprint) {
+  // MESSAGE-INTEGRITY must come before FINGERPRINT (RFC 5389 §15.4)
+  if (integrityKey) {
+    message = Buffer.from(appendMessageIntegrity(message, integrityKey));
+  }
+
+  if (addFp) {
     message = Buffer.from(appendFingerprint(message));
   }
 

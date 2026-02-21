@@ -69,20 +69,22 @@ export async function handleTurnMessage(
   transport: TransportInfo
 ): Promise<Buffer | null> {
   // Authenticate all TURN requests (except Send indications) when secret is set
+  let authKey: Buffer | undefined;
   if (ctx.turnSecret && msg.header.method !== METHOD_SEND) {
     const authResult = authenticateTurn(ctx, msg);
-    if (authResult) return authResult;
+    if (authResult.error) return authResult.error;
+    authKey = authResult.key;
   }
 
   switch (msg.header.method) {
     case METHOD_ALLOCATE:
-      return handleAllocate(ctx, msg, transport);
+      return handleAllocate(ctx, msg, transport, authKey);
     case METHOD_REFRESH:
-      return handleRefresh(ctx, msg, transport);
+      return handleRefresh(ctx, msg, transport, authKey);
     case METHOD_CREATE_PERMISSION:
-      return handleCreatePermission(ctx, msg, transport);
+      return handleCreatePermission(ctx, msg, transport, authKey);
     case METHOD_CHANNEL_BIND:
-      return handleChannelBind(ctx, msg, transport);
+      return handleChannelBind(ctx, msg, transport, authKey);
     case METHOD_SEND:
       handleSend(ctx, msg, transport);
       return null; // Indications have no response
@@ -98,50 +100,54 @@ export async function handleTurnMessage(
 // ── Auth ──────────────────────────────────────────────────────────
 
 /**
- * Validate TURN credentials. Returns an error response buffer if auth fails,
- * or null if auth succeeds.
+ * Validate TURN credentials. Returns { error } if auth fails,
+ * or { key } with the long-term credential key if auth succeeds.
  */
 function authenticateTurn(
   ctx: TurnHandlerContext,
   msg: StunMessage
-): Buffer | null {
+): { error: Buffer; key?: undefined } | { error?: undefined; key: Buffer } {
   // If no USERNAME attribute, send 401 challenge with REALM + NONCE
   const usernameAttr = getAttribute(msg, ATTR_USERNAME);
   if (!usernameAttr) {
     // Generate a nonce (timestamp-based so we can detect staleness)
     const nonce = Math.floor(Date.now() / 1000).toString(36);
 
-    return buildMessage(
-      msg.header.method,
-      CLASS_ERROR,
-      msg.header.transactionId,
-      [
-        buildErrorCode(ERR_UNAUTHORIZED, "Unauthorized"),
-        buildRealm(ctx.realm),
-        buildNonce(nonce),
-        buildSoftware(SOFTWARE_NAME),
-      ]
-    );
+    return {
+      error: buildMessage(
+        msg.header.method,
+        CLASS_ERROR,
+        msg.header.transactionId,
+        [
+          buildErrorCode(ERR_UNAUTHORIZED, "Unauthorized"),
+          buildRealm(ctx.realm),
+          buildNonce(nonce),
+          buildSoftware(SOFTWARE_NAME),
+        ]
+      ),
+    };
   }
 
   // Validate credentials
   const result = validateTurnCredentials(msg, ctx.realm, ctx.turnSecret);
-  if (!result.authenticated) {
+  if (!result.authenticated || !result.key) {
     console.log(`[TURN] Auth failed: ${result.reason}`);
-    return buildMessage(
-      msg.header.method,
-      CLASS_ERROR,
-      msg.header.transactionId,
-      [
-        buildErrorCode(ERR_UNAUTHORIZED, result.reason || "Unauthorized"),
-        buildRealm(ctx.realm),
-        buildNonce(Math.floor(Date.now() / 1000).toString(36)),
-        buildSoftware(SOFTWARE_NAME),
-      ]
-    );
+    return {
+      error: buildMessage(
+        msg.header.method,
+        CLASS_ERROR,
+        msg.header.transactionId,
+        [
+          buildErrorCode(ERR_UNAUTHORIZED, result.reason || "Unauthorized"),
+          buildRealm(ctx.realm),
+          buildNonce(Math.floor(Date.now() / 1000).toString(36)),
+          buildSoftware(SOFTWARE_NAME),
+        ]
+      ),
+    };
   }
 
-  return null; // Auth passed
+  return { key: result.key };
 }
 
 // ── Allocate ─────────────────────────────────────────────────────
@@ -149,26 +155,27 @@ function authenticateTurn(
 async function handleAllocate(
   ctx: TurnHandlerContext,
   msg: StunMessage,
-  transport: TransportInfo
+  transport: TransportInfo,
+  authKey?: Buffer
 ): Promise<Buffer> {
   // Check REQUESTED-TRANSPORT
   const rtAttr = getAttribute(msg, ATTR_REQUESTED_TRANSPORT);
   if (!rtAttr) {
-    return buildErrorMessage(msg, ERR_BAD_REQUEST, "Missing REQUESTED-TRANSPORT");
+    return buildErrorMessage(msg, ERR_BAD_REQUEST, "Missing REQUESTED-TRANSPORT", authKey);
   }
   const requestedTransport = parseRequestedTransport(rtAttr.value);
   if (requestedTransport !== TRANSPORT_UDP) {
-    return buildErrorMessage(msg, ERR_UNSUPPORTED_TRANSPORT, "Only UDP relay supported");
+    return buildErrorMessage(msg, ERR_UNSUPPORTED_TRANSPORT, "Only UDP relay supported", authKey);
   }
 
   // Check for existing allocation
-  const key = makeFiveTupleKey(
+  const tupleKey = makeFiveTupleKey(
     transport.protocol,
     transport.sourceAddress,
     transport.sourcePort
   );
-  if (ctx.allocationManager.get(key)) {
-    return buildErrorMessage(msg, ERR_ALLOCATION_MISMATCH, "Allocation already exists");
+  if (ctx.allocationManager.get(tupleKey)) {
+    return buildErrorMessage(msg, ERR_ALLOCATION_MISMATCH, "Allocation already exists", authKey);
   }
 
   // Get requested lifetime
@@ -207,11 +214,12 @@ async function handleAllocate(
       METHOD_ALLOCATE,
       CLASS_SUCCESS,
       msg.header.transactionId,
-      attrs
+      attrs,
+      { integrityKey: authKey }
     );
   } catch (err) {
     console.error("[TURN] Allocate failed:", err);
-    return buildErrorMessage(msg, ERR_INSUFFICIENT_CAPACITY, "No relay ports available");
+    return buildErrorMessage(msg, ERR_INSUFFICIENT_CAPACITY, "No relay ports available", authKey);
   }
 }
 
@@ -220,9 +228,10 @@ async function handleAllocate(
 function handleRefresh(
   ctx: TurnHandlerContext,
   msg: StunMessage,
-  transport: TransportInfo
+  transport: TransportInfo,
+  authKey?: Buffer
 ): Buffer {
-  const key = makeFiveTupleKey(
+  const tupleKey = makeFiveTupleKey(
     transport.protocol,
     transport.sourceAddress,
     transport.sourcePort
@@ -239,16 +248,17 @@ function handleRefresh(
     // lifetime === 0 means deallocate
   }
 
-  const result = ctx.allocationManager.refresh(key, lifetime);
+  const result = ctx.allocationManager.refresh(tupleKey, lifetime);
   if (result === null) {
-    return buildErrorMessage(msg, ERR_ALLOCATION_MISMATCH, "No allocation found");
+    return buildErrorMessage(msg, ERR_ALLOCATION_MISMATCH, "No allocation found", authKey);
   }
 
   return buildMessage(
     METHOD_REFRESH,
     CLASS_SUCCESS,
     msg.header.transactionId,
-    [buildLifetime(result), buildSoftware(SOFTWARE_NAME)]
+    [buildLifetime(result), buildSoftware(SOFTWARE_NAME)],
+    { integrityKey: authKey }
   );
 }
 
@@ -257,16 +267,17 @@ function handleRefresh(
 function handleCreatePermission(
   ctx: TurnHandlerContext,
   msg: StunMessage,
-  transport: TransportInfo
+  transport: TransportInfo,
+  authKey?: Buffer
 ): Buffer {
-  const key = makeFiveTupleKey(
+  const tupleKey = makeFiveTupleKey(
     transport.protocol,
     transport.sourceAddress,
     transport.sourcePort
   );
-  const alloc = ctx.allocationManager.get(key);
+  const alloc = ctx.allocationManager.get(tupleKey);
   if (!alloc) {
-    return buildErrorMessage(msg, ERR_ALLOCATION_MISMATCH, "No allocation found");
+    return buildErrorMessage(msg, ERR_ALLOCATION_MISMATCH, "No allocation found", authKey);
   }
 
   // Install permissions for all XOR-PEER-ADDRESS attributes
@@ -282,14 +293,15 @@ function handleCreatePermission(
   }
 
   if (!foundPeer) {
-    return buildErrorMessage(msg, ERR_BAD_REQUEST, "Missing XOR-PEER-ADDRESS");
+    return buildErrorMessage(msg, ERR_BAD_REQUEST, "Missing XOR-PEER-ADDRESS", authKey);
   }
 
   return buildMessage(
     METHOD_CREATE_PERMISSION,
     CLASS_SUCCESS,
     msg.header.transactionId,
-    [buildSoftware(SOFTWARE_NAME)]
+    [buildSoftware(SOFTWARE_NAME)],
+    { integrityKey: authKey }
   );
 }
 
@@ -298,43 +310,45 @@ function handleCreatePermission(
 function handleChannelBind(
   ctx: TurnHandlerContext,
   msg: StunMessage,
-  transport: TransportInfo
+  transport: TransportInfo,
+  authKey?: Buffer
 ): Buffer {
-  const key = makeFiveTupleKey(
+  const tupleKey = makeFiveTupleKey(
     transport.protocol,
     transport.sourceAddress,
     transport.sourcePort
   );
-  const alloc = ctx.allocationManager.get(key);
+  const alloc = ctx.allocationManager.get(tupleKey);
   if (!alloc) {
-    return buildErrorMessage(msg, ERR_ALLOCATION_MISMATCH, "No allocation found");
+    return buildErrorMessage(msg, ERR_ALLOCATION_MISMATCH, "No allocation found", authKey);
   }
 
   const cnAttr = getAttribute(msg, ATTR_CHANNEL_NUMBER);
   if (!cnAttr) {
-    return buildErrorMessage(msg, ERR_BAD_REQUEST, "Missing CHANNEL-NUMBER");
+    return buildErrorMessage(msg, ERR_BAD_REQUEST, "Missing CHANNEL-NUMBER", authKey);
   }
   const channelNumber = parseChannelNumber(cnAttr.value);
 
   const peerAttr = getAttribute(msg, ATTR_XOR_PEER_ADDRESS);
   if (!peerAttr) {
-    return buildErrorMessage(msg, ERR_BAD_REQUEST, "Missing XOR-PEER-ADDRESS");
+    return buildErrorMessage(msg, ERR_BAD_REQUEST, "Missing XOR-PEER-ADDRESS", authKey);
   }
   const peer = decodeXorAddress(peerAttr.value, msg.header.transactionId);
   if (!peer) {
-    return buildErrorMessage(msg, ERR_BAD_REQUEST, "Invalid XOR-PEER-ADDRESS");
+    return buildErrorMessage(msg, ERR_BAD_REQUEST, "Invalid XOR-PEER-ADDRESS", authKey);
   }
 
   const ok = bindChannel(alloc, channelNumber, peer.address, peer.port);
   if (!ok) {
-    return buildErrorMessage(msg, ERR_BAD_REQUEST, "Channel binding conflict");
+    return buildErrorMessage(msg, ERR_BAD_REQUEST, "Channel binding conflict", authKey);
   }
 
   return buildMessage(
     METHOD_CHANNEL_BIND,
     CLASS_SUCCESS,
     msg.header.transactionId,
-    [buildSoftware(SOFTWARE_NAME)]
+    [buildSoftware(SOFTWARE_NAME)],
+    { integrityKey: authKey }
   );
 }
 
@@ -368,12 +382,14 @@ function handleSend(
 function buildErrorMessage(
   request: StunMessage,
   code: number,
-  reason: string
+  reason: string,
+  authKey?: Buffer
 ): Buffer {
   return buildMessage(
     request.header.method,
     CLASS_ERROR,
     request.header.transactionId,
-    [buildErrorCode(code, reason), buildSoftware(SOFTWARE_NAME)]
+    [buildErrorCode(code, reason), buildSoftware(SOFTWARE_NAME)],
+    { integrityKey: authKey }
   );
 }
