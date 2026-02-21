@@ -285,7 +285,7 @@
 
         var cfg = window.__ADMIN_AUTH__;
         var script = document.createElement("script");
-        script.src = cfg.authServerUrl + "/js/keycloak.js";
+        script.src = "/static/tidecloak.js";
         script.onload = function() {
           keycloak = new Keycloak({
             url: cfg.authServerUrl,

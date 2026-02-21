@@ -254,7 +254,7 @@
         grid.innerHTML = '<div class="empty"><p>Authenticating...</p></div>';
 
         var script = document.createElement("script");
-        script.src = cfg.authServerUrl + "/js/keycloak.js";
+        script.src = "/static/tidecloak.js";
         script.onload = function() {
           var keycloak = new Keycloak({
             url: cfg.authServerUrl,
@@ -276,8 +276,8 @@
             });
         };
         script.onerror = function() {
-          // Auth server unavailable — proceed without auth
-          console.error("[Portal] Failed to load Keycloak JS, proceeding without auth");
+          // TideCloak bundle unavailable — proceed without auth
+          console.error("[Portal] Failed to load TideCloak JS, proceeding without auth");
           start();
         };
         document.head.appendChild(script);
