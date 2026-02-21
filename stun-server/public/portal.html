@@ -165,6 +165,7 @@
     Powered by KeyleSSH &middot; <a href="/admin">Admin</a>
   </div>
 
+  <script src="/admin-config"></script>
   <script>
     (function() {
       var grid = document.getElementById("waf-grid");
@@ -237,8 +238,52 @@
           });
       }
 
-      loadWafs();
-      setInterval(loadWafs, 5000);
+      function start() {
+        loadWafs();
+        setInterval(loadWafs, 5000);
+      }
+
+      // Require authentication if TideCloak is configured
+      function initAuth() {
+        if (typeof window.__ADMIN_AUTH__ === "undefined" || !window.__ADMIN_AUTH__) {
+          start();
+          return;
+        }
+
+        var cfg = window.__ADMIN_AUTH__;
+        grid.innerHTML = '<div class="empty"><p>Authenticating...</p></div>';
+
+        var script = document.createElement("script");
+        script.src = cfg.authServerUrl + "/js/keycloak.js";
+        script.onload = function() {
+          var keycloak = new Keycloak({
+            url: cfg.authServerUrl,
+            realm: cfg.realm,
+            clientId: cfg.clientId,
+          });
+
+          keycloak.init({ onLoad: "login-required", checkLoginIframe: false })
+            .then(function(authenticated) {
+              if (!authenticated) {
+                grid.innerHTML = '<div class="empty"><p>Authentication required</p></div>';
+                return;
+              }
+              start();
+            })
+            .catch(function(err) {
+              grid.innerHTML = '<div class="empty"><p>Authentication failed</p></div>';
+              console.error("[Portal] Keycloak init failed:", err);
+            });
+        };
+        script.onerror = function() {
+          // Auth server unavailable — proceed without auth
+          console.error("[Portal] Failed to load Keycloak JS, proceeding without auth");
+          start();
+        };
+        document.head.appendChild(script);
+      }
+
+      initAuth();
     })();
   </script>
 </body>
