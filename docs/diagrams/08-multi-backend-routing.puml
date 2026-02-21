@@ -1,0 +1,83 @@
+@startuml multi-backend-routing
+!theme plain
+title Multi-Backend Path-Based Routing
+
+skinparam {
+  backgroundColor #0f172a
+  defaultFontColor #f8fafc
+  defaultFontName "Segoe UI"
+  defaultFontSize 12
+  SequenceLifeLineBorderColor #334155
+  SequenceLifeLineBackgroundColor #1e293b
+  ParticipantBackgroundColor #1e293b
+  ParticipantBorderColor #3b82f6
+  ParticipantFontColor #f8fafc
+  ArrowColor #94a3b8
+  ArrowFontColor #94a3b8
+  NoteBackgroundColor #1e293b
+  NoteBorderColor #334155
+  NoteFontColor #f8fafc
+  SequenceGroupBackgroundColor #1e293b
+  SequenceGroupBorderColor #334155
+  SequenceDividerBackgroundColor #334155
+  SequenceDividerFontColor #f8fafc
+}
+
+participant "Browser" as browser #1e293b
+participant "WAF Proxy" as waf #1e293b
+participant "App1\nlocalhost:3000" as app1 #1e293b
+participant "MediaBox\nlocalhost:8080" as app2 #1e293b
+
+== Path Prefix Routing ==
+
+browser -> waf : GET /__b/App1/api/users
+activate waf
+waf -> waf : Detect prefix: /__b/App1\nStrip → /api/users\nBackend: App1
+waf -> app1 : GET /api/users
+app1 --> waf : 200 { users: [...] }
+waf --> browser : 200 { users: [...] }
+deactivate waf
+
+|||
+
+browser -> waf : GET /__b/MediaBox/files
+activate waf
+waf -> waf : Detect prefix: /__b/MediaBox\nStrip → /files\nBackend: MediaBox
+waf -> app2 : GET /files
+app2 --> waf : 200 (file listing)
+waf --> browser : 200 (file listing)
+deactivate waf
+
+== HTML Rewriting ==
+
+browser -> waf : GET /__b/App1/
+activate waf
+waf -> app1 : GET /
+app1 --> waf : 200 text/html
+
+waf -> waf : **Rewrite HTML:**\n1. href="/about" → href="/__b/App1/about"\n2. src="/main.js" → src="/__b/App1/main.js"\n3. http://localhost:3000/api → /__b/App1/api\n4. Inject fetch/XHR prefix patch\n5. Inject webrtc-upgrade.js\n6. Inject backend "Switch" button
+
+waf --> browser : 200 (rewritten HTML)
+deactivate waf
+
+== Redirect Rewriting ==
+
+browser -> waf : POST /__b/App1/form
+activate waf
+waf -> app1 : POST /form
+app1 --> waf : 302 Location: /dashboard
+
+waf -> waf : Rewrite redirect:\n/dashboard → /__b/App1/dashboard
+
+waf --> browser : 302 /__b/App1/dashboard
+deactivate waf
+
+== Backend Resolution Priority ==
+
+note over browser, waf #334155
+  1. **/__b/<name>/** path prefix (highest priority)
+  2. **x-waf-backend** header
+  3. **Default** (first configured backend)
+end note
+
+@enduml

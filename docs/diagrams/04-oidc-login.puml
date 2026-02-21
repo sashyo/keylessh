@@ -1,0 +1,77 @@
+@startuml oidc-login
+!theme plain
+title OIDC Login Flow (through HTTP Relay)
+
+skinparam {
+  backgroundColor #0f172a
+  defaultFontColor #f8fafc
+  defaultFontName "Segoe UI"
+  defaultFontSize 12
+  SequenceLifeLineBorderColor #334155
+  SequenceLifeLineBackgroundColor #1e293b
+  ParticipantBackgroundColor #1e293b
+  ParticipantBorderColor #3b82f6
+  ParticipantFontColor #f8fafc
+  ArrowColor #94a3b8
+  ArrowFontColor #94a3b8
+  NoteBackgroundColor #1e293b
+  NoteBorderColor #334155
+  NoteFontColor #f8fafc
+  SequenceDividerBackgroundColor #334155
+  SequenceDividerFontColor #f8fafc
+}
+
+participant "Browser" as browser #1e293b
+participant "STUN Server\n(relay)" as stun #1e293b
+participant "WAF" as waf #1e293b
+participant "TideCloak" as tc #1e293b
+
+== Redirect to Login ==
+
+browser -> stun : GET /auth/login
+stun -> waf : WS: http_request (relay)
+waf -> waf : Build TideCloak auth URL\nwith state={nonce, redirect}
+waf --> stun : WS: http_response 302\nLocation: /realms/.../openid-connect/auth
+stun --> browser : HTTP 302
+
+== TideCloak Login (proxied through WAF) ==
+
+browser -> stun : GET /realms/.../auth?client_id=...
+stun -> waf : WS: http_request (relay)
+waf -> tc : Proxy: GET /realms/.../auth
+tc --> waf : Login page HTML
+waf --> stun : WS: http_response 200
+stun --> browser : Login page
+
+browser -> browser : User enters credentials
+
+browser -> stun : POST /realms/.../login-actions/authenticate
+stun -> waf : WS: http_request (relay)
+waf -> tc : Proxy: POST authenticate
+tc --> waf : 302 /auth/callback?code=xyz
+waf --> stun : WS: http_response 302
+stun --> browser : HTTP 302
+
+== Code Exchange ==
+
+browser -> stun : GET /auth/callback?code=xyz
+stun -> waf : WS: http_request (relay)
+activate waf
+
+waf -> tc : POST /realms/.../token\n{ grant_type: authorization_code,\n  code: xyz }
+tc --> waf : { access_token, refresh_token }
+
+waf -> waf : Set cookies:\n  waf_access = JWT (HttpOnly)\n  waf_refresh = token (HttpOnly, Strict)
+
+waf --> stun : WS: http_response 302\nLocation: / (original page)\nSet-Cookie: waf_access=...\nSet-Cookie: waf_refresh=...
+deactivate waf
+
+stun --> browser : HTTP 302 + cookies
+
+note over browser, waf
+  All subsequent requests include waf_access cookie.
+  WAF validates JWT on every request.
+  Transparent refresh via waf_refresh when expired.
+end note
+
+@enduml

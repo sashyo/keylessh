@@ -1,0 +1,98 @@
+@startuml service-worker-datachannel
+!theme plain
+title Service Worker DataChannel Tunneling
+
+skinparam {
+  backgroundColor #0f172a
+  defaultFontColor #f8fafc
+  defaultFontName "Segoe UI"
+  defaultFontSize 12
+  SequenceLifeLineBorderColor #334155
+  SequenceLifeLineBackgroundColor #1e293b
+  ParticipantBackgroundColor #1e293b
+  ParticipantBorderColor #3b82f6
+  ParticipantFontColor #f8fafc
+  ArrowColor #94a3b8
+  ArrowFontColor #94a3b8
+  NoteBackgroundColor #1e293b
+  NoteBorderColor #334155
+  NoteFontColor #f8fafc
+  SequenceGroupBackgroundColor #1e293b
+  SequenceGroupBorderColor #334155
+  SequenceDividerBackgroundColor #334155
+  SequenceDividerFontColor #f8fafc
+}
+
+participant "Web App\n(page JS)" as app #1e293b
+participant "Service\nWorker" as sw #1e293b
+participant "webrtc-\nupgrade.js" as rtc #1e293b
+participant "DataChannel" as dc #1e293b
+participant "WAF\n(peer handler)" as waf #1e293b
+participant "Backend" as backend #1e293b
+
+== Setup (after DataChannel opens) ==
+
+rtc -> rtc : GET /auth/session-token\n(via HTTP relay, reads HttpOnly cookie)
+rtc -> rtc : Store JWT for injection
+
+rtc -> sw : register /js/sw.js\n(scope: "/")
+rtc -> sw : postMessage({ type: "dc_ready" })
+sw -> sw : Add client to dcClients set
+
+== Fetch Interception ==
+
+app -> sw : fetch("/api/data")
+activate sw
+
+sw -> sw : Decision:\n  navigate? → NO\n  cross-origin? → NO\n  WAF path? → NO\n  → Route via DataChannel
+
+sw -> sw : Rewrite URL prefix:\npage at /__b/App1/...\n→ /__b/App1/api/data
+
+sw -> rtc : postMessage(\n  { type: "dc_fetch",\n    url: "/__b/App1/api/data",\n    method: "GET",\n    headers: {...} },\n  [MessagePort])
+activate rtc
+
+rtc -> rtc : Inject session JWT\ninto cookie header
+
+rtc -> dc : send(JSON.stringify({\n  type: "http_request",\n  id: "uuid-1",\n  method: "GET",\n  url: "/__b/App1/api/data",\n  headers: {\n    cookie: "waf_access=<jwt>"\n  },\n  body: "" }))
+activate dc
+
+dc -> waf : DataChannel message
+activate waf
+
+waf -> waf : HTTP to 127.0.0.1:7891\n(loopback through proxy)
+waf -> waf : Strip /__b/App1 prefix\nVerify JWT → OK
+
+waf -> backend : GET /api/data
+backend --> waf : 200 { data: [...] }
+
+alt Response < 200KB
+  waf -> dc : http_response\n{ id, statusCode: 200,\n  headers, body: base64 }
+else Response > 200KB (chunked)
+  waf -> dc : http_response_start\n{ id, statusCode, headers,\n  totalChunks: 3 }
+  waf -> dc : http_response_chunk\n{ id, index: 0, data: "..." }
+  waf -> dc : http_response_chunk\n{ id, index: 1, data: "..." }
+  waf -> dc : http_response_chunk\n{ id, index: 2, data: "..." }
+end
+
+deactivate waf
+
+dc -> rtc : onmessage
+deactivate dc
+
+rtc -> rtc : Decode base64\n(or reassemble chunks)
+
+rtc -> sw : port.postMessage({\n  statusCode: 200,\n  headers: {...},\n  body: base64 })
+deactivate rtc
+
+sw -> sw : new Response(\n  bodyBytes,\n  { status, headers })
+
+sw --> app : Response object
+deactivate sw
+
+note over app, waf #334155
+  Page navigations bypass SW → use HTTP relay.
+  Sub-resource fetches (API, assets) → DataChannel.
+  10s timeout → fallback to HTTP relay.
+end note
+
+@enduml

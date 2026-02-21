@@ -1,0 +1,110 @@
+@startuml hole-punching
+!theme plain
+title NAT Traversal — Hole Punching via STUN + ICE
+
+skinparam {
+  backgroundColor #0f172a
+  defaultFontColor #f8fafc
+  defaultFontName "Segoe UI"
+  defaultFontSize 12
+  SequenceLifeLineBorderColor #334155
+  SequenceLifeLineBackgroundColor #1e293b
+  ParticipantBackgroundColor #1e293b
+  ParticipantBorderColor #3b82f6
+  ParticipantFontColor #f8fafc
+  ArrowColor #94a3b8
+  ArrowFontColor #94a3b8
+  NoteBackgroundColor #1e293b
+  NoteBorderColor #334155
+  NoteFontColor #f8fafc
+  SequenceGroupBackgroundColor #1e293b
+  SequenceGroupBorderColor #334155
+  SequenceDividerBackgroundColor #334155
+  SequenceDividerFontColor #f8fafc
+}
+
+participant "Browser\n(behind NAT A)" as browser #1e293b
+participant "NAT A" as natA #1e293b
+participant "STUN Server\n(signaling WS)" as sig #1e293b
+participant "STUN Server\n(port 3478)" as stun #1e293b
+participant "NAT B" as natB #1e293b
+participant "WAF\n(behind NAT B)" as waf #1e293b
+
+== 1. Fetch TURN Credentials ==
+
+browser -> sig : GET /webrtc-config (via relay)
+sig --> browser : { stunServer, turnServer,\n  turnUsername, turnPassword }
+
+== 2. SDP Offer/Answer Exchange ==
+
+browser -> browser : new RTCPeerConnection({\n  iceServers: [stun, turn] })
+browser -> browser : createDataChannel("http-tunnel")
+browser -> browser : createOffer() → SDP
+
+browser -> sig : sdp_offer { sdp, fromId, targetId }
+sig -> waf : forward sdp_offer
+
+waf -> waf : setRemoteDescription(offer)
+waf -> waf : → generates SDP answer
+
+waf -> sig : sdp_answer { sdp, fromId }
+sig -> browser : forward sdp_answer
+browser -> browser : setRemoteDescription(answer)
+
+== 3. STUN Binding — Discover Public Address ==
+
+browser -> natA : STUN Binding Request
+natA -> stun : (NAT assigns 5.6.7.8:54321)
+stun -> stun : Read source: 5.6.7.8:54321
+
+stun --> natA : Binding Success\nXOR-MAPPED-ADDRESS:\n  5.6.7.8:54321
+natA --> browser : (server-reflexive address)
+
+note over browser
+  Browser now knows:
+  host candidate: 192.168.1.5:54321
+  srflx candidate: 5.6.7.8:54321
+end note
+
+waf -> natB : STUN Binding Request
+natB -> stun : (NAT assigns 9.8.7.6:12345)
+stun --> natB : Binding Success\nXOR-MAPPED-ADDRESS:\n  9.8.7.6:12345
+natB --> waf : (server-reflexive address)
+
+== 4. ICE Candidate Exchange ==
+
+browser -> sig : candidate { srflx: 5.6.7.8:54321 }
+sig -> waf : forward candidate
+
+waf -> sig : candidate { srflx: 9.8.7.6:12345 }
+sig -> browser : forward candidate
+
+== 5. ICE Connectivity Checks (Hole Punching) ==
+
+note over browser, waf #334155
+  Both peers simultaneously send STUN binding
+  requests to each other's reflexive addresses.
+  This "punches holes" in both NATs.
+end note
+
+browser -> natA : packet → 9.8.7.6:12345
+natA -> natB : (creates NAT mapping for return traffic)
+
+waf -> natB : packet → 5.6.7.8:54321
+natB -> natA : (creates NAT mapping for return traffic)
+
+natA --> browser : return traffic now flows
+natB --> waf : return traffic now flows
+
+note over browser, waf #334155
+  Bidirectional path established!
+  NAT mappings allow direct communication.
+end note
+
+== 6. DataChannel Opens ==
+
+browser <-> waf : **P2P DataChannel OPEN**
+
+waf -> sig : client_status\n{ clientId, connectionType: "p2p" }
+
+@enduml

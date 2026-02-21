@@ -1,0 +1,63 @@
+@startuml waf-registration
+!theme plain
+title WAF Registration & Client Pairing
+
+skinparam {
+  backgroundColor #0f172a
+  defaultFontColor #f8fafc
+  defaultFontName "Segoe UI"
+  defaultFontSize 12
+  SequenceLifeLineBorderColor #334155
+  SequenceLifeLineBackgroundColor #1e293b
+  ParticipantBackgroundColor #1e293b
+  ParticipantBorderColor #3b82f6
+  ParticipantFontColor #f8fafc
+  ArrowColor #94a3b8
+  ArrowFontColor #94a3b8
+  NoteBackgroundColor #1e293b
+  NoteBorderColor #334155
+  NoteFontColor #f8fafc
+  SequenceGroupBackgroundColor #1e293b
+  SequenceGroupBorderColor #334155
+  SequenceGroupFontColor #f8fafc
+  SequenceDividerBackgroundColor #334155
+  SequenceDividerFontColor #f8fafc
+}
+
+participant "WAF" as waf #1e293b
+participant "STUN Server\n(signaling)" as stun #1e293b
+participant "Browser" as browser #1e293b
+
+== WAF Registration ==
+
+waf -> stun : WebSocket connect
+activate stun
+
+waf -> stun : register\n{ role: "waf", id: "waf-x",\n  secret: "...",\n  addresses: ["10.0.0.5:7891"],\n  metadata: { displayName, backends } }
+
+stun -> stun : Validate API_SECRET\nAdd to registry
+
+stun --> waf : registered\n{ role: "waf", id: "waf-x" }
+
+note over waf, stun
+  WAF keeps WebSocket open.
+  Reconnects on disconnect (5s delay).
+end note
+
+== Client Connects ==
+
+browser -> stun : WebSocket connect
+activate browser
+
+browser -> stun : register\n{ role: "client", id: "client-abc" }
+
+stun -> stun : Find least-loaded WAF\nPair client with waf-x
+
+stun --> browser : paired\n{ waf: { id: "waf-x",\n  addresses: ["10.0.0.5:7891"] } }
+
+stun --> waf : paired\n{ client: { id: "client-abc",\n  reflexiveAddress: "1.2.3.4" } }
+
+deactivate stun
+deactivate browser
+
+@enduml

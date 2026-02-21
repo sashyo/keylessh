@@ -1,0 +1,67 @@
+@startuml http-relay
+!theme plain
+title HTTP Relay — Request Tunneling via WebSocket
+
+skinparam {
+  backgroundColor #0f172a
+  defaultFontColor #f8fafc
+  defaultFontName "Segoe UI"
+  defaultFontSize 12
+  SequenceLifeLineBorderColor #334155
+  SequenceLifeLineBackgroundColor #1e293b
+  ParticipantBackgroundColor #1e293b
+  ParticipantBorderColor #3b82f6
+  ParticipantFontColor #f8fafc
+  ArrowColor #94a3b8
+  ArrowFontColor #94a3b8
+  NoteBackgroundColor #1e293b
+  NoteBorderColor #334155
+  NoteFontColor #f8fafc
+  SequenceGroupBackgroundColor #1e293b
+  SequenceGroupBorderColor #334155
+  SequenceDividerBackgroundColor #334155
+  SequenceDividerFontColor #f8fafc
+}
+
+participant "Browser" as browser #1e293b
+participant "STUN Server\n(HTTP + WS)" as stun #1e293b
+participant "WAF" as waf #1e293b
+participant "Backend App" as backend #1e293b
+
+== Portal Selection ==
+
+browser -> stun : GET /portal
+stun --> browser : portal.html
+
+browser -> stun : GET /api/wafs
+stun --> browser : { wafs: [{ id, displayName, backends }] }
+
+browser -> stun : GET /api/select?waf=waf-x&backend=App1
+stun --> browser : 302 /__b/App1/\nSet-Cookie: waf_relay=waf-x\nSet-Cookie: waf_backend=App1
+
+== HTTP Relay (every request before WebRTC) ==
+
+browser -> stun : GET /__b/App1/dashboard\nCookie: waf_relay=waf-x
+activate stun
+
+stun -> stun : Cookie lookup → waf-x
+
+stun -> waf : WS: http_request\n{ id: "uuid-1", method: "GET",\n  url: "/__b/App1/dashboard",\n  headers: {...}, body: "" }
+activate waf
+
+waf -> waf : HTTP to 127.0.0.1:7891\n(loopback through own proxy)
+
+waf -> waf : Strip /__b/App1 prefix\nCheck JWT → not auth'd\n→ 302 /auth/login
+
+waf --> stun : WS: http_response\n{ id: "uuid-1", statusCode: 302,\n  headers: {Location: "/auth/login"},\n  body: "" }
+deactivate waf
+
+stun --> browser : HTTP 302 /auth/login\nSet-Cookie: waf_relay=waf-x
+deactivate stun
+
+note over stun
+  30s timeout → HTTP 504
+  Session affinity via waf_relay cookie
+end note
+
+@enduml

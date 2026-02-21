@@ -1,0 +1,70 @@
+@startuml system-overview
+!theme plain
+!pragma layout smetana
+title KeyleSSH — System Overview
+
+skinparam {
+  backgroundColor #0f172a
+  defaultFontColor #f8fafc
+  defaultFontName "Segoe UI"
+  defaultFontSize 13
+  ArrowColor #94a3b8
+  ArrowFontColor #94a3b8
+  NoteBackgroundColor #1e293b
+  NoteBorderColor #334155
+  NoteFontColor #f8fafc
+  ComponentBackgroundColor #1e293b
+  ComponentBorderColor #334155
+  ComponentFontColor #f8fafc
+  DatabaseBackgroundColor #1e293b
+  DatabaseBorderColor #334155
+  DatabaseFontColor #f8fafc
+  CloudBackgroundColor #1e293b
+  CloudBorderColor #334155
+  CloudFontColor #f8fafc
+  RectangleBorderColor #334155
+  RectangleBackgroundColor #1e293b
+  RectangleFontColor #f8fafc
+  ActorBorderColor #3b82f6
+  ActorBackgroundColor #1e293b
+  ActorFontColor #f8fafc
+}
+
+actor "Browser" as browser #3b82f6
+
+cloud "Internet" as inet {
+}
+
+package "STUN Server (public)" as stun {
+  component "Signaling\n(WS port 9090)" as sig
+  component "Portal & Admin\n(HTTP port 9090)" as portal
+  component "STUN/TURN\n(UDP+TCP port 3478)" as stunproto
+  component "TURN Relay\n(UDP 49152-65535)" as relay
+  database "In-memory\nRegistry" as reg
+}
+
+package "Private Network" as priv {
+  component "WAF\n(port 7891)" as waf
+  component "Backend App 1\n(port 3000)" as app1
+  component "Backend App 2\n(port 8080)" as app2
+}
+
+cloud "TideCloak" as tc {
+  component "OIDC / Auth" as oidc
+}
+
+browser -down-> portal : "1. Pick WAF\n(HTTP)"
+browser -down-> sig : "2. HTTP relay\n(WebSocket tunnel)"
+browser -down-> stunproto : "3. STUN Binding\n(NAT discovery)"
+browser <-down-> relay : "5. TURN relay\n(NAT fallback)"
+browser <-right-> waf : "4. P2P DataChannel\n(hole-punched)"
+
+sig <-right-> waf : "Persistent WS\n(registration +\nrelay + signaling)"
+sig -down-> reg
+
+waf -down-> app1 : "Proxy"
+waf -down-> app2 : "Proxy"
+waf -left-> oidc : "OIDC\ncode exchange"
+browser -right-> oidc : "Login\n(via WAF proxy)"
+
+@enduml

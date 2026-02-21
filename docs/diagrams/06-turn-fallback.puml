@@ -1,0 +1,99 @@
+@startuml turn-fallback
+!theme plain
+title TURN Relay Fallback (when P2P fails)
+
+skinparam {
+  backgroundColor #0f172a
+  defaultFontColor #f8fafc
+  defaultFontName "Segoe UI"
+  defaultFontSize 12
+  SequenceLifeLineBorderColor #334155
+  SequenceLifeLineBackgroundColor #1e293b
+  ParticipantBackgroundColor #1e293b
+  ParticipantBorderColor #3b82f6
+  ParticipantFontColor #f8fafc
+  ArrowColor #94a3b8
+  ArrowFontColor #94a3b8
+  NoteBackgroundColor #1e293b
+  NoteBorderColor #334155
+  NoteFontColor #f8fafc
+  SequenceGroupBackgroundColor #1e293b
+  SequenceGroupBorderColor #334155
+  SequenceDividerBackgroundColor #334155
+  SequenceDividerFontColor #f8fafc
+}
+
+participant "Browser" as browser #1e293b
+participant "STUN Server\n(port 3478)" as stun #1e293b
+participant "Relay Socket\n(port 54000)" as relay #1e293b
+participant "STUN Server\n(signaling)" as sig #1e293b
+participant "WAF" as waf #1e293b
+
+note over browser, waf #334155
+  P2P connectivity checks failed
+  (symmetric NAT or firewall blocking).
+  ICE agent falls back to TURN.
+end note
+
+== 1. TURN Allocate ==
+
+browser -> stun : Allocate Request\n(no credentials)
+
+stun --> browser : 401 Unauthorized\nREALM: "keylessh"\nNONCE: "abc123"
+
+browser -> stun : Allocate Request\nUsername: "1708000000"\nRealm: "keylessh"\nNonce: "abc123"\nMESSAGE-INTEGRITY: HMAC-SHA1
+
+stun -> stun : Validate:\n1. timestamp > now? (not expired)\n2. password = HMAC-SHA1(secret, username)\n3. key = MD5(user:realm:pass)\n4. verify MESSAGE-INTEGRITY
+
+stun -> relay : Bind UDP socket\non random port 49152-65535
+activate relay
+
+stun --> browser : Allocate Success\nXOR-RELAYED-ADDRESS: 5.6.7.8:54000\nXOR-MAPPED-ADDRESS: (reflexive)\nLIFETIME: 600
+
+== 2. Create Permission ==
+
+browser -> stun : CreatePermission\n{ peer: WAF's IP address }
+stun -> stun : Install permission\n(expires in 300s)
+stun --> browser : CreatePermission Success
+
+== 3. Channel Bind (optional, reduces overhead) ==
+
+browser -> stun : ChannelBind\n{ channel: 0x4001,\n  peer: WAF IP:port }
+stun -> stun : Map channel 0x4001 → peer
+stun --> browser : ChannelBind Success
+
+== 4. ICE Candidate Exchange ==
+
+browser -> sig : candidate { type: "relay",\n  address: 5.6.7.8:54000 }
+sig -> waf : forward candidate
+
+note over browser, waf
+  WAF also gets TURN credentials and may
+  allocate its own relay, or connect directly
+  to the browser's relay address.
+end note
+
+== 5. Data Relay ==
+
+browser -> stun : ChannelData\n[0x4001 | length | payload]
+note right: 4-byte overhead only
+
+stun -> relay : extract payload
+relay -> waf : UDP: payload
+
+waf -> relay : UDP: response
+relay -> stun : received from peer
+stun -> stun : lookup channel by peer
+stun --> browser : ChannelData\n[0x4001 | length | response]
+
+deactivate relay
+
+note over browser, waf #334155
+  DataChannel established via TURN relay.
+  Higher latency than P2P but works through
+  any NAT/firewall configuration.
+end note
+
+waf -> sig : client_status\n{ clientId, connectionType: "turn" }
+
+@enduml

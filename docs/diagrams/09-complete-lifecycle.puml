@@ -1,0 +1,105 @@
+@startuml complete-lifecycle
+!theme plain
+title Complete Connection Lifecycle — Portal to P2P
+
+skinparam {
+  backgroundColor #0f172a
+  defaultFontColor #f8fafc
+  defaultFontName "Segoe UI"
+  defaultFontSize 12
+  SequenceLifeLineBorderColor #334155
+  SequenceLifeLineBackgroundColor #1e293b
+  ParticipantBackgroundColor #1e293b
+  ParticipantBorderColor #3b82f6
+  ParticipantFontColor #f8fafc
+  ArrowColor #94a3b8
+  ArrowFontColor #94a3b8
+  NoteBackgroundColor #1e293b
+  NoteBorderColor #334155
+  NoteFontColor #f8fafc
+  SequenceGroupBackgroundColor #1e293b
+  SequenceGroupBorderColor #334155
+  SequenceDividerBackgroundColor #334155
+  SequenceDividerFontColor #f8fafc
+}
+
+actor "User" as user #3b82f6
+participant "Browser" as browser #1e293b
+participant "STUN Server" as stun #1e293b
+participant "WAF" as waf #1e293b
+participant "TideCloak" as tc #1e293b
+participant "Backend" as backend #1e293b
+
+== Phase 1: Portal ==
+
+user -> browser : Visit stun-server URL
+browser -> stun : GET /portal
+stun --> browser : portal.html
+browser -> stun : GET /api/wafs
+stun --> browser : [{ id: "waf-x", displayName: "My App", backends: [...] }]
+user -> browser : Click "Connect" on App1
+browser -> stun : GET /api/select?waf=waf-x&backend=App1
+stun --> browser : 302 /__b/App1/ + cookies
+
+== Phase 2: HTTP Relay + Auth ==
+
+browser -> stun : GET /__b/App1/ (Cookie: waf_relay=waf-x)
+stun -> waf : WS: http_request (relay)
+waf --> stun : WS: http_response 302 → /auth/login
+stun --> browser : 302 /auth/login
+
+browser -> stun : GET /auth/login → relay → WAF → 302 TideCloak
+browser -> stun : GET /realms/... → relay → WAF → proxy to TideCloak
+browser <-> tc : Login (proxied through WAF)
+browser -> stun : GET /auth/callback?code=xyz → relay → WAF
+waf -> tc : Exchange code for tokens
+waf --> stun : 302 + Set-Cookie: waf_access, waf_refresh
+stun --> browser : 302 /__b/App1/ + auth cookies
+
+browser -> stun : GET /__b/App1/ (with JWT cookie)
+stun -> waf : WS: http_request (relay)
+waf -> backend : GET / (authenticated)
+backend --> waf : 200 HTML
+waf -> waf : Rewrite HTML + inject webrtc-upgrade.js
+waf --> stun : WS: http_response
+stun --> browser : 200 (app page + upgrade script)
+
+== Phase 3: WebRTC Upgrade (async, background) ==
+
+browser -> browser : webrtc-upgrade.js executes
+browser -> stun : WS: register { role: "client" }
+stun --> browser : paired { waf: "waf-x" }
+stun --> waf : paired { client: "client-abc" }
+
+browser -> browser : new RTCPeerConnection + createOffer
+browser -> stun : sdp_offer
+stun -> waf : forward sdp_offer
+waf -> stun : sdp_answer
+stun -> browser : forward sdp_answer
+
+browser <-> stun : STUN Binding (port 3478)\n→ discover reflexive address
+browser <-> stun : ICE candidates ←→ forwarded ←→ WAF
+browser <-> waf : **ICE connectivity check → hole punched!**
+
+browser <-> waf : **DataChannel OPEN**
+
+== Phase 4: Service Worker Takeover ==
+
+browser -> browser : GET /auth/session-token (via relay)
+browser -> browser : Register Service Worker
+browser -> browser : SW.postMessage("dc_ready")
+
+note over browser, waf #334155
+  From this point:
+  - Page navigations → HTTP relay (cookie-based auth)
+  - Sub-resource fetches → DataChannel (JWT injected)
+  - 10s DC timeout → fallback to relay
+end note
+
+user -> browser : Click link / API call
+browser -> waf : **DataChannel: http_request**
+waf -> backend : Proxy (authenticated)
+backend --> waf : Response
+waf -> browser : **DataChannel: http_response**
+
+@enduml
