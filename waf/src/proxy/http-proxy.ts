@@ -584,7 +584,13 @@ export function createProxy(options: ProxyOptions): {
         if (isBrowserRequest(req)) {
           const fullUrl = backendPrefix + url;
           const redirectTarget = encodeURIComponent(fullUrl);
-          redirect(res, `/login?redirect=${redirectTarget}&error=expired`);
+          if (!token && !cookies["waf_refresh"]) {
+            // No session at all — go straight to auth (TideCloak SSO will handle it)
+            redirect(res, `/auth/login?redirect=${redirectTarget}`);
+          } else {
+            // Had a session but it expired and couldn't be refreshed
+            redirect(res, `/login?redirect=${redirectTarget}&error=expired`);
+          }
         } else {
           res.writeHead(401, { "Content-Type": "application/json" });
           res.end(
