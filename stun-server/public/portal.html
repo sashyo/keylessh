@@ -271,18 +271,27 @@
             redirectUri: window.location.origin + "/portal",
             silentCheckSsoRedirectUri: window.location.origin + "/silent-check-sso.html"
           });
-          IAMService.initIAM(cfg, function(authenticated) {
+          IAMService.initIAM(cfg).then(function(authenticated) {
             if (!authenticated) {
               IAMService.doLogin();
               return;
             }
-            IAMService.getToken().then(function(token) {
-              authToken = token;
-              start();
-            });
+            try {
+              IAMService.getToken().then(function(token) {
+                authToken = token;
+                start();
+              }).catch(function() {
+                IAMService.doLogin();
+              });
+            } catch(e) {
+              console.warn("[Portal] Token not available, re-authenticating");
+              IAMService.doLogin();
+            }
 
             IAMService.on("authRefreshSuccess", function() {
-              IAMService.getToken().then(function(token) { authToken = token; });
+              try {
+                IAMService.getToken().then(function(token) { authToken = token; }).catch(function(){});
+              } catch(e) {}
             });
           }).catch(function(err) {
             grid.innerHTML = '<div class="empty"><p>Authentication failed</p></div>';

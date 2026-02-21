@@ -289,19 +289,27 @@
             redirectUri: window.location.origin + "/admin",
             silentCheckSsoRedirectUri: window.location.origin + "/silent-check-sso.html"
           });
-          IAMService.initIAM(cfg, function(authenticated) {
+          IAMService.initIAM(cfg).then(function(authenticated) {
             if (!authenticated) {
               IAMService.doLogin();
               return;
             }
-            IAMService.getToken().then(function(token) {
-              authToken = token;
-              connect();
-            });
+            try {
+              IAMService.getToken().then(function(token) {
+                authToken = token;
+                connect();
+              }).catch(function() {
+                IAMService.doLogin();
+              });
+            } catch(e) {
+              console.warn("[Admin] Token not available, re-authenticating");
+              IAMService.doLogin();
+            }
 
-            // Refresh token on refresh events
             IAMService.on("authRefreshSuccess", function() {
-              IAMService.getToken().then(function(token) { authToken = token; });
+              try {
+                IAMService.getToken().then(function(token) { authToken = token; }).catch(function(){});
+              } catch(e) {}
             });
           }).catch(function(err) {
             connText.textContent = "Auth failed";
