@@ -165,10 +165,11 @@
     Powered by KeyleSSH &middot; <a href="/admin">Admin</a>
   </div>
 
-  <script src="/admin-config"></script>
+  <script src="/auth-config"></script>
   <script>
     (function() {
       var grid = document.getElementById("waf-grid");
+      var authToken = null;
 
       function render(wafs) {
         if (!wafs || wafs.length === 0) {
@@ -230,9 +231,20 @@
       };
 
       function loadWafs() {
-        fetch("/api/wafs")
-          .then(function(r) { return r.json(); })
-          .then(function(data) { render(data.wafs); })
+        var opts = {};
+        if (authToken) {
+          opts.headers = { "Authorization": "Bearer " + authToken };
+        }
+        fetch("/api/wafs", opts)
+          .then(function(r) {
+            if (r.status === 401) {
+              // Token expired — re-login
+              IAMService.doLogin();
+              return;
+            }
+            return r.json();
+          })
+          .then(function(data) { if (data) render(data.wafs); })
           .catch(function() {
             grid.innerHTML = '<div class="empty"><p>Failed to load endpoints</p></div>';
           });
@@ -256,14 +268,22 @@
         script.src = "/static/tidecloak.js";
         script.onload = function() {
           var cfg = Object.assign({}, window.__AUTH_CONFIG__, {
-            redirectUri: window.location.origin + "/portal"
+            redirectUri: window.location.origin + "/portal",
+            silentCheckSsoRedirectUri: window.location.origin + "/silent-check-sso.html"
           });
           IAMService.initIAM(cfg, function(authenticated) {
             if (!authenticated) {
               IAMService.doLogin();
               return;
             }
-            start();
+            IAMService.getToken().then(function(token) {
+              authToken = token;
+              start();
+            });
+
+            IAMService.on("authRefreshSuccess", function() {
+              IAMService.getToken().then(function(token) { authToken = token; });
+            });
           }).catch(function(err) {
             grid.innerHTML = '<div class="empty"><p>Authentication failed</p></div>';
             console.error("[Portal] TideCloak init failed:", err);

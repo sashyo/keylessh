@@ -261,7 +261,7 @@
     <a href="/portal">Portal</a> &middot; Powered by KeyleSSH
   </div>
 
-  <script src="/admin-config"></script>
+  <script src="/auth-config"></script>
   <script>
     (function() {
       var wafBody = document.getElementById("waf-body");
@@ -286,7 +286,8 @@
         script.src = "/static/tidecloak.js";
         script.onload = function() {
           var cfg = Object.assign({}, window.__AUTH_CONFIG__, {
-            redirectUri: window.location.origin + "/admin"
+            redirectUri: window.location.origin + "/admin",
+            silentCheckSsoRedirectUri: window.location.origin + "/silent-check-sso.html"
           });
           IAMService.initIAM(cfg, function(authenticated) {
             if (!authenticated) {

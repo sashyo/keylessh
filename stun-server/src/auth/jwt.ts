@@ -7,6 +7,8 @@ import { jwtVerify, createLocalJWKSet, type JWTPayload } from "jose";
 import type { TidecloakConfig } from "../config.js";
 
 export interface AdminAuth {
+  /** Verify a JWT is valid (any authenticated user). Returns payload if valid, null otherwise. */
+  verifyToken(token: string): Promise<JWTPayload | null>;
   /** Verify a JWT and check for admin role. Returns payload if valid, null otherwise. */
   verifyAdmin(token: string): Promise<JWTPayload | null>;
 }
@@ -19,6 +21,16 @@ export function createAdminAuth(config: TidecloakConfig): AdminAuth {
     : `${config["auth-server-url"]}/realms/${config.realm}`;
 
   return {
+    async verifyToken(token: string): Promise<JWTPayload | null> {
+      try {
+        const { payload } = await jwtVerify(token, JWKS, { issuer });
+        return payload;
+      } catch (err) {
+        console.log("[Auth] JWT verification failed:", err);
+        return null;
+      }
+    },
+
     async verifyAdmin(token: string): Promise<JWTPayload | null> {
       try {
         const { payload } = await jwtVerify(token, JWKS, { issuer });

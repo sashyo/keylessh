@@ -46,16 +46,14 @@ export function createApiHandler(registry: Registry, adminAuth?: AdminAuth, tide
 
     // ── API: List WAFs (for portal) ──────────────────
     if (path === "/api/wafs" && req.method === "GET") {
-      const wafs = registry.getAllWafs().map((w) => ({
-        id: w.id,
-        displayName: w.metadata.displayName || w.id,
-        description: w.metadata.description || "",
-        backends: w.metadata.backends || [],
-        clientCount: w.pairedClients.size,
-        online: w.ws.readyState === w.ws.OPEN,
-      }));
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ wafs }));
+      if (adminAuth) {
+        verifyUserToken(req, res, adminAuth).then((ok) => {
+          if (!ok) return;
+          sendWafList(res);
+        });
+      } else {
+        sendWafList(res);
+      }
       return true;
     }
 
@@ -164,7 +162,7 @@ export function createApiHandler(registry: Registry, adminAuth?: AdminAuth, tide
     }
 
     // ── Auth config (injected as JS) ─────────────────
-    if (path === "/admin-config" && req.method === "GET") {
+    if ((path === "/auth-config" || path === "/admin-config") && req.method === "GET") {
       let js: string;
       if (tidecloakConfig) {
         // Serve full TideCloak config (minus jwk which is server-side only)
@@ -174,7 +172,10 @@ export function createApiHandler(registry: Registry, adminAuth?: AdminAuth, tide
       } else {
         js = `window.__AUTH_CONFIG__ = null;`;
       }
-      res.writeHead(200, { "Content-Type": "application/javascript; charset=utf-8" });
+      res.writeHead(200, {
+        "Content-Type": "application/javascript; charset=utf-8",
+        "Cache-Control": "no-store",
+      });
       res.end(js);
       return true;
     }
@@ -206,6 +207,19 @@ export function createApiHandler(registry: Registry, adminAuth?: AdminAuth, tide
     return false;
   };
 
+  function sendWafList(res: ServerResponse): void {
+    const wafs = registry.getAllWafs().map((w) => ({
+      id: w.id,
+      displayName: w.metadata.displayName || w.id,
+      description: w.metadata.description || "",
+      backends: w.metadata.backends || [],
+      clientCount: w.pairedClients.size,
+      online: w.ws.readyState === w.ws.OPEN,
+    }));
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ wafs }));
+  }
+
   function serveStaticFile(res: ServerResponse, filename: string): void {
     const filePath = join(PUBLIC_DIR, filename);
     try {
@@ -221,6 +235,29 @@ export function createApiHandler(registry: Registry, adminAuth?: AdminAuth, tide
   }
 }
 
+/** Verify JWT is valid (any authenticated user, no role check). */
+async function verifyUserToken(
+  req: IncomingMessage,
+  res: ServerResponse,
+  adminAuth: AdminAuth
+): Promise<boolean> {
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith("Bearer ")) {
+    res.writeHead(401, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Authentication required" }));
+    return false;
+  }
+  const token = authHeader.slice(7);
+  const payload = await adminAuth.verifyToken(token);
+  if (!payload) {
+    res.writeHead(403, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Invalid token" }));
+    return false;
+  }
+  return true;
+}
+
+/** Verify JWT is valid and has admin role. */
 async function verifyBearerToken(
   req: IncomingMessage,
   res: ServerResponse,
