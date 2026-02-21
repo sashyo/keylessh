@@ -1,4 +1,4 @@
-// Entry point for browser bundle — exposes TideCloak as window.Keycloak
-// (Keycloak-compatible API so existing code works unchanged)
-import { TideCloak } from "@tidecloak/js";
-window.Keycloak = TideCloak;
+// Entry point for browser bundle — exposes Keycloak as window.Keycloak
+// Standard keycloak-js adapter works with TideCloak (Keycloak-compatible)
+import Keycloak from "keycloak-js";
+window.Keycloak = Keycloak;
