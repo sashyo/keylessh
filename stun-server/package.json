@@ -5,7 +5,7 @@
   "description": "STUN/TURN relay server with signaling for NAT traversal and P2P connectivity",
   "main": "dist/index.js",
   "scripts": {
-    "build": "esbuild src/bundle-tidecloak.js --bundle --format=iife --platform=browser --outfile=public/static/tidecloak.js --minify && tsc",
+    "build": "esbuild src/bundle-tidecloak.js --bundle --format=iife --platform=browser --outfile=public/tidecloak.js --minify && tsc",
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts"
   },
