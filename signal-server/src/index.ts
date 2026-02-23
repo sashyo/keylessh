@@ -1,11 +1,11 @@
-import { createServer as createHttpServer } from "http";
-import { createServer as createHttpsServer } from "https";
+import { createServer as createHttpServer, request as httpRequest } from "http";
+import { createServer as createHttpsServer, request as httpsRequest } from "https";
 import { WebSocketServer, WebSocket } from "ws";
 import { jwtVerify, createLocalJWKSet, JWTPayload } from "jose";
 import { readFileSync, existsSync } from "fs";
 import { join, extname } from "path";
 import { fileURLToPath } from "url";
-import { timingSafeEqual, createHmac } from "crypto";
+import { timingSafeEqual, createHmac, randomBytes } from "crypto";
 import { createRegistry, type ConnectionType, type WafMetadata } from "./signaling/registry.js";
 import { pairClient, pairClientWithWaf, forwardCandidate, forwardSdp } from "./signaling/pairing.js";
 import { createHttpRelay, handleHttpResponse, rejectPendingForWaf } from "./relay/http-relay.js";
@@ -134,6 +134,201 @@ if (!loadConfig()) {
   console.error("[Signal] Failed to load TideCloak config. Exiting.");
   process.exit(1);
 }
+
+// ── TideCloak Reverse Proxy (cookie jar) ─────────────────────────
+// Proxies /realms/* and /resources/* to TideCloak, storing TC cookies
+// server-side so the Tide auth flow stays on the signal server's origin.
+// This prevents cookie loss when ork1.tideprotocol.com redirects back.
+
+const tcAuthServerUrl = tcConfig!["auth-server-url"].replace(/\/$/, "");
+const tcProxyUrl = new URL(tcAuthServerUrl);
+const tcProxyIsHttps = tcProxyUrl.protocol === "https:";
+const makeTcRequest = tcProxyIsHttps ? httpsRequest : httpRequest;
+
+interface TcSession { cookies: Map<string, string>; lastAccess: number; }
+const tcCookieJar = new Map<string, TcSession>();
+const TC_SESS_MAX_AGE = 3600;
+const TC_SESS_MAX_ENTRIES = 10000;
+
+function getTcSessionId(cookieHeader: string | undefined): { id: string; isNew: boolean } {
+  const existing = parseCookieValue(cookieHeader, "tc_sess");
+  if (existing) {
+    const session = tcCookieJar.get(existing);
+    if (session) {
+      session.lastAccess = Date.now();
+      return { id: existing, isNew: false };
+    }
+  }
+  const id = randomBytes(16).toString("hex");
+  tcCookieJar.set(id, { cookies: new Map(), lastAccess: Date.now() });
+  return { id, isNew: true };
+}
+
+function parseCookieValue(header: string | undefined, name: string): string | null {
+  if (!header) return null;
+  for (const pair of header.split(";")) {
+    const eq = pair.indexOf("=");
+    if (eq < 0) continue;
+    if (pair.slice(0, eq).trim() === name) return pair.slice(eq + 1).trim();
+  }
+  return null;
+}
+
+function storeTcCookies(sessionId: string, setCookieHeaders: string | string[] | undefined): void {
+  if (!setCookieHeaders) return;
+  const session = tcCookieJar.get(sessionId);
+  if (!session) return;
+  session.lastAccess = Date.now();
+  const headers = Array.isArray(setCookieHeaders) ? setCookieHeaders : [setCookieHeaders];
+  for (const h of headers) {
+    const eq = h.indexOf("=");
+    if (eq < 0) continue;
+    const name = h.slice(0, eq).trim();
+    const rest = h.slice(eq + 1);
+    const semi = rest.indexOf(";");
+    const value = semi >= 0 ? rest.slice(0, semi) : rest;
+    if (!value || /Max-Age=0/i.test(h)) {
+      session.cookies.delete(name);
+    } else {
+      session.cookies.set(name, value);
+    }
+  }
+}
+
+function getTcCookieHeader(sessionId: string): string {
+  const session = tcCookieJar.get(sessionId);
+  if (!session || session.cookies.size === 0) return "";
+  session.lastAccess = Date.now();
+  return Array.from(session.cookies.entries()).map(([k, v]) => `${k}=${v}`).join("; ");
+}
+
+// Evict stale sessions every 10 min
+setInterval(() => {
+  const now = Date.now();
+  const maxAge = TC_SESS_MAX_AGE * 1000;
+  for (const [id, session] of tcCookieJar) {
+    if (now - session.lastAccess > maxAge) tcCookieJar.delete(id);
+  }
+  if (tcCookieJar.size > TC_SESS_MAX_ENTRIES) {
+    const sorted = [...tcCookieJar.entries()].sort((a, b) => a[1].lastAccess - b[1].lastAccess);
+    for (const [id] of sorted.slice(0, tcCookieJar.size - TC_SESS_MAX_ENTRIES)) {
+      tcCookieJar.delete(id);
+    }
+  }
+}, 600_000).unref();
+
+function proxyTideCloak(
+  req: import("http").IncomingMessage,
+  res: import("http").ServerResponse,
+  publicOrigin: string,
+): void {
+  const tcSess = getTcSessionId(req.headers.cookie);
+
+  // Build proxy headers — strip forwarding so TC sees plain request
+  const proxyHeaders = { ...req.headers } as Record<string, string | string[] | undefined>;
+  proxyHeaders.host = tcProxyUrl.host;
+  delete proxyHeaders["x-forwarded-proto"];
+  delete proxyHeaders["x-forwarded-host"];
+  delete proxyHeaders["x-forwarded-for"];
+  delete proxyHeaders["x-forwarded-port"];
+  delete proxyHeaders["accept-encoding"]; // so we can rewrite body
+
+  // Inject stored TC cookies
+  const jarCookies = getTcCookieHeader(tcSess.id);
+  if (jarCookies) {
+    const existing = (proxyHeaders.cookie as string) || "";
+    proxyHeaders.cookie = existing ? `${existing}; ${jarCookies}` : jarCookies;
+  }
+
+  const tcReq = makeTcRequest(
+    {
+      hostname: tcProxyUrl.hostname,
+      port: tcProxyUrl.port || (tcProxyIsHttps ? 443 : 80),
+      path: req.url,
+      method: req.method,
+      headers: proxyHeaders,
+      rejectUnauthorized: false, // allow self-signed in dev
+    },
+    (tcRes) => {
+      const headers = { ...tcRes.headers } as Record<string, string | string[] | undefined>;
+
+      // Rewrite Location header
+      if (headers.location && typeof headers.location === "string") {
+        headers.location = headers.location
+          .replaceAll(tcProxyUrl.origin, publicOrigin)
+          .replaceAll(tcAuthServerUrl, publicOrigin);
+      }
+
+      delete headers["content-encoding"];
+      delete headers["transfer-encoding"];
+      delete headers["content-security-policy"];
+      delete headers["content-security-policy-report-only"];
+
+      // Store TC cookies server-side
+      storeTcCookies(tcSess.id, headers["set-cookie"] as string | string[] | undefined);
+
+      // Replace TC's Set-Cookie with our tc_sess cookie
+      const tcSessCookie = `tc_sess=${tcSess.id}; HttpOnly; Path=/; Max-Age=${TC_SESS_MAX_AGE}; SameSite=None; Secure`;
+      if (headers["set-cookie"] || tcSess.isNew) {
+        headers["set-cookie"] = [tcSessCookie];
+      }
+
+      const contentType = (headers["content-type"] || "") as string;
+      const isText = contentType.includes("text/") ||
+        contentType.includes("application/javascript") ||
+        contentType.includes("application/json");
+
+      if (isText) {
+        const chunks: Buffer[] = [];
+        tcRes.on("data", (chunk: Buffer) => chunks.push(chunk));
+        tcRes.on("end", () => {
+          if (res.headersSent) return;
+          let body = Buffer.concat(chunks).toString("utf-8");
+          // Rewrite all TideCloak URLs to signal server origin
+          body = body.replaceAll(tcProxyUrl.origin, publicOrigin);
+          body = body.replaceAll(
+            tcProxyUrl.origin.replaceAll("/", "\\/"),
+            publicOrigin.replaceAll("/", "\\/"),
+          );
+          body = body.replaceAll(
+            encodeURIComponent(tcProxyUrl.origin),
+            encodeURIComponent(publicOrigin),
+          );
+          // Also rewrite auth-server-url if different from origin
+          if (tcAuthServerUrl !== tcProxyUrl.origin) {
+            body = body.replaceAll(tcAuthServerUrl, publicOrigin);
+            body = body.replaceAll(
+              tcAuthServerUrl.replaceAll("/", "\\/"),
+              publicOrigin.replaceAll("/", "\\/"),
+            );
+            body = body.replaceAll(
+              encodeURIComponent(tcAuthServerUrl),
+              encodeURIComponent(publicOrigin),
+            );
+          }
+          headers["content-length"] = Buffer.byteLength(body).toString();
+          res.writeHead(tcRes.statusCode || 200, headers);
+          res.end(body);
+        });
+      } else {
+        res.writeHead(tcRes.statusCode || 200, headers);
+        tcRes.pipe(res);
+      }
+    },
+  );
+
+  tcReq.on("error", (err) => {
+    console.error("[Signal] TC proxy error:", err.message);
+    if (!res.headersSent) {
+      res.writeHead(502, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "TideCloak proxy error" }));
+    }
+  });
+
+  req.pipe(tcReq);
+}
+
+console.log(`[Signal] TideCloak proxy: ${tcAuthServerUrl}`);
 
 // ── Static file serving ──────────────────────────────────────────
 
@@ -355,6 +550,17 @@ const requestHandler = (req: import("http").IncomingMessage, res: import("http")
       "Set-Cookie": "waf_relay=; Path=/; HttpOnly; Max-Age=0",
     });
     res.end(JSON.stringify({ success: true }));
+    return;
+  }
+
+  // ── TideCloak reverse proxy (/realms/*, /resources/*) ─────────
+  // Proxy auth traffic directly to TideCloak with server-side cookie jar.
+  // This keeps the Tide callback on the signal server's origin so cookies work.
+  if (path.startsWith("/realms/") || path.startsWith("/resources/")) {
+    const proto = req.headers["x-forwarded-proto"] || (useTls ? "https" : "http");
+    const host = req.headers.host || "localhost";
+    const publicOrigin = `${proto}://${host}`;
+    proxyTideCloak(req, res, publicOrigin);
     return;
   }
 
