@@ -626,6 +626,7 @@ interface SignalMessage {
 const MAX_CONNECTIONS_PER_IP = 20;
 const MAX_MESSAGES_PER_SEC = 100;
 const connectionsByIp = new Map<string, number>();
+const wafWebSockets = new Set<WebSocket>();
 
 signalWss.on("connection", (ws: WebSocket, req) => {
   const clientIp = (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim()
@@ -640,15 +641,17 @@ signalWss.on("connection", (ws: WebSocket, req) => {
   }
   connectionsByIp.set(clientIp, ipCount + 1);
 
-  // Per-connection message rate limiting
+  // Per-connection message rate limiting (exempt WAFs — they're authenticated)
   let messageCount = 0;
   const rateLimitInterval = setInterval(() => { messageCount = 0; }, 1000);
 
   ws.on("message", (data) => {
-    messageCount++;
-    if (messageCount > MAX_MESSAGES_PER_SEC) {
-      ws.close(1008, "Rate limit exceeded");
-      return;
+    if (!wafWebSockets.has(ws)) {
+      messageCount++;
+      if (messageCount > MAX_MESSAGES_PER_SEC) {
+        ws.close(1008, "Rate limit exceeded");
+        return;
+      }
     }
 
     let msg: SignalMessage;
@@ -714,6 +717,7 @@ signalWss.on("connection", (ws: WebSocket, req) => {
 
   ws.on("close", () => {
     clearInterval(rateLimitInterval);
+    wafWebSockets.delete(ws);
     const info = registry.getInfoByWs(ws);
     if (info?.type === "waf") {
       rejectPendingForWaf(info.id);
@@ -729,6 +733,7 @@ signalWss.on("connection", (ws: WebSocket, req) => {
 
   ws.on("error", () => {
     clearInterval(rateLimitInterval);
+    wafWebSockets.delete(ws);
     const info = registry.getInfoByWs(ws);
     if (info?.type === "waf") {
       rejectPendingForWaf(info.id);
@@ -764,6 +769,7 @@ async function handleRegister(ws: WebSocket, msg: SignalMessage, clientIp: strin
     }
 
     registry.registerWaf(msg.id, msg.addresses || [], ws, msg.metadata);
+    wafWebSockets.add(ws);
     safeSend(ws, { type: "registered", role: "waf", id: msg.id });
   } else if (msg.role === "client") {
     // Client registration requires a valid JWT from KeyleSSH
