@@ -21,6 +21,16 @@ export const bridges = sqliteTable("bridges", {
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
 });
 
+// Signal servers - P2P signaling + HTTP relay endpoints (WAF connections)
+export const signalServers = sqliteTable("signal_servers", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  url: text("url").notNull(), // e.g. https://tidestun.codesyo.com:9090
+  description: text("description"),
+  enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+});
+
 export const servers = sqliteTable("servers", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
@@ -132,6 +142,7 @@ export const insertSessionSchema = createInsertSchema(sessions).omit({ id: true,
 export const insertSubscriptionSchema = createInsertSchema(subscriptions).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertBillingHistorySchema = createInsertSchema(billingHistory).omit({ id: true, createdAt: true });
 export const insertBridgeSchema = createInsertSchema(bridges).omit({ id: true, createdAt: true });
+export const insertSignalServerSchema = createInsertSchema(signalServers).omit({ id: true, createdAt: true });
 
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type InsertServer = z.infer<typeof insertServerSchema>;
@@ -139,6 +150,7 @@ export type InsertSession = z.infer<typeof insertSessionSchema>;
 export type InsertSubscription = z.infer<typeof insertSubscriptionSchema>;
 export type InsertBillingHistory = z.infer<typeof insertBillingHistorySchema>;
 export type InsertBridge = z.infer<typeof insertBridgeSchema>;
+export type InsertSignalServer = z.infer<typeof insertSignalServerSchema>;
 
 export type User = typeof users.$inferSelect;
 export type Server = typeof servers.$inferSelect;
@@ -147,6 +159,7 @@ export type FileOperation = typeof fileOperations.$inferSelect;
 export type Subscription = typeof subscriptions.$inferSelect;
 export type BillingHistory = typeof billingHistory.$inferSelect;
 export type Bridge = typeof bridges.$inferSelect;
+export type SignalServer = typeof signalServers.$inferSelect;
 
 // File operation types for API
 export type FileOperationType = "upload" | "download" | "delete" | "mkdir" | "rename" | "chmod";

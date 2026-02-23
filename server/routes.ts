@@ -1,6 +1,6 @@
 import type { Express } from "express";
 import type { Server } from "http";
-import { storage, approvalStorage, policyStorage, pendingPolicyStorage, templateStorage, subscriptionStorage, recordingStorage, fileOperationStorage, bridgeStorage, type ApprovalType } from "./storage";
+import { storage, approvalStorage, policyStorage, pendingPolicyStorage, templateStorage, subscriptionStorage, recordingStorage, fileOperationStorage, bridgeStorage, signalServerStorage, type ApprovalType } from "./storage";
 import { subscriptionTiers, type SubscriptionTier } from "@shared/schema";
 import * as stripeLib from "./lib/stripe";
 import { log, logForseti, logError } from "./logger";
@@ -1110,6 +1110,178 @@ export async function registerRoutes(
       } catch (error) {
         log(`Failed to delete bridge: ${error}`);
         res.status(500).json({ message: "Failed to delete bridge" });
+      }
+    }
+  );
+
+  // ============================================
+  // Admin Signal Server Routes
+  // ============================================
+
+  // GET /api/admin/signal-servers - List all signal servers
+  app.get(
+    "/api/admin/signal-servers",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const list = await signalServerStorage.getSignalServers();
+        res.json(list);
+      } catch (error) {
+        log(`Failed to fetch signal servers: ${error}`);
+        res.status(500).json({ message: "Failed to fetch signal servers" });
+      }
+    }
+  );
+
+  // POST /api/admin/signal-servers - Create new signal server
+  app.post(
+    "/api/admin/signal-servers",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const { name, url, description, enabled } = req.body;
+        if (!name || !url) {
+          return res.status(400).json({ message: "Name and URL are required" });
+        }
+        const signalServer = await signalServerStorage.createSignalServer({
+          name,
+          url,
+          description,
+          enabled: enabled !== false,
+        });
+        res.status(201).json(signalServer);
+      } catch (error) {
+        log(`Failed to create signal server: ${error}`);
+        res.status(500).json({ message: "Failed to create signal server" });
+      }
+    }
+  );
+
+  // GET /api/admin/signal-servers/:id - Get a specific signal server
+  app.get(
+    "/api/admin/signal-servers/:id",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const signalServer = await signalServerStorage.getSignalServer(req.params.id);
+        if (!signalServer) {
+          return res.status(404).json({ message: "Signal server not found" });
+        }
+        res.json(signalServer);
+      } catch (error) {
+        log(`Failed to fetch signal server: ${error}`);
+        res.status(500).json({ message: "Failed to fetch signal server" });
+      }
+    }
+  );
+
+  // PUT /api/admin/signal-servers/:id - Update a signal server
+  app.put(
+    "/api/admin/signal-servers/:id",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const { name, url, description, enabled } = req.body;
+        const signalServer = await signalServerStorage.updateSignalServer(req.params.id, {
+          name,
+          url,
+          description,
+          enabled,
+        });
+        if (!signalServer) {
+          return res.status(404).json({ message: "Signal server not found" });
+        }
+        res.json(signalServer);
+      } catch (error) {
+        log(`Failed to update signal server: ${error}`);
+        res.status(500).json({ message: "Failed to update signal server" });
+      }
+    }
+  );
+
+  // DELETE /api/admin/signal-servers/:id - Delete a signal server
+  app.delete(
+    "/api/admin/signal-servers/:id",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const deleted = await signalServerStorage.deleteSignalServer(req.params.id);
+        if (!deleted) {
+          return res.status(404).json({ message: "Signal server not found" });
+        }
+        res.status(204).send();
+      } catch (error) {
+        log(`Failed to delete signal server: ${error}`);
+        res.status(500).json({ message: "Failed to delete signal server" });
+      }
+    }
+  );
+
+  // ============================================
+  // WAF Endpoints (user-facing aggregation from signal servers)
+  // ============================================
+
+  // GET /api/waf-endpoints - Aggregate WAFs from all enabled signal servers
+  app.get(
+    "/api/waf-endpoints",
+    authenticate,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const enabledServers = await signalServerStorage.getEnabledSignalServers();
+        const results: Array<{
+          id: string;
+          displayName: string;
+          description: string;
+          backends: { name: string }[];
+          online: boolean;
+          clientCount: number;
+          signalServerId: string;
+          signalServerName: string;
+          signalServerUrl: string;
+        }> = [];
+
+        // Fetch WAFs from each signal server in parallel (with timeout)
+        const fetches = enabledServers.map(async (ss) => {
+          try {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 5000);
+            const apiUrl = ss.url.replace(/\/$/, "") + "/api/wafs";
+            const resp = await fetch(apiUrl, { signal: controller.signal });
+            clearTimeout(timeout);
+            if (!resp.ok) return;
+            const data = await resp.json() as { wafs?: Array<{
+              id: string;
+              displayName: string;
+              description: string;
+              backends: { name: string }[];
+              online: boolean;
+              clientCount: number;
+            }> };
+            if (data.wafs) {
+              for (const waf of data.wafs) {
+                results.push({
+                  ...waf,
+                  signalServerId: ss.id,
+                  signalServerName: ss.name,
+                  signalServerUrl: ss.url,
+                });
+              }
+            }
+          } catch {
+            // Signal server unreachable — skip silently
+          }
+        });
+
+        await Promise.all(fetches);
+        res.json(results);
+      } catch (error) {
+        log(`Failed to fetch WAF endpoints: ${error}`);
+        res.status(500).json({ message: "Failed to fetch WAF endpoints" });
       }
     }
   );

@@ -10,6 +10,8 @@ import type {
   TemplateParameter,
   Bridge,
   InsertBridge,
+  SignalServer,
+  InsertSignalServer,
 } from "@shared/schema";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
@@ -96,6 +98,9 @@ export const api = {
     list: () => apiRequest<ServerWithAccess[]>("/api/servers"),
     get: (id: string) => apiRequest<ServerWithAccess>(`/api/servers/${id}`),
   },
+  wafEndpoints: {
+    list: () => apiRequest<WafEndpoint[]>("/api/waf-endpoints"),
+  },
   sessions: {
     list: () => apiRequest<ActiveSession[]>("/api/sessions"),
     create: (data: { serverId: string; sshUser: string }) =>
@@ -137,6 +142,22 @@ export const api = {
         }),
       delete: (id: string) =>
         apiRequest<void>(`/api/admin/bridges/${id}`, { method: "DELETE" }),
+    },
+    signalServers: {
+      list: () => apiRequest<SignalServer[]>("/api/admin/signal-servers"),
+      get: (id: string) => apiRequest<SignalServer>(`/api/admin/signal-servers/${id}`),
+      create: (data: InsertSignalServer) =>
+        apiRequest<SignalServer>("/api/admin/signal-servers", {
+          method: "POST",
+          body: JSON.stringify(data),
+        }),
+      update: (id: string, data: Partial<InsertSignalServer>) =>
+        apiRequest<SignalServer>(`/api/admin/signal-servers/${id}`, {
+          method: "PUT",
+          body: JSON.stringify(data),
+        }),
+      delete: (id: string) =>
+        apiRequest<void>(`/api/admin/signal-servers/${id}`, { method: "DELETE" }),
     },
     users: {
       list: () => apiRequest<AdminUser[]>("/api/admin/users"),
@@ -422,8 +443,21 @@ export const api = {
   },
 };
 
+// WAF endpoint from signal server aggregation
+export interface WafEndpoint {
+  id: string;
+  displayName: string;
+  description: string;
+  backends: { name: string }[];
+  online: boolean;
+  clientCount: number;
+  signalServerId: string;
+  signalServerName: string;
+  signalServerUrl: string;
+}
+
 // Re-export types for convenience
-export type { PolicyTemplate, InsertPolicyTemplate, TemplateParameter, Bridge, InsertBridge };
+export type { PolicyTemplate, InsertPolicyTemplate, TemplateParameter, Bridge, InsertBridge, SignalServer, InsertSignalServer };
 
 // SSH Policy Configuration for role creation
 export interface SshPolicyConfig {

@@ -7,12 +7,12 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Server, Terminal, Clock, Activity, ArrowRight, HelpCircle, AlertCircle, X } from "lucide-react";
+import { Server, Terminal, Clock, Activity, ArrowRight, HelpCircle, AlertCircle, X, Globe, ExternalLink } from "lucide-react";
 import { useCallback, useState } from "react";
 import type { ServerWithAccess, ActiveSession } from "@shared/schema";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 import { RefreshButton } from "@/components/RefreshButton";
-import { api } from "@/lib/api";
+import { api, type WafEndpoint } from "@/lib/api";
 
 function ServerCard({ server, sshBlocked }: { server: ServerWithAccess; sshBlocked?: boolean }) {
   const [selectedUser, setSelectedUser] = useState<string>(server.allowedSshUsers[0] || "");
@@ -147,6 +147,77 @@ function ServerCardSkeleton() {
   );
 }
 
+function WafEndpointCard({ endpoint }: { endpoint: WafEndpoint }) {
+  const handleConnect = (backendName: string) => {
+    const url = endpoint.signalServerUrl.replace(/\/$/, "");
+    window.open(
+      `${url}/api/select?waf=${encodeURIComponent(endpoint.id)}&backend=${encodeURIComponent(backendName)}`,
+      "_blank"
+    );
+  };
+
+  const backends = endpoint.backends?.length > 0 ? endpoint.backends : [{ name: "Default" }];
+
+  return (
+    <Card className="group cyber-card hover-neon-glow">
+      <CardHeader className="pb-3">
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-[hsl(var(--neon-purple)/0.15)] border border-[hsl(var(--neon-purple)/0.3)] group-hover:border-[hsl(var(--neon-purple)/0.5)] transition-colors">
+              <Globe className="h-5 w-5 text-[hsl(var(--neon-purple))]" />
+            </div>
+            <div>
+              <CardTitle className="text-base">{endpoint.displayName}</CardTitle>
+              <CardDescription className="text-xs">
+                {endpoint.signalServerName}
+              </CardDescription>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            {endpoint.online ? (
+              <Badge variant="outline" className="gap-1.5 label-success">
+                <span className="h-2 w-2 rounded-full bg-[hsl(var(--neon-green))] animate-pulse" />
+                Online
+              </Badge>
+            ) : (
+              <Badge variant="outline" className="gap-1.5 label-danger">
+                <span className="h-2 w-2 rounded-full bg-[hsl(var(--neon-red))]" />
+                Offline
+              </Badge>
+            )}
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {endpoint.description && (
+          <p className="text-sm text-muted-foreground">{endpoint.description}</p>
+        )}
+
+        <div className="flex flex-wrap gap-1.5">
+          <Badge variant="secondary" className="text-xs">
+            {endpoint.clientCount === 1 ? "1 client" : `${endpoint.clientCount} clients`}
+          </Badge>
+        </div>
+
+        <div className="space-y-2">
+          {backends.map((backend) => (
+            <Button
+              key={backend.name}
+              className="w-full gap-2 btn-primary-glow"
+              onClick={() => handleConnect(backend.name)}
+              disabled={!endpoint.online}
+            >
+              <ExternalLink className="h-4 w-4" />
+              {backends.length === 1 ? "Connect" : backend.name}
+              <ArrowRight className="h-4 w-4" />
+            </Button>
+          ))}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 function SessionItem({ session, onTerminate }: { session: ActiveSession; onTerminate: (id: string) => void }) {
   const [terminating, setTerminating] = useState(false);
 
@@ -211,6 +282,11 @@ export default function Dashboard() {
     queryKey: ["/api/sessions"],
   });
 
+  const { data: wafEndpoints, refetch: refetchWafEndpoints } = useQuery<WafEndpoint[]>({
+    queryKey: ["/api/waf-endpoints"],
+    queryFn: api.wafEndpoints.list,
+  });
+
   const { data: sshAccessStatus } = useQuery({
     queryKey: ["/api/ssh/access-status"],
     queryFn: api.ssh.getAccessStatus,
@@ -223,8 +299,8 @@ export default function Dashboard() {
   const isFetching = isFetchingServers || isFetchingSessions;
 
   const refreshAll = useCallback(async () => {
-    await Promise.all([refetchServers(), refetchSessions()]);
-  }, [refetchServers, refetchSessions]);
+    await Promise.all([refetchServers(), refetchSessions(), refetchWafEndpoints()]);
+  }, [refetchServers, refetchSessions, refetchWafEndpoints]);
 
   const terminateSession = useCallback(async (sessionId: string) => {
     const token = localStorage.getItem("access_token");
@@ -329,6 +405,24 @@ export default function Dashboard() {
           </Card>
         )}
       </div>
+
+      {wafEndpoints && wafEndpoints.length > 0 && (
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <h2 className="text-base sm:text-lg font-medium flex items-center gap-2 text-foreground">
+              <Globe className="h-5 w-5 text-[hsl(var(--neon-purple))]" />
+              Web Endpoints
+            </h2>
+            <Badge variant="secondary" className="label-info">{wafEndpoints.length}</Badge>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            {wafEndpoints.map((endpoint) => (
+              <WafEndpointCard key={`${endpoint.signalServerId}-${endpoint.id}`} endpoint={endpoint} />
+            ))}
+          </div>
+        </div>
+      )}
 
       {recentSessions.length > 0 && (
         <div className="space-y-4">
