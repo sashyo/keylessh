@@ -2,7 +2,7 @@ import { createServer } from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import { Socket, connect } from "net";
 import { jwtVerify, createLocalJWKSet, JWTPayload } from "jose";
-import { readFileSync } from "fs";
+import { readFileSync, existsSync } from "fs";
 import { join } from "path";
 
 /**
@@ -15,29 +15,24 @@ import { join } from "path";
  *
  * Environment variables:
  * - PORT: Port to listen on (default: 8080)
- * - TIDECLOAK_CONFIG_PATH: Path to tidecloak.json with JWKS
+ * - client_adapter: JSON string of tidecloak.json config (highest priority)
  * - TIDECLOAK_CONFIG_B64: Base64-encoded config (alternative for Azure)
  */
 
 const PORT = parseInt(process.env.PORT || "8081");
+const CLIENT_ADAPTER = process.env.client_adapter;
 const CONFIG_B64 = process.env.TIDECLOAK_CONFIG_B64;
 
-// Config path priority: env var > ./data/tidecloak.json > ../data/tidecloak.json
-function resolveConfigPath(): string {
-  if (process.env.TIDECLOAK_CONFIG_PATH) {
-    return process.env.TIDECLOAK_CONFIG_PATH;
+// Resolve path to tidecloak.json in data directory
+function resolveConfigPath(): string | null {
+  const candidates = [
+    join(process.cwd(), "data", "tidecloak.json"),
+    join(process.cwd(), "..", "data", "tidecloak.json"),
+  ];
+  for (const p of candidates) {
+    if (existsSync(p)) return p;
   }
-  // Check local data/ first (running from repo root)
-  const localPath = join(process.cwd(), "data", "tidecloak.json");
-  // Fall back to parent data/ (running from tcp-bridge/)
-  const parentPath = join(process.cwd(), "..", "data", "tidecloak.json");
-
-  try {
-    readFileSync(localPath);
-    return localPath;
-  } catch {
-    return parentPath;
-  }
+  return null;
 }
 
 interface TidecloakConfig {
@@ -63,13 +58,20 @@ function loadConfig(): boolean {
   try {
     let configData: string;
 
-    if (CONFIG_B64) {
+    if (CLIENT_ADAPTER) {
+      configData = CLIENT_ADAPTER;
+      console.log("[Bridge] Loading config from client_adapter env variable");
+    } else if (CONFIG_B64) {
       configData = Buffer.from(CONFIG_B64, "base64").toString("utf-8");
-      console.log("[Bridge] Loading JWKS from TIDECLOAK_CONFIG_B64");
+      console.log("[Bridge] Loading config from TIDECLOAK_CONFIG_B64");
     } else {
       const configPath = resolveConfigPath();
+      if (!configPath) {
+        console.error("[Bridge] No tidecloak.json found in data directory");
+        return false;
+      }
       configData = readFileSync(configPath, "utf-8");
-      console.log(`[Bridge] Loading JWKS from ${configPath}`);
+      console.log(`[Bridge] Loading config from ${configPath}`);
     }
 
     tcConfig = JSON.parse(configData) as TidecloakConfig;
