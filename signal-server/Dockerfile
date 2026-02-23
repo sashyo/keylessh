@@ -10,7 +10,6 @@ RUN npm ci
 
 COPY tsconfig.json ./
 COPY src ./src
-COPY public ./public
 RUN npm run build
 
 # Keep only production deps for the runtime image
@@ -30,7 +29,6 @@ ENV PORT=9090
 COPY --from=builder /app/package*.json ./
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/public ./public
 
 EXPOSE 9090
 
