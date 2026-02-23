@@ -150,10 +150,14 @@ function ServerCardSkeleton() {
 function WafEndpointCard({ endpoint }: { endpoint: WafEndpoint }) {
   const handleConnect = (backendName: string) => {
     const url = endpoint.signalServerUrl.replace(/\/$/, "");
-    window.open(
-      `${url}/api/select?waf=${encodeURIComponent(endpoint.id)}&backend=${encodeURIComponent(backendName)}`,
-      "_blank"
-    );
+    // Forward the KeyleSSH JWT so the WAF doesn't trigger its own login
+    const token = localStorage.getItem("access_token") || "";
+    const params = new URLSearchParams({
+      waf: endpoint.id,
+      backend: backendName,
+    });
+    if (token) params.set("token", token);
+    window.open(`${url}/api/select?${params.toString()}`, "_blank");
   };
 
   const backends = endpoint.backends?.length > 0 ? endpoint.backends : [{ name: "Default" }];

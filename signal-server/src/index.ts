@@ -252,11 +252,13 @@ function proxyTideCloak(
     (tcRes) => {
       const headers = { ...tcRes.headers } as Record<string, string | string[] | undefined>;
 
-      // Rewrite Location header
+      // Rewrite Location header (plain + URL-encoded versions)
       if (headers.location && typeof headers.location === "string") {
         headers.location = headers.location
           .replaceAll(tcProxyUrl.origin, publicOrigin)
-          .replaceAll(tcAuthServerUrl, publicOrigin);
+          .replaceAll(tcAuthServerUrl, publicOrigin)
+          .replaceAll(encodeURIComponent(tcProxyUrl.origin), encodeURIComponent(publicOrigin))
+          .replaceAll(encodeURIComponent(tcAuthServerUrl), encodeURIComponent(publicOrigin));
       }
 
       delete headers["content-encoding"];
@@ -378,7 +380,7 @@ const relayHandler = createHttpRelay(registry, useTls);
 
 // ── HTTP Server ─────────────────────────────────────────────────
 
-const requestHandler = (req: import("http").IncomingMessage, res: import("http").ServerResponse) => {
+const requestHandler = async (req: import("http").IncomingMessage, res: import("http").ServerResponse) => {
   const url = req.url || "/";
   const path = url.split("?")[0];
 
@@ -520,10 +522,13 @@ const requestHandler = (req: import("http").IncomingMessage, res: import("http")
   }
 
   // ── API: Select WAF (GET — redirect with cookie) ──────────────
+  // Accepts optional &token= with a KeyleSSH JWT to forward to the WAF
+  // so the user doesn't have to log in again via TideCloak.
   if (path === "/api/select" && req.method === "GET") {
     const params = new URLSearchParams(url.split("?")[1] || "");
     const wafId = params.get("waf");
     const backend = params.get("backend");
+    const token = params.get("token");
     if (!wafId || !registry.getWaf(wafId)) {
       res.writeHead(404, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "WAF not found" }));
@@ -532,6 +537,15 @@ const requestHandler = (req: import("http").IncomingMessage, res: import("http")
     const cookies: string[] = [
       `waf_relay=${wafId}; Path=/; HttpOnly; SameSite=None; Secure`,
     ];
+    // If a valid KeyleSSH JWT is provided, set it as waf_access cookie
+    // so the WAF accepts the user without triggering its own login flow.
+    if (token) {
+      const payload = await verifyToken(token);
+      if (payload) {
+        // Token is valid — set as waf_access (HttpOnly, forwarded by relay)
+        cookies.push(`waf_access=${token}; Path=/; HttpOnly; SameSite=None; Secure`);
+      }
+    }
     const location = backend
       ? `/__b/${encodeURIComponent(backend)}/`
       : "/";
