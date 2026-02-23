@@ -8,7 +8,7 @@ import { fileURLToPath } from "url";
 import { timingSafeEqual, createHmac, randomBytes } from "crypto";
 import { createRegistry, type ConnectionType, type WafMetadata } from "./signaling/registry.js";
 import { pairClient, pairClientWithWaf, forwardCandidate, forwardSdp } from "./signaling/pairing.js";
-import { createHttpRelay, handleHttpResponse, rejectPendingForWaf } from "./relay/http-relay.js";
+import { createHttpRelay, handleHttpResponse, handleHttpResponseStart, handleHttpResponseChunk, handleHttpResponseEnd, rejectPendingForWaf } from "./relay/http-relay.js";
 
 /**
  * Signal Server — P2P signaling + HTTP relay + portal
@@ -676,6 +676,22 @@ signalWss.on("connection", (ws: WebSocket, req) => {
           headers: Record<string, string | string[]>;
           body: string;
         });
+        break;
+      case "http_response_start":
+        handleHttpResponseStart(msg as unknown as {
+          id: string;
+          statusCode: number;
+          headers: Record<string, string | string[]>;
+        });
+        break;
+      case "http_response_chunk":
+        handleHttpResponseChunk(msg as unknown as {
+          id: string;
+          data: string;
+        });
+        break;
+      case "http_response_end":
+        handleHttpResponseEnd(msg as unknown as { id: string });
         break;
       case "client_status":
         if (msg.clientId && msg.connectionType) {
