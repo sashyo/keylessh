@@ -87,7 +87,7 @@ function SignalServerForm({
       if (resp.ok) {
         const data = await resp.json();
         setTestStatus("success");
-        setTestMessage(`Online — ${data.wafs ?? 0} WAFs, ${data.clients ?? 0} clients`);
+        setTestMessage(`Online — ${data.gateways ?? 0} gateways, ${data.clients ?? 0} clients`);
       } else {
         setTestStatus("error");
         setTestMessage(`Server returned ${resp.status}`);
@@ -121,7 +121,7 @@ function SignalServerForm({
           required
         />
         <p className="text-xs text-muted-foreground">
-          The signal server URL (HTTPS). WAFs register here for P2P signaling and HTTP relay.
+          The signal server URL (HTTPS). Gateways register here for P2P signaling and HTTP relay.
         </p>
       </div>
 
@@ -161,7 +161,7 @@ function SignalServerForm({
           id="description"
           value={formData.description}
           onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-          placeholder="Signal server for production WAF endpoints"
+          placeholder="Signal server for production gateway endpoints"
           rows={2}
         />
       </div>
@@ -169,7 +169,7 @@ function SignalServerForm({
       <div className="flex items-center justify-between">
         <div>
           <Label htmlFor="enabled">Enabled</Label>
-          <p className="text-xs text-muted-foreground">Show WAF endpoints from this server on the dashboard</p>
+          <p className="text-xs text-muted-foreground">Show gateway endpoints from this server on the dashboard</p>
         </div>
         <Switch
           id="enabled"
@@ -278,7 +278,7 @@ export default function AdminSignalServers() {
             Signal Servers
           </h1>
           <p className="text-sm text-muted-foreground">
-            Manage signal servers for WAF endpoints, P2P signaling, and HTTP relay
+            Manage signal servers for gateway endpoints, P2P signaling, and HTTP relay
           </p>
         </div>
 
@@ -303,7 +303,7 @@ export default function AdminSignalServers() {
                 <DialogDescription>
                   {editingServer
                     ? "Update the signal server configuration"
-                    : "Add a new signal server for WAF endpoint discovery"}
+                    : "Add a new signal server for gateway endpoint discovery"}
                 </DialogDescription>
               </DialogHeader>
               <SignalServerForm
@@ -419,7 +419,7 @@ export default function AdminSignalServers() {
               <p className="text-sm text-muted-foreground mt-1">
                 {search
                   ? "Try a different search term"
-                  : "Add a signal server to discover WAF endpoints"}
+                  : "Add a signal server to discover gateway endpoints"}
               </p>
             </div>
           )}
@@ -432,16 +432,16 @@ export default function AdminSignalServers() {
         </CardHeader>
         <CardContent className="text-sm text-muted-foreground space-y-2">
           <p>
-            Signal servers handle P2P signaling, HTTP relay, and WAF endpoint discovery.
-            WAF instances register with the signal server to make their backends available.
+            Signal servers handle P2P signaling, HTTP relay, and gateway endpoint discovery.
+            Gateway instances register with the signal server to make their backends available.
           </p>
           <p>
-            Each signal server can host multiple WAFs, and each WAF can expose multiple backends
+            Each signal server can host multiple gateways, and each gateway can expose multiple backends
             (web apps, APIs, etc.). Users see all available endpoints on their dashboard.
           </p>
           <ul className="list-disc list-inside space-y-1 ml-2">
             <li>Deploy signal servers on VMs with stable public IPs (alongside coturn for TURN/STUN)</li>
-            <li>WAFs connect via WebSocket and register their backends</li>
+            <li>Gateways connect via WebSocket and register their backends</li>
             <li>HTTP traffic is relayed through the signal server, with P2P upgrade when possible</li>
           </ul>
         </CardContent>

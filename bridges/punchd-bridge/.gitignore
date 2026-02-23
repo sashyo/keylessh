@@ -1,0 +1,12 @@
+node_modules
+dist
+.DS_Store
+*.tar.gz
+data/
+*.db
+*.db-wal
+*.db-shm
+.env
+.env.local
+.env.*.local
+.stun-deploy.env

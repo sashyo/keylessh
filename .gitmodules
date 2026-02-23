@@ -1,3 +1,0 @@
-[submodule "punchd"]
-	path = punchd
-	url = https://github.com/sashyo/punchd.git

@@ -40,7 +40,7 @@ else
   TIDECLOAK_CONFIG_B64=""
   for tc_candidate in \
     "${REPO_DIR}/data/tidecloak.json" \
-    "${REPO_DIR}/punchd/waf/data/tidecloak.json" \
+    "${REPO_DIR}/bridges/punchd-bridge/gateway/data/tidecloak.json" \
     "${SCRIPT_DIR}/data/tidecloak.json"; do
     if [ -f "$tc_candidate" ]; then
       TIDECLOAK_CONFIG_B64=$(base64 -w0 < "$tc_candidate")
@@ -224,14 +224,13 @@ echo " KeyleSSH Signal Server deployed"
 echo "============================================"
 echo ""
 echo "  Signal:    ${SCHEME}://${HOST}:${SIGNAL_PORT}"
-echo "  Portal:    ${SCHEME}://${HOST}:${SIGNAL_PORT}/portal"
 echo "  Signaling: ${WS_SCHEME}://${HOST}:${SIGNAL_PORT}"
 echo "  Health:    ${SCHEME}://${HOST}:${SIGNAL_PORT}/health"
 echo "  STUN/TURN: ${EXTERNAL_IP}:3478"
 echo ""
-echo "  API_SECRET: set (use same value when starting WAFs)"
+echo "  API_SECRET: set (use same value when starting gateways)"
 echo ""
-echo "To start a WAF pointing at this signal server:"
+echo "To start a gateway pointing at this signal server:"
 echo ""
 echo "  docker run -d --network host \\"
 echo "    -e STUN_SERVER_URL=${WS_SCHEME}://${HOST}:${SIGNAL_PORT} \\"
@@ -240,6 +239,6 @@ echo "    -e ICE_SERVERS=stun:${EXTERNAL_IP}:3478 \\"
 echo "    -e TURN_SERVER=turn:${EXTERNAL_IP}:3478 \\"
 echo "    -e TURN_SECRET=${TURN_SECRET} \\"
 echo "    -e BACKEND_URL=http://localhost:3000 \\"
-echo "    keylessh-waf"
+echo "    keylessh-gateway"
 echo ""
 echo "Firewall: open ports ${SIGNAL_PORT}/tcp, 3478/udp+tcp, 49152-65535/udp"

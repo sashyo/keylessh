@@ -12,7 +12,7 @@ import { useCallback, useState } from "react";
 import type { ServerWithAccess, ActiveSession } from "@shared/schema";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 import { RefreshButton } from "@/components/RefreshButton";
-import { api, type WafEndpoint } from "@/lib/api";
+import { api, type GatewayEndpoint } from "@/lib/api";
 
 function ServerCard({ server, sshBlocked }: { server: ServerWithAccess; sshBlocked?: boolean }) {
   const [selectedUser, setSelectedUser] = useState<string>(server.allowedSshUsers[0] || "");
@@ -147,13 +147,13 @@ function ServerCardSkeleton() {
   );
 }
 
-function WafEndpointCard({ endpoint }: { endpoint: WafEndpoint }) {
+function GatewayEndpointCard({ endpoint }: { endpoint: GatewayEndpoint }) {
   const handleConnect = (backendName: string) => {
     const url = endpoint.signalServerUrl.replace(/\/$/, "");
-    // Forward the KeyleSSH JWT so the WAF doesn't trigger its own login
+    // Forward the KeyleSSH JWT so the gateway doesn't trigger its own login
     const token = localStorage.getItem("access_token") || "";
     const params = new URLSearchParams({
-      waf: endpoint.id,
+      gateway: endpoint.id,
       backend: backendName,
     });
     if (token) params.set("token", token);
@@ -286,9 +286,9 @@ export default function Dashboard() {
     queryKey: ["/api/sessions"],
   });
 
-  const { data: wafEndpoints, refetch: refetchWafEndpoints } = useQuery<WafEndpoint[]>({
-    queryKey: ["/api/waf-endpoints"],
-    queryFn: api.wafEndpoints.list,
+  const { data: gatewayEndpoints, refetch: refetchGatewayEndpoints } = useQuery<GatewayEndpoint[]>({
+    queryKey: ["/api/gateway-endpoints"],
+    queryFn: api.gatewayEndpoints.list,
   });
 
   const { data: sshAccessStatus } = useQuery({
@@ -303,8 +303,8 @@ export default function Dashboard() {
   const isFetching = isFetchingServers || isFetchingSessions;
 
   const refreshAll = useCallback(async () => {
-    await Promise.all([refetchServers(), refetchSessions(), refetchWafEndpoints()]);
-  }, [refetchServers, refetchSessions, refetchWafEndpoints]);
+    await Promise.all([refetchServers(), refetchSessions(), refetchGatewayEndpoints()]);
+  }, [refetchServers, refetchSessions, refetchGatewayEndpoints]);
 
   const terminateSession = useCallback(async (sessionId: string) => {
     const token = localStorage.getItem("access_token");
@@ -410,19 +410,19 @@ export default function Dashboard() {
         )}
       </div>
 
-      {wafEndpoints && wafEndpoints.length > 0 && (
+      {gatewayEndpoints && gatewayEndpoints.length > 0 && (
         <div className="space-y-4">
           <div className="flex items-center justify-between">
             <h2 className="text-base sm:text-lg font-medium flex items-center gap-2 text-foreground">
               <Globe className="h-5 w-5 text-[hsl(var(--neon-purple))]" />
               Web Endpoints
             </h2>
-            <Badge variant="secondary" className="label-info">{wafEndpoints.length}</Badge>
+            <Badge variant="secondary" className="label-info">{gatewayEndpoints.length}</Badge>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {wafEndpoints.map((endpoint) => (
-              <WafEndpointCard key={`${endpoint.signalServerId}-${endpoint.id}`} endpoint={endpoint} />
+            {gatewayEndpoints.map((endpoint) => (
+              <GatewayEndpointCard key={`${endpoint.signalServerId}-${endpoint.id}`} endpoint={endpoint} />
             ))}
           </div>
         </div>

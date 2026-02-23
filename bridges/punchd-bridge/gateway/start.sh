@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Start the gateway with sensible defaults.
+# Override any variable by setting it before running, e.g.:
+#   STUN_SERVER_URL=wss://example.com:9090 ./start.sh
+#   TC_PORT=8180 ./start.sh
+
+set -euo pipefail
+
+TC_PORT="${TC_PORT:-8080}"
+
+export STUN_SERVER_URL="${STUN_SERVER_URL:-wss://tidestun.codesyo.com:9090}"
+export ICE_SERVERS="${ICE_SERVERS:-stun:20.211.145.216:3478}"
+export BACKEND_URL="${BACKEND_URL:-http://localhost:3000}"
+export BACKENDS="${BACKENDS:-}"
+export LISTEN_PORT="${LISTEN_PORT:-7891}"
+export HEALTH_PORT="${HEALTH_PORT:-7892}"
+export API_SECRET="${API_SECRET:-}"
+export TURN_SECRET="${TURN_SECRET:-}"
+export TURN_SERVER="${TURN_SERVER:-turn:20.211.145.216:3478}"
+
+cd "$(dirname "$0")"
+
+echo "[Gateway] Building..."
+npm run build
+
+echo "[Gateway] Starting with:"
+echo "  STUN_SERVER_URL=$STUN_SERVER_URL"
+echo "  ICE_SERVERS=$ICE_SERVERS"
+echo "  BACKEND_URL=$BACKEND_URL"
+echo "  BACKENDS=${BACKENDS:-<from BACKEND_URL>}"
+echo "  LISTEN_PORT=$LISTEN_PORT"
+echo "  HEALTH_PORT=$HEALTH_PORT"
+echo "  API_SECRET=${API_SECRET:+set}"
+echo "  TURN_SECRET=${TURN_SECRET:+set}"
+echo "  TURN_SERVER=$TURN_SERVER"
+
+npm start

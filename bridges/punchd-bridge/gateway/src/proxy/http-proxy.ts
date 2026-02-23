@@ -1,0 +1,1042 @@
+/**
+ * HTTP auth gateway with server-side OIDC login flow.
+ *
+ * Public routes (no auth): /login, /auth/*, /health
+ * Protected routes: everything else → validate JWT → proxy to backend
+ *
+ * Auth is extracted from:
+ *   1. `gateway_access` httpOnly cookie (browser sessions)
+ *   2. `Authorization: Bearer <jwt>` header (API/programmatic access)
+ *
+ * When the access token expires, the gateway transparently refreshes
+ * using the refresh token cookie before proxying.
+ */
+
+import {
+  createServer,
+  Server,
+  IncomingMessage,
+  ServerResponse,
+  request as httpRequest,
+} from "http";
+import {
+  createServer as createHttpsServer,
+  Server as HttpsServer,
+  request as httpsRequest,
+} from "https";
+import { createHmac, randomBytes } from "crypto";
+import { readFileSync } from "fs";
+import { join, resolve } from "path";
+import type { TidecloakAuth } from "../auth/tidecloak.js";
+import type { TidecloakConfig } from "../config.js";
+import {
+  getOidcEndpoints,
+  buildAuthUrl,
+  exchangeCode,
+  refreshAccessToken,
+  buildLogoutUrl,
+  parseState,
+  type OidcEndpoints,
+} from "../auth/oidc.js";
+
+export interface ProxyOptions {
+  listenPort: number;
+  backendUrl: string;
+  backends?: { name: string; url: string; noAuth?: boolean }[];
+  auth: TidecloakAuth;
+  stripAuthHeader: boolean;
+  tcConfig: TidecloakConfig;
+  /** Public URL for TideCloak (browser-facing). Defaults to config auth-server-url. */
+  authServerPublicUrl?: string;
+  /** ICE servers for WebRTC, e.g. ["stun:relay.example.com:3478"] */
+  iceServers?: string[];
+  /** TURN server URL, e.g. "turn:relay.example.com:3478" */
+  turnServer?: string;
+  /** Shared secret for TURN REST API ephemeral credentials */
+  turnSecret?: string;
+  /** TLS key + cert for HTTPS. If provided, server uses HTTPS. */
+  tls?: { key: string; cert: string };
+  /** Internal TideCloak URL for proxying (when KC_HOSTNAME is a public URL) */
+  tcInternalUrl?: string;
+}
+
+export interface ProxyStats {
+  totalRequests: number;
+  authorizedRequests: number;
+  rejectedRequests: number;
+}
+
+// ── Cookie helpers ───────────────────────────────────────────────
+
+function parseCookies(header: string | undefined): Record<string, string> {
+  if (!header) return {};
+  const cookies: Record<string, string> = {};
+  for (const pair of header.split(";")) {
+    const eq = pair.indexOf("=");
+    if (eq < 0) continue;
+    cookies[pair.slice(0, eq).trim()] = pair.slice(eq + 1).trim();
+  }
+  return cookies;
+}
+
+let _useSecureCookies = false;
+
+function buildCookieHeader(
+  name: string,
+  value: string,
+  maxAge: number,
+  sameSite: "Lax" | "Strict" | "None" = "Lax"
+): string {
+  // SameSite=None requires the Secure flag (browser requirement)
+  const needsSecure = sameSite === "None" || _useSecureCookies;
+  const secure = needsSecure ? "; Secure" : "";
+  return `${name}=${value}; HttpOnly; Path=/; Max-Age=${maxAge}; SameSite=${sameSite}${secure}`;
+}
+
+function clearCookieHeader(name: string): string {
+  return `${name}=; HttpOnly; Path=/; Max-Age=0`;
+}
+
+// ── Static file serving ──────────────────────────────────────────
+
+const PUBLIC_DIR = resolve(
+  import.meta.dirname ?? join(process.cwd(), "src", "proxy"),
+  "..",
+  "..",
+  "public"
+);
+
+function serveFile(
+  res: ServerResponse,
+  filename: string,
+  contentType: string
+): void {
+  try {
+    const content = readFileSync(join(PUBLIC_DIR, filename), "utf-8");
+    res.writeHead(200, { "Content-Type": contentType });
+    res.end(content);
+  } catch {
+    res.writeHead(404, { "Content-Type": "text/plain" });
+    res.end("Not found");
+  }
+}
+
+// ── Redirect helper ──────────────────────────────────────────────
+
+function redirect(res: ServerResponse, location: string, status = 302): void {
+  res.writeHead(status, { Location: location });
+  res.end();
+}
+
+// ── Open redirect prevention ────────────────────────────────────
+
+function sanitizeRedirect(url: string): string {
+  if (!url || typeof url !== "string") return "/";
+  const trimmed = url.trim();
+  if (trimmed.startsWith("//") || /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(trimmed)) return "/";
+  if (!trimmed.startsWith("/")) return "/";
+  return trimmed;
+}
+
+// ── HTTP method validation ──────────────────────────────────────
+
+const ALLOWED_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]);
+
+// ── Request type detection ───────────────────────────────────────
+
+function isBrowserRequest(req: IncomingMessage): boolean {
+  const accept = req.headers.accept || "";
+  return accept.includes("text/html");
+}
+
+function getCallbackUrl(req: IncomingMessage, isTls: boolean): string {
+  const proto = req.headers["x-forwarded-proto"] || (isTls ? "https" : "http");
+  const host = req.headers.host || `localhost`;
+  return `${proto}://${host}/auth/callback`;
+}
+
+// ── Redirect rewriting ──────────────────────────────────────
+
+/**
+ * Rewrite `Location` headers that point to localhost or the TideCloak
+ * origin. localhost:PORT refs become /__b/<name> paths (path-based
+ * backend routing), keeping DataChannel and remote connections working.
+ */
+function rewriteRedirects(
+  headers: Record<string, any>,
+  tcOrigin: string,
+  portMap?: Map<string, string>,
+  replacement?: string
+): void {
+  if (!headers.location || typeof headers.location !== "string") return;
+
+  // Rewrite TideCloak origin → replacement origin (or relative path)
+  if (tcOrigin && headers.location.startsWith(tcOrigin)) {
+    headers.location = (replacement || "") + (headers.location.slice(tcOrigin.length) || "/");
+    return; // Don't apply localhost regex — URL is already rewritten
+  }
+  // Rewrite localhost:PORT → /__b/<name> (known backend) or strip (unknown)
+  headers.location = headers.location.replace(
+    /^https?:\/\/localhost(:\d+)?/,
+    (_match: string, portGroup?: string) => {
+      if (portGroup && portMap) {
+        const port = portGroup.slice(1);
+        const name = portMap.get(port);
+        if (name) return `/__b/${encodeURIComponent(name)}`;
+      }
+      return replacement || "";
+    }
+  );
+}
+
+// Regex matching http(s)://localhost:PORT — used to rewrite backend
+// cross-references in HTML so they stay within the DataChannel.
+const LOCALHOST_URL_RE = /https?:\/\/localhost(:\d+)?/g;
+
+// ── Main proxy factory ───────────────────────────────────────────
+
+export function createProxy(options: ProxyOptions): {
+  server: Server | HttpsServer;
+  getStats: () => ProxyStats;
+} {
+  const stats: ProxyStats = {
+    totalRequests: 0,
+    authorizedRequests: 0,
+    rejectedRequests: 0,
+  };
+
+  // Build backend lookup map (name → URL)
+  const backendMap = new Map<string, URL>();
+  if (options.backends?.length) {
+    for (const b of options.backends) {
+      backendMap.set(b.name, new URL(b.url));
+    }
+  }
+  const defaultBackendUrl = new URL(options.backendUrl);
+
+  // No-auth backends: skip gateway JWT validation (backend handles its own auth)
+  const noAuthBackends = new Set<string>();
+  if (options.backends?.length) {
+    for (const b of options.backends) {
+      if (b.noAuth) {
+        noAuthBackends.add(b.name);
+        console.log(`[Proxy] Backend "${b.name}" — auth disabled (noauth)`);
+      }
+    }
+  }
+
+  // Reverse map: "localhost:PORT" → backend name (for cross-backend routing)
+  const portToBackend = new Map<string, string>();
+  for (const [name, url] of backendMap) {
+    if (url.hostname === "localhost" || url.hostname === "127.0.0.1") {
+      portToBackend.set(url.port || (url.protocol === "https:" ? "443" : "80"), name);
+    }
+  }
+
+  /**
+   * Rewrite all localhost:PORT URLs in HTML to /__b/<name> paths.
+   * This keeps links, form actions, and JS references within the
+   * DataChannel and routes them to the correct backend.
+   */
+  function rewriteLocalhostInHtml(html: string): string {
+    return html.replace(LOCALHOST_URL_RE, (_match: string, portGroup?: string) => {
+      if (portGroup) {
+        const port = portGroup.slice(1);
+        const name = portToBackend.get(port);
+        if (name) return `/__b/${encodeURIComponent(name)}`;
+      }
+      return "";
+    });
+  }
+
+  /**
+   * Prepend /__b/<name> prefix to absolute paths in HTML attributes
+   * (href="/...", src="/...", action="/...") so links stay within
+   * the correct backend namespace. Skips protocol-relative (//)
+   * and already-prefixed (/__b/) paths.
+   */
+  function prependPrefix(html: string, prefix: string): string {
+    return html.replace(
+      /((?:href|src|action|formaction)\s*=\s*["'])(\/(?!\/|__b\/))/gi,
+      `$1${prefix}$2`
+    );
+  }
+
+  // Floating button injected into HTML pages so users can switch backend
+  // without manually clearing cookies. Navigates to /portal on the STUN
+  // server which clears selection cookies and shows the portal UI.
+  const switchButtonHtml = `<div id="kls-switch" style="position:fixed;bottom:16px;right:16px;z-index:99999;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif">` +
+    `<a href="/portal" style="display:inline-flex;align-items:center;gap:6px;padding:8px 14px;background:#1e293b;color:#f8fafc;border:1px solid #334155;border-radius:8px;font-size:13px;font-weight:500;text-decoration:none;box-shadow:0 2px 8px rgba(0,0,0,.3);transition:background .15s" ` +
+    `onmouseover="this.style.background='#334155'" onmouseout="this.style.background='#1e293b'">` +
+    `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/></svg>` +
+    `Switch</a></div>`;
+
+  function resolveBackend(req: IncomingMessage, activeBackend?: string): URL {
+    // 1. Path-based /__b/<name> prefix (highest priority)
+    if (activeBackend) {
+      const found = backendMap.get(activeBackend);
+      if (found) return found;
+    }
+    // 2. x-gateway-backend header (set by STUN relay from /__b/ prefix in URL)
+    const headerBackend = req.headers["x-gateway-backend"] as string | undefined;
+    if (headerBackend) {
+      const found = backendMap.get(headerBackend);
+      if (found) return found;
+    }
+    return defaultBackendUrl;
+  }
+
+  // ── TideCloak cookie jar ──────────────────────────────────────
+  // The STUN relay may not forward Set-Cookie headers to the browser,
+  // so the gateway stores TC cookies server-side. A lightweight `tc_sess`
+  // cookie on the browser maps to the stored TC cookies.
+  interface TcSession { cookies: Map<string, string>; lastAccess: number; }
+  const tcCookieJar = new Map<string, TcSession>();
+  const TC_SESS_MAX_AGE = 3600; // 1 hour
+  const TC_SESS_MAX_ENTRIES = 10000;
+
+  /** Get or create a TC session ID from the browser's tc_sess cookie. */
+  function getTcSessionId(req: IncomingMessage): { id: string; isNew: boolean } {
+    const cookies = parseCookies(req.headers.cookie);
+    const existing = cookies["tc_sess"] ? tcCookieJar.get(cookies["tc_sess"]) : undefined;
+    if (existing) {
+      existing.lastAccess = Date.now();
+      return { id: cookies["tc_sess"], isNew: false };
+    }
+    const id = randomBytes(16).toString("hex");
+    tcCookieJar.set(id, { cookies: new Map(), lastAccess: Date.now() });
+    return { id, isNew: true };
+  }
+
+  /** Store TC's Set-Cookie values in the jar, return gateway's tc_sess cookie. */
+  function storeTcCookies(
+    sessionId: string,
+    setCookieHeaders: string | string[] | undefined
+  ): void {
+    if (!setCookieHeaders) return;
+    const session = tcCookieJar.get(sessionId);
+    if (!session) return;
+    session.lastAccess = Date.now();
+    const headers = Array.isArray(setCookieHeaders) ? setCookieHeaders : [setCookieHeaders];
+    for (const h of headers) {
+      const eq = h.indexOf("=");
+      if (eq < 0) continue;
+      const name = h.slice(0, eq).trim();
+      // Extract just the value (up to first ';')
+      const rest = h.slice(eq + 1);
+      const semi = rest.indexOf(";");
+      const value = semi >= 0 ? rest.slice(0, semi) : rest;
+      // Ignore clearing (Max-Age=0 or empty value)
+      if (!value || /Max-Age=0/i.test(h)) {
+        session.cookies.delete(name);
+      } else {
+        session.cookies.set(name, value);
+      }
+    }
+  }
+
+  /** Build a Cookie header from the jar for proxied requests to TC. */
+  function getTcCookieHeader(sessionId: string): string {
+    const session = tcCookieJar.get(sessionId);
+    if (!session || session.cookies.size === 0) return "";
+    session.lastAccess = Date.now();
+    return Array.from(session.cookies.entries()).map(([k, v]) => `${k}=${v}`).join("; ");
+  }
+
+  // Periodically evict stale sessions (every 10 min)
+  setInterval(() => {
+    const now = Date.now();
+    const maxAge = TC_SESS_MAX_AGE * 1000;
+    // Evict expired entries
+    for (const [id, session] of tcCookieJar) {
+      if (now - session.lastAccess > maxAge) {
+        tcCookieJar.delete(id);
+      }
+    }
+    // If still over limit, evict oldest (LRU)
+    if (tcCookieJar.size > TC_SESS_MAX_ENTRIES) {
+      const sorted = [...tcCookieJar.entries()].sort((a, b) => a[1].lastAccess - b[1].lastAccess);
+      const toRemove = sorted.slice(0, tcCookieJar.size - TC_SESS_MAX_ENTRIES);
+      for (const [id] of toRemove) {
+        tcCookieJar.delete(id);
+      }
+    }
+  }, 600_000).unref();
+
+  // TideCloak internal URL for reverse-proxying and server-side requests.
+  // When KC_HOSTNAME is a public URL, TC_INTERNAL_URL points to the actual
+  // TideCloak instance (e.g. http://localhost:8080).
+  const tcInternalUrl = options.tcInternalUrl || options.tcConfig["auth-server-url"];
+  const tcProxyUrl = new URL(tcInternalUrl);
+  const tcProxyIsHttps = tcProxyUrl.protocol === "https:";
+  const makeTcRequest = tcProxyIsHttps ? httpsRequest : httpRequest;
+
+  // KC_HOSTNAME-based public URL (from adapter config). TideCloak generates
+  // redirects and URLs using this, so we need to rewrite it too.
+  const tcPublicOrigin = options.tcConfig["auth-server-url"]
+    ? new URL(options.tcConfig["auth-server-url"]).origin
+    : null;
+
+  console.log(`[Proxy] TideCloak internal URL: ${tcInternalUrl}`);
+  console.log(`[Proxy] TideCloak public origin: ${tcPublicOrigin}`);
+  console.log(`[Proxy] TideCloak config auth-server-url: ${options.tcConfig["auth-server-url"]}`);
+  if (!options.tcInternalUrl && !tcInternalUrl.includes("localhost")) {
+    console.warn(`[Proxy] WARNING: TC_INTERNAL_URL not set — token exchange will use public URL: ${tcInternalUrl}`);
+    console.warn(`[Proxy]   Set TC_INTERNAL_URL=http://localhost:8080 if TideCloak runs locally`);
+  }
+
+  // Browser-facing endpoints use public URL if explicitly set;
+  // otherwise derived per-request from Host header (see getBrowserEndpoints)
+  const fixedBrowserEndpoints: OidcEndpoints | null = options.authServerPublicUrl
+    ? getOidcEndpoints(options.tcConfig, options.authServerPublicUrl)
+    : null;
+  // Server-side endpoints (token exchange, refresh) always use internal URL
+  const serverEndpoints: OidcEndpoints = getOidcEndpoints(options.tcConfig, tcInternalUrl);
+  const clientId = options.tcConfig.resource;
+  const isTls = !!options.tls;
+  _useSecureCookies = isTls;
+
+  /** Get browser-facing OIDC endpoints.
+   *  Uses authServerPublicUrl if explicitly set, otherwise returns relative
+   *  paths (/realms/...) so auth traffic stays on the gateway origin.
+   *  The /realms/* proxy forwards these to the real TideCloak server. */
+  function getBrowserEndpoints(_req: IncomingMessage): OidcEndpoints {
+    if (fixedBrowserEndpoints) return fixedBrowserEndpoints;
+    // Use relative paths so auth URLs route through the gateway's TideCloak proxy
+    return getOidcEndpoints(options.tcConfig, "");
+  }
+
+  const requestHandler = async (req: IncomingMessage, res: ServerResponse) => {
+      // ── Security headers ──────────────────────────────────────────
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("X-Frame-Options", "SAMEORIGIN");
+      res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+
+      let url = req.url || "/";
+      let path = url.split("?")[0];
+      let backendPrefix = ""; // e.g. "/__b/MediaBox"
+      let activeBackend = ""; // e.g. "MediaBox"
+
+      // ── Path-based backend routing ──────────────────────
+      // Strip /__b/<name>/ prefix so all routes work normally.
+      // The backend is determined by path, not cookies.
+      if (path.startsWith("/__b/")) {
+        const rest = path.slice("/__b/".length);
+        const slashIdx = rest.indexOf("/");
+        const encodedName = slashIdx >= 0 ? rest.slice(0, slashIdx) : rest;
+        const name = decodeURIComponent(encodedName);
+        if (backendMap.has(name)) {
+          activeBackend = name;
+          backendPrefix = `/__b/${encodedName}`;
+          const stripped = slashIdx >= 0 ? rest.slice(slashIdx) : "/";
+          const query = url.includes("?") ? url.slice(url.indexOf("?")) : "";
+          url = stripped + query;
+          path = stripped;
+          req.url = url;
+        }
+      }
+
+      // ── TideCloak /_idp prefix stripping ─────────────────
+      // The proxy rewrites TC's localhost URLs to {publicOrigin}/_idp/…
+      // so the Tide SDK enclave iframe can reach TC through the relay.
+      // Strip the /_idp prefix here so the request hits the /realms/*
+      // or /resources/* handler below.
+      if (path.startsWith("/_idp/")) {
+        url = url.slice("/_idp".length);
+        path = path.slice("/_idp".length);
+        req.url = url;
+      }
+
+      // ── Public routes ────────────────────────────────────
+
+      // Static JS files
+      if (path.startsWith("/js/") && path.endsWith(".js")) {
+        // Allow SW to control root scope even though it lives under /js/
+        if (path === "/js/sw.js") {
+          res.setHeader("Service-Worker-Allowed", "/");
+          res.setHeader("Cache-Control", "no-cache");
+        }
+        serveFile(res, path.slice(1), "application/javascript; charset=utf-8");
+        return;
+      }
+
+      // WebRTC config — tells the browser how to connect for P2P upgrade
+      if (path === "/webrtc-config") {
+        const proto = (req.headers["x-forwarded-proto"] as string) || "http";
+        const host = req.headers.host || "localhost";
+        const wsProto = proto === "https" ? "wss" : "ws";
+        const webrtcConfig: Record<string, unknown> = {
+          signalingUrl: `${wsProto}://${host}`,
+          stunServer: options.iceServers?.[0]
+            ? `stun:${options.iceServers[0].replace("stun:", "")}`
+            : null,
+        };
+        if (options.turnServer && options.turnSecret) {
+          // Generate ephemeral TURN credentials (valid for 1 hour)
+          const expiry = Math.floor(Date.now() / 1000) + 3600;
+          const turnUsername = `${expiry}`;
+          const turnPassword = createHmac("sha256", options.turnSecret)
+            .update(turnUsername)
+            .digest("base64");
+          webrtcConfig.turnServer = options.turnServer;
+          webrtcConfig.turnUsername = turnUsername;
+          webrtcConfig.turnPassword = turnPassword;
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(webrtcConfig));
+        return;
+      }
+
+      // OIDC: initiate login
+      if (path === "/auth/login") {
+        const params = new URLSearchParams(url.split("?")[1] || "");
+        const originalUrl = sanitizeRedirect(params.get("redirect") || "/");
+        const callbackUrl = getCallbackUrl(req, isTls);
+        const { url: authUrl } = buildAuthUrl(
+          getBrowserEndpoints(req),
+          clientId,
+          callbackUrl,
+          originalUrl
+        );
+        redirect(res, authUrl);
+        return;
+      }
+
+      // OIDC: callback from TideCloak
+      if (path === "/auth/callback") {
+        const params = new URLSearchParams(url.split("?")[1] || "");
+        const code = params.get("code");
+        const stateParam = params.get("state") || "";
+        const error = params.get("error");
+        const errorDesc = params.get("error_description");
+
+        if (error) {
+          console.log(`[Gateway] Auth error from TideCloak: ${error} — ${errorDesc || "no description"}`);
+          redirect(res, `/login?error=${encodeURIComponent(error)}`);
+          return;
+        }
+
+        if (!code) {
+          console.log("[Gateway] Auth callback missing code parameter");
+          redirect(res, `/login?error=no_code`);
+          return;
+        }
+
+        try {
+          const callbackUrl = getCallbackUrl(req, isTls);
+          console.log(`[Gateway] Token exchange:`);
+          console.log(`[Gateway]   endpoint: ${serverEndpoints.token}`);
+          console.log(`[Gateway]   client_id: ${clientId}`);
+          console.log(`[Gateway]   redirect_uri: ${callbackUrl}`);
+          console.log(`[Gateway]   code: ${code.slice(0, 8)}...`);
+          const tokens = await exchangeCode(
+            serverEndpoints,
+            clientId,
+            code,
+            callbackUrl
+          );
+          console.log(`[Gateway] Token exchange succeeded (expires_in=${tokens.expires_in})`);
+
+          const state = parseState(stateParam);
+          const cookies: string[] = [
+            buildCookieHeader(
+              "gateway_access",
+              tokens.access_token,
+              tokens.expires_in
+            ),
+          ];
+
+          if (tokens.refresh_token) {
+            cookies.push(
+              buildCookieHeader(
+                "gateway_refresh",
+                tokens.refresh_token,
+                tokens.refresh_expires_in || 1800,
+                "Strict"
+              )
+            );
+          }
+
+          const safeRedirect = sanitizeRedirect(state.redirect || "/");
+          console.log(`[Gateway] Auth complete, redirecting to: ${safeRedirect}`);
+          res.writeHead(302, {
+            Location: safeRedirect,
+            "Set-Cookie": cookies,
+          });
+          res.end();
+        } catch (err) {
+          console.error("[Gateway] Token exchange failed:", err);
+          redirect(res, `/login?error=token_exchange`);
+        }
+        return;
+      }
+
+      // Session token — returns JWT from HttpOnly cookie so the page
+      // can include it in WebRTC DataChannel requests (SW can't read cookies)
+      if (path === "/auth/session-token") {
+        const cookies = parseCookies(req.headers.cookie);
+        const accessToken = cookies["gateway_access"];
+        if (!accessToken) {
+          res.writeHead(401, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "No session" }));
+          return;
+        }
+        const payload = await options.auth.verifyToken(accessToken);
+        if (!payload) {
+          res.writeHead(401, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Invalid session" }));
+          return;
+        }
+        res.writeHead(200, {
+          "Content-Type": "application/json",
+          "Cache-Control": "no-store",
+          "Pragma": "no-cache",
+        });
+        res.end(JSON.stringify({ token: accessToken }));
+        return;
+      }
+
+      // OIDC: logout
+      if (path === "/auth/logout") {
+        const callbackUrl = getCallbackUrl(req, isTls);
+        const proto = callbackUrl.split("/auth/callback")[0];
+        const logoutUrl = buildLogoutUrl(
+          getBrowserEndpoints(req),
+          clientId,
+          `${proto}/login`
+        );
+
+        res.writeHead(302, {
+          Location: logoutUrl,
+          "Set-Cookie": [
+            clearCookieHeader("gateway_access"),
+            clearCookieHeader("gateway_refresh"),
+          ],
+        });
+        res.end();
+        return;
+      }
+
+      // ── Reverse-proxy TideCloak (/realms/*, /resources/*) ──
+      // Public — TideCloak handles its own auth on these paths.
+      // This keeps the browser on the gateway origin so DataChannel
+      // and remote access don't break on auth redirects.
+      //
+      // Cookie jar: TC's cookies are stored server-side and injected
+      // into proxied requests. This avoids relying on the STUN relay
+      // to forward Set-Cookie headers to the browser.
+      //
+      // Note: CORS is NOT handled here — the STUN relay is the final
+      // hop to the browser and adds CORS headers there. Adding CORS at
+      // both levels causes duplicate Access-Control-Allow-Origin headers
+      // which makes the browser reject the response entirely.
+      if (path.startsWith("/realms/") || path.startsWith("/resources/") || path.startsWith("/admin")) {
+        const publicProto = req.headers["x-forwarded-proto"] || (isTls ? "https" : "http");
+        const publicHost = req.headers.host || "localhost";
+        const publicBase = `${publicProto}://${publicHost}/_idp`;
+
+        // Get or create a server-side TC session for cookie jar
+        const tcSess = getTcSessionId(req);
+
+        const tcProxyHeaders = { ...req.headers };
+        tcProxyHeaders.host = tcProxyUrl.host;
+        // Strip forwarded headers so TideCloak sees plain HTTP localhost
+        // and doesn't redirect to KC_HOSTNAME based on protocol mismatch
+        delete tcProxyHeaders["x-forwarded-proto"];
+        delete tcProxyHeaders["x-forwarded-host"];
+        delete tcProxyHeaders["x-forwarded-for"];
+        delete tcProxyHeaders["x-forwarded-port"];
+        // Request uncompressed so we can rewrite URLs in the response
+        delete tcProxyHeaders["accept-encoding"];
+
+        // Inject stored TC cookies into the proxied request
+        const jarCookies = getTcCookieHeader(tcSess.id);
+        if (jarCookies) {
+          // Merge with any existing cookies from the browser
+          const existing = tcProxyHeaders.cookie || "";
+          tcProxyHeaders.cookie = existing ? `${existing}; ${jarCookies}` : jarCookies;
+        }
+
+        const tcProxyReq = makeTcRequest(
+          {
+            hostname: tcProxyUrl.hostname,
+            port: tcProxyUrl.port || (tcProxyIsHttps ? 443 : 80),
+            path: url,
+            method: req.method,
+            headers: tcProxyHeaders,
+          },
+          (tcProxyRes) => {
+            const headers = { ...tcProxyRes.headers };
+            rewriteRedirects(headers, tcProxyUrl.origin, undefined, publicBase);
+
+            // Remove any encoding header since we'll serve uncompressed
+            delete headers["content-encoding"];
+            delete headers["transfer-encoding"];
+
+            // Strip CSP so rewritten cross-origin URLs aren't blocked
+            delete headers["content-security-policy"];
+            delete headers["content-security-policy-report-only"];
+
+            // Store TC's cookies server-side instead of forwarding to browser
+            const rawSC = headers["set-cookie"];
+            storeTcCookies(tcSess.id, rawSC);
+            // Replace TC's Set-Cookie with our tc_sess cookie.
+            // SameSite=None so cross-site iframes (Tide SDK enclave on
+            // sork1.tideprotocol.com) can send it back for tidevouchers.
+            if (rawSC || tcSess.isNew) {
+              headers["set-cookie"] = [
+                buildCookieHeader("tc_sess", tcSess.id, TC_SESS_MAX_AGE, "None"),
+              ];
+            }
+
+            const contentType = (headers["content-type"] || "") as string;
+            const isText = contentType.includes("text/") ||
+              contentType.includes("application/javascript") ||
+              contentType.includes("application/json");
+            if (isText) {
+              const chunks: Buffer[] = [];
+              let totalSize = 0;
+              const MAX_RESPONSE = 50 * 1024 * 1024; // 50 MB
+              tcProxyRes.on("data", (chunk: Buffer) => {
+                totalSize += chunk.length;
+                if (totalSize > MAX_RESPONSE) {
+                  tcProxyRes.destroy();
+                  if (!res.headersSent) {
+                    res.writeHead(502, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ error: "Response too large" }));
+                  }
+                  return;
+                }
+                chunks.push(chunk);
+              });
+              tcProxyRes.on("end", () => {
+                if (res.headersSent) return;
+                let body = Buffer.concat(chunks).toString("utf-8");
+                // Rewrite TC internal URLs → public gateway base
+                body = body.replaceAll(tcProxyUrl.origin, publicBase);
+                body = body.replaceAll(
+                  tcProxyUrl.origin.replaceAll("/", "\\/"),
+                  publicBase.replaceAll("/", "\\/")
+                );
+                body = body.replaceAll(
+                  encodeURIComponent(tcProxyUrl.origin),
+                  encodeURIComponent(publicBase)
+                );
+                // Rewrite KC_HOSTNAME public URLs in body so admin console
+                // auth flow stays on the local gateway instead of going through
+                // the STUN relay (different domain = broken cookies).
+                // Note: NOT done for Location headers — only body content.
+                if (tcPublicOrigin && tcPublicOrigin !== tcProxyUrl.origin) {
+                  body = body.replaceAll(tcPublicOrigin, publicBase);
+                  body = body.replaceAll(
+                    tcPublicOrigin.replaceAll("/", "\\/"),
+                    publicBase.replaceAll("/", "\\/")
+                  );
+                  body = body.replaceAll(
+                    encodeURIComponent(tcPublicOrigin),
+                    encodeURIComponent(publicBase)
+                  );
+                }
+
+                delete headers["content-length"];
+                res.writeHead(tcProxyRes.statusCode || 502, headers);
+                res.end(body);
+              });
+            } else {
+              res.writeHead(tcProxyRes.statusCode || 502, headers);
+              tcProxyRes.pipe(res);
+            }
+          }
+        );
+
+        tcProxyReq.setTimeout(30000, () => {
+          tcProxyReq.destroy();
+          if (!res.headersSent) {
+            res.writeHead(504, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Auth server timeout" }));
+          }
+        });
+
+        tcProxyReq.on("error", (err) => {
+          console.error("[Proxy] TideCloak error:", err.message);
+          if (!res.headersSent) {
+            res.writeHead(502, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Auth server unavailable" }));
+          }
+        });
+
+        req.pipe(tcProxyReq);
+        return;
+      }
+
+      // ── Protected routes ─────────────────────────────────
+
+      stats.totalRequests++;
+
+      // Check if this backend skips gateway-side JWT validation
+      const isNoAuth = noAuthBackends.has(activeBackend || options.backends?.[0]?.name || "");
+
+      let payload: any = null;
+
+      if (isNoAuth) {
+        // Backend handles its own auth — skip JWT validation
+        stats.authorizedRequests++;
+      } else {
+        // Extract JWT: cookie first, then Authorization header
+        const cookies = parseCookies(req.headers.cookie);
+        let token = cookies["gateway_access"] || null;
+
+        if (!token) {
+          const authHeader = req.headers.authorization;
+          if (authHeader?.startsWith("Bearer ")) {
+            token = authHeader.slice(7);
+          }
+        }
+
+        // Validate JWT
+        payload = token ? await options.auth.verifyToken(token) : null;
+
+        // If access token expired, try refreshing with refresh token
+        if (!payload && cookies["gateway_refresh"]) {
+          try {
+            const tokens = await refreshAccessToken(
+              serverEndpoints,
+              clientId,
+              cookies["gateway_refresh"]
+            );
+
+            payload = await options.auth.verifyToken(tokens.access_token);
+
+            if (payload) {
+              // Set updated cookies on the response
+              token = tokens.access_token;
+              const refreshCookies: string[] = [
+                buildCookieHeader(
+                  "gateway_access",
+                  tokens.access_token,
+                  tokens.expires_in
+                ),
+              ];
+              if (tokens.refresh_token) {
+                refreshCookies.push(
+                  buildCookieHeader(
+                    "gateway_refresh",
+                    tokens.refresh_token,
+                    tokens.refresh_expires_in || 1800,
+                    "Strict"
+                  )
+                );
+              }
+              // Store cookies to set on the proxied response
+              (res as any).__refreshCookies = refreshCookies;
+            }
+          } catch (err) {
+            console.log("[Gateway] Token refresh failed:", err);
+          }
+        }
+
+        // No valid token — redirect browser or 401 for API
+        if (!payload) {
+          stats.rejectedRequests++;
+
+          if (isBrowserRequest(req)) {
+            const fullUrl = backendPrefix + url;
+            const redirectTarget = encodeURIComponent(fullUrl);
+            if (!token && !cookies["gateway_refresh"]) {
+              // No session at all — go straight to auth (TideCloak SSO will handle it)
+              redirect(res, `/auth/login?redirect=${redirectTarget}`);
+            } else {
+              // Had a session but it expired and couldn't be refreshed
+              redirect(res, `/login?redirect=${redirectTarget}&error=expired`);
+            }
+          } else {
+            res.writeHead(401, { "Content-Type": "application/json" });
+            res.end(
+              JSON.stringify({ error: "Missing or invalid authorization" })
+            );
+          }
+          return;
+        }
+
+        stats.authorizedRequests++;
+      }
+
+      // ── Proxy to backend ─────────────────────────────────
+
+      // Validate HTTP method
+      if (!ALLOWED_METHODS.has((req.method || "").toUpperCase())) {
+        res.writeHead(405, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Method not allowed" }));
+        return;
+      }
+
+      const proxyHeaders = { ...req.headers };
+      delete proxyHeaders.host;
+
+      // Remove cookie auth headers (don't leak to backend)
+      if (options.stripAuthHeader) {
+        delete proxyHeaders.authorization;
+      }
+
+      if (payload) {
+        proxyHeaders["x-forwarded-user"] = payload.sub || "unknown";
+      }
+      proxyHeaders["x-forwarded-for"] =
+        req.socket.remoteAddress || "unknown";
+
+      const targetBackend = resolveBackend(req, activeBackend);
+      const targetIsHttps = targetBackend.protocol === "https:";
+      const makeBackendReq = targetIsHttps ? httpsRequest : httpRequest;
+
+      // Strip x-gateway-backend header (internal routing, not for backend)
+      delete proxyHeaders["x-gateway-backend"];
+
+      const proxyReq = makeBackendReq(
+        {
+          hostname: targetBackend.hostname,
+          port: targetBackend.port || (targetIsHttps ? 443 : 80),
+          path: req.url,
+          method: req.method,
+          headers: proxyHeaders,
+        },
+        (proxyRes) => {
+          const headers = { ...proxyRes.headers };
+
+          // Rewrite redirects: TideCloak → relative, localhost:PORT → /__b/<name>
+          rewriteRedirects(headers, tcProxyUrl.origin, portToBackend);
+
+          // Prepend /__b/<name> prefix to relative redirects so backend
+          // redirects stay within the correct path namespace
+          if (backendPrefix && headers.location && typeof headers.location === "string") {
+            const loc = headers.location;
+            if (loc.startsWith("/") && !loc.startsWith("/__b/")) {
+              headers.location = backendPrefix + loc;
+            }
+          }
+
+          // Append refresh cookies if token was refreshed
+          const refreshCookies = (res as any).__refreshCookies as
+            | string[]
+            | undefined;
+          if (refreshCookies) {
+            const existing = headers["set-cookie"] || [];
+            const existingArr = Array.isArray(existing)
+              ? existing
+              : existing ? [existing as string] : [];
+            headers["set-cookie"] = [...existingArr, ...refreshCookies];
+          }
+
+          // Buffer HTML to rewrite URLs and inject scripts
+          const contentType = (headers["content-type"] || "") as string;
+          if (contentType.includes("text/html")) {
+            const chunks: Buffer[] = [];
+            let totalSize = 0;
+            const MAX_RESPONSE = 50 * 1024 * 1024; // 50 MB
+            proxyRes.on("data", (chunk: Buffer) => {
+              totalSize += chunk.length;
+              if (totalSize > MAX_RESPONSE) {
+                proxyRes.destroy();
+                if (!res.headersSent) {
+                  res.writeHead(502, { "Content-Type": "application/json" });
+                  res.end(JSON.stringify({ error: "Response too large" }));
+                }
+                return;
+              }
+              chunks.push(chunk);
+            });
+            proxyRes.on("end", () => {
+              if (res.headersSent) return;
+              let html = Buffer.concat(chunks).toString("utf-8");
+              // Rewrite localhost:PORT refs → /__b/<name>
+              html = rewriteLocalhostInHtml(html);
+              // Prepend /__b/<name> to absolute paths in HTML attributes
+              if (backendPrefix) {
+                html = prependPrefix(html, backendPrefix);
+                // Inject fetch/XHR interceptor so JS-initiated requests
+                // with absolute paths (e.g. fetch("/api/data")) get the
+                // /__b/<name> prefix prepended automatically.
+                // Gateway-internal paths (/auth/*, /js/*, /realms/*, etc.) are
+                // skipped — they work without the prefix.
+                const patchScript = `<script>(function(){` +
+                  `var P="${backendPrefix}";` +
+                  `var W=/^\\/(js\\/|auth\\/|login|webrtc-config|realms\\/|resources\\/|portal|health)/;` +
+                  `function n(u){return typeof u==="string"&&u[0]==="/"&&u.indexOf("/__b/")!==0&&!W.test(u)}` +
+                  `var F=window.fetch;window.fetch=function(u,i){` +
+                    `if(n(u))u=P+u;` +
+                    `else if(u instanceof Request){var r=new URL(u.url);if(r.origin===location.origin&&n(r.pathname)){r.pathname=P+r.pathname;u=new Request(r,u)}}` +
+                    `return F.call(this,u,i)};` +
+                  `var O=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){` +
+                    `if(n(u))arguments[1]=P+u;` +
+                    `return O.apply(this,arguments)};` +
+                  `})()</script>`;
+                if (html.includes("<head>")) {
+                  html = html.replace("<head>", `<head>${patchScript}`);
+                } else {
+                  html = patchScript + html;
+                }
+              }
+              // Inject WebRTC upgrade script
+              if (options.iceServers?.length) {
+                const script = `<script src="${backendPrefix}/js/webrtc-upgrade.js" defer></script>`;
+                if (html.includes("</body>")) {
+                  html = html.replace("</body>", `${script}\n</body>`);
+                } else {
+                  html += script;
+                }
+              }
+              // Inject floating "Switch" button for multi-backend gateways
+              if (backendMap.size > 1 && html.includes("</body>")) {
+                html = html.replace("</body>", `${switchButtonHtml}\n</body>`);
+              }
+              delete headers["content-length"];
+              res.writeHead(proxyRes.statusCode || 502, headers);
+              res.end(html);
+            });
+          } else {
+            res.writeHead(proxyRes.statusCode || 502, headers);
+            proxyRes.pipe(res);
+          }
+        }
+      );
+
+      proxyReq.setTimeout(30000, () => {
+        proxyReq.destroy();
+        if (!res.headersSent) {
+          res.writeHead(504, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Backend timeout" }));
+        }
+      });
+
+      proxyReq.on("error", (err) => {
+        console.error("[Proxy] Backend error:", err.message);
+        if (!res.headersSent) {
+          res.writeHead(502, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Backend unavailable" }));
+        }
+      });
+
+      req.pipe(proxyReq);
+    };
+
+  const server = options.tls
+    ? createHttpsServer({ key: options.tls.key, cert: options.tls.cert }, requestHandler)
+    : createServer(requestHandler);
+
+  const scheme = isTls ? "https" : "http";
+  server.listen(options.listenPort, () => {
+    console.log(`[Proxy] Listening on ${scheme}://localhost:${options.listenPort}`);
+    if (options.backends && options.backends.length > 1) {
+      for (const b of options.backends) {
+        console.log(`[Proxy] Backend: ${b.name} → ${b.url}`);
+      }
+    } else {
+      console.log(`[Proxy] Backend: ${options.backendUrl}`);
+    }
+    console.log(`[Proxy] Login: ${scheme}://localhost:${options.listenPort}/login`);
+  });
+
+  return {
+    server,
+    getStats: () => ({ ...stats }),
+  };
+}

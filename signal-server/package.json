@@ -2,7 +2,7 @@
   "name": "keylessh-signal-server",
   "version": "1.0.0",
   "type": "module",
-  "description": "P2P signaling server + HTTP relay for KeyleSSH WAFs",
+  "description": "P2P signaling server + HTTP relay for KeyleSSH gateways",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",

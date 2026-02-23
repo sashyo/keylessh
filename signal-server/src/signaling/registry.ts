@@ -1,23 +1,23 @@
 /**
- * In-memory registry of WAF instances and clients.
+ * In-memory registry of gateway instances and clients.
  */
 
 import type { WebSocket } from "ws";
 
-export interface WafMetadata {
+export interface GatewayMetadata {
   displayName?: string;
   description?: string;
   backends?: { name: string }[];
   realm?: string;
 }
 
-export interface RegisteredWaf {
+export interface RegisteredGateway {
   id: string;
   addresses: string[]; // public addresses (e.g., "203.0.113.5:443")
   ws: WebSocket;
   registeredAt: number;
   pairedClients: Set<string>; // client IDs
-  metadata: WafMetadata;
+  metadata: GatewayMetadata;
 }
 
 export type ConnectionType = "relay" | "p2p" | "turn";
@@ -28,12 +28,12 @@ export interface RegisteredClient {
   connectionType: ConnectionType; // how the client is connected
   ws: WebSocket;
   registeredAt: number;
-  pairedWafId?: string;
-  token?: string; // JWT from KeyleSSH auth — forwarded to WAF on pairing
+  pairedGatewayId?: string;
+  token?: string; // JWT from KeyleSSH auth — forwarded to gateway on pairing
 }
 
 export interface DetailedStats {
-  wafs: Array<{
+  gateways: Array<{
     id: string;
     displayName: string;
     description: string;
@@ -47,44 +47,44 @@ export interface DetailedStats {
     id: string;
     reflexiveAddress?: string;
     connectionType: ConnectionType;
-    pairedWafId?: string;
+    pairedGatewayId?: string;
     registeredAt: number;
   }>;
 }
 
 export interface Registry {
-  registerWaf(id: string, addresses: string[], ws: WebSocket, metadata?: WafMetadata): void;
+  registerGateway(id: string, addresses: string[], ws: WebSocket, metadata?: GatewayMetadata): void;
   registerClient(id: string, ws: WebSocket, token?: string): void;
   removeByWs(ws: WebSocket): void;
-  getWaf(id: string): RegisteredWaf | undefined;
+  getGateway(id: string): RegisteredGateway | undefined;
   getClient(id: string): RegisteredClient | undefined;
-  getAvailableWaf(): RegisteredWaf | undefined;
-  getWafByRealm(realm: string): RegisteredWaf | undefined;
-  getAllWafs(): RegisteredWaf[];
+  getAvailableGateway(): RegisteredGateway | undefined;
+  getGatewayByRealm(realm: string): RegisteredGateway | undefined;
+  getAllGateways(): RegisteredGateway[];
   updateClientReflexive(id: string, address: string): void;
   updateClientConnection(id: string, connectionType: ConnectionType): void;
-  getStats(): { wafs: number; clients: number };
+  getStats(): { gateways: number; clients: number };
   getDetailedStats(): DetailedStats;
   forceDisconnectClient(clientId: string): boolean;
-  drainWaf(wafId: string): boolean;
-  getInfoByWs(ws: WebSocket): { type: "waf" | "client"; id: string } | undefined;
+  drainGateway(gatewayId: string): boolean;
+  getInfoByWs(ws: WebSocket): { type: "gateway" | "client"; id: string } | undefined;
 }
 
 export function createRegistry(): Registry {
-  const MAX_WAFS = 100;
+  const MAX_GATEWAYS = 100;
   const MAX_CLIENTS = 10000;
-  const wafs = new Map<string, RegisteredWaf>();
+  const gateways = new Map<string, RegisteredGateway>();
   const clients = new Map<string, RegisteredClient>();
-  const wsByWs = new Map<WebSocket, { type: "waf" | "client"; id: string }>();
+  const wsByWs = new Map<WebSocket, { type: "gateway" | "client"; id: string }>();
 
   return {
-    registerWaf(id, addresses, ws, metadata) {
-      if (wafs.size >= MAX_WAFS && !wafs.has(id)) {
-        console.warn(`[Signal] WAF registration rejected: max WAFs (${MAX_WAFS}) reached`);
-        ws.close(1013, "Too many WAFs registered");
+    registerGateway(id, addresses, ws, metadata) {
+      if (gateways.size >= MAX_GATEWAYS && !gateways.has(id)) {
+        console.warn(`[Signal] Gateway registration rejected: max gateways (${MAX_GATEWAYS}) reached`);
+        ws.close(1013, "Too many gateways registered");
         return;
       }
-      const waf: RegisteredWaf = {
+      const gateway: RegisteredGateway = {
         id,
         addresses,
         ws,
@@ -92,10 +92,10 @@ export function createRegistry(): Registry {
         pairedClients: new Set(),
         metadata: metadata || {},
       };
-      wafs.set(id, waf);
-      wsByWs.set(ws, { type: "waf", id });
+      gateways.set(id, gateway);
+      wsByWs.set(ws, { type: "gateway", id });
       console.log(
-        `[Signal] WAF registered: ${metadata?.displayName || id} (${id}) at ${addresses.join(", ")}`
+        `[Signal] Gateway registered: ${metadata?.displayName || id} (${id}) at ${addresses.join(", ")}`
       );
     },
 
@@ -122,67 +122,67 @@ export function createRegistry(): Registry {
       if (!entry) return;
       wsByWs.delete(ws);
 
-      if (entry.type === "waf") {
-        const waf = wafs.get(entry.id);
-        if (waf) {
-          // Notify paired clients that WAF is gone
-          for (const clientId of waf.pairedClients) {
+      if (entry.type === "gateway") {
+        const gateway = gateways.get(entry.id);
+        if (gateway) {
+          // Notify paired clients that gateway is gone
+          for (const clientId of gateway.pairedClients) {
             const client = clients.get(clientId);
             if (client) {
-              client.pairedWafId = undefined;
+              client.pairedGatewayId = undefined;
             }
           }
-          wafs.delete(entry.id);
+          gateways.delete(entry.id);
         }
-        console.log(`[Signal] WAF unregistered: ${entry.id}`);
+        console.log(`[Signal] Gateway unregistered: ${entry.id}`);
       } else {
         const client = clients.get(entry.id);
-        if (client?.pairedWafId) {
-          const waf = wafs.get(client.pairedWafId);
-          waf?.pairedClients.delete(entry.id);
+        if (client?.pairedGatewayId) {
+          const gateway = gateways.get(client.pairedGatewayId);
+          gateway?.pairedClients.delete(entry.id);
         }
         clients.delete(entry.id);
         console.log(`[Signal] Client unregistered: ${entry.id}`);
       }
     },
 
-    getWaf(id) {
-      return wafs.get(id);
+    getGateway(id) {
+      return gateways.get(id);
     },
 
     getClient(id) {
       return clients.get(id);
     },
 
-    getAvailableWaf() {
-      // Simple strategy: return WAF with fewest paired clients
-      let best: RegisteredWaf | undefined;
+    getAvailableGateway() {
+      // Simple strategy: return gateway with fewest paired clients
+      let best: RegisteredGateway | undefined;
       let minClients = Infinity;
-      for (const waf of wafs.values()) {
-        if (waf.pairedClients.size < minClients) {
-          minClients = waf.pairedClients.size;
-          best = waf;
+      for (const gateway of gateways.values()) {
+        if (gateway.pairedClients.size < minClients) {
+          minClients = gateway.pairedClients.size;
+          best = gateway;
         }
       }
       return best;
     },
 
-    getWafByRealm(realm) {
-      // Find WAF that serves the given TideCloak realm.
-      // If multiple WAFs serve the same realm, pick the one with fewest clients.
-      let best: RegisteredWaf | undefined;
+    getGatewayByRealm(realm) {
+      // Find gateway that serves the given TideCloak realm.
+      // If multiple gateways serve the same realm, pick the one with fewest clients.
+      let best: RegisteredGateway | undefined;
       let minClients = Infinity;
-      for (const waf of wafs.values()) {
-        if (waf.metadata.realm === realm && waf.pairedClients.size < minClients) {
-          minClients = waf.pairedClients.size;
-          best = waf;
+      for (const gateway of gateways.values()) {
+        if (gateway.metadata.realm === realm && gateway.pairedClients.size < minClients) {
+          minClients = gateway.pairedClients.size;
+          best = gateway;
         }
       }
       return best;
     },
 
-    getAllWafs() {
-      return Array.from(wafs.values());
+    getAllGateways() {
+      return Array.from(gateways.values());
     },
 
     updateClientReflexive(id, address) {
@@ -201,12 +201,12 @@ export function createRegistry(): Registry {
     },
 
     getStats() {
-      return { wafs: wafs.size, clients: clients.size };
+      return { gateways: gateways.size, clients: clients.size };
     },
 
     getDetailedStats() {
       return {
-        wafs: Array.from(wafs.values()).map((w) => ({
+        gateways: Array.from(gateways.values()).map((w) => ({
           id: w.id,
           displayName: w.metadata.displayName || w.id,
           description: w.metadata.description || "",
@@ -220,7 +220,7 @@ export function createRegistry(): Registry {
           id: c.id,
           reflexiveAddress: c.reflexiveAddress,
           connectionType: c.connectionType,
-          pairedWafId: c.pairedWafId,
+          pairedGatewayId: c.pairedGatewayId,
           registeredAt: c.registeredAt,
         })),
       };
@@ -233,17 +233,17 @@ export function createRegistry(): Registry {
       return true;
     },
 
-    drainWaf(wafId) {
-      const waf = wafs.get(wafId);
-      if (!waf) return false;
-      for (const clientId of waf.pairedClients) {
+    drainGateway(gatewayId) {
+      const gateway = gateways.get(gatewayId);
+      if (!gateway) return false;
+      for (const clientId of gateway.pairedClients) {
         const client = clients.get(clientId);
         if (client) {
-          client.pairedWafId = undefined;
+          client.pairedGatewayId = undefined;
         }
       }
-      waf.pairedClients.clear();
-      waf.ws.close(1000, "Drained by admin");
+      gateway.pairedClients.clear();
+      gateway.ws.close(1000, "Drained by admin");
       return true;
     },
 

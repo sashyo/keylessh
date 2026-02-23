@@ -21,7 +21,7 @@ export const bridges = sqliteTable("bridges", {
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
 });
 
-// Signal servers - P2P signaling + HTTP relay endpoints (WAF connections)
+// Signal servers - P2P signaling + HTTP relay endpoints (gateway connections)
 export const signalServers = sqliteTable("signal_servers", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),

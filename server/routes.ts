@@ -1223,12 +1223,12 @@ export async function registerRoutes(
   );
 
   // ============================================
-  // WAF Endpoints (user-facing aggregation from signal servers)
+  // Gateway Endpoints (user-facing aggregation from signal servers)
   // ============================================
 
-  // GET /api/waf-endpoints - Aggregate WAFs from all enabled signal servers
+  // GET /api/gateway-endpoints - Aggregate gateways from all enabled signal servers
   app.get(
-    "/api/waf-endpoints",
+    "/api/gateway-endpoints",
     authenticate,
     async (req: AuthenticatedRequest, res) => {
       try {
@@ -1245,16 +1245,16 @@ export async function registerRoutes(
           signalServerUrl: string;
         }> = [];
 
-        // Fetch WAFs from each signal server in parallel (with timeout)
+        // Fetch gateways from each signal server in parallel (with timeout)
         const fetches = enabledServers.map(async (ss) => {
           try {
             const controller = new AbortController();
             const timeout = setTimeout(() => controller.abort(), 5000);
-            const apiUrl = ss.url.replace(/\/$/, "") + "/api/wafs";
+            const apiUrl = ss.url.replace(/\/$/, "") + "/api/gateways";
             const resp = await fetch(apiUrl, { signal: controller.signal });
             clearTimeout(timeout);
             if (!resp.ok) return;
-            const data = await resp.json() as { wafs?: Array<{
+            const data = await resp.json() as { gateways?: Array<{
               id: string;
               displayName: string;
               description: string;
@@ -1262,10 +1262,10 @@ export async function registerRoutes(
               online: boolean;
               clientCount: number;
             }> };
-            if (data.wafs) {
-              for (const waf of data.wafs) {
+            if (data.gateways) {
+              for (const gw of data.gateways) {
                 results.push({
-                  ...waf,
+                  ...gw,
                   signalServerId: ss.id,
                   signalServerName: ss.name,
                   signalServerUrl: ss.url,
@@ -1280,8 +1280,8 @@ export async function registerRoutes(
         await Promise.all(fetches);
         res.json(results);
       } catch (error) {
-        log(`Failed to fetch WAF endpoints: ${error}`);
-        res.status(500).json({ message: "Failed to fetch WAF endpoints" });
+        log(`Failed to fetch gateway endpoints: ${error}`);
+        res.status(500).json({ message: "Failed to fetch gateway endpoints" });
       }
     }
   );

@@ -3,24 +3,23 @@ import { createServer as createHttpsServer, request as httpsRequest } from "http
 import { WebSocketServer, WebSocket } from "ws";
 import { jwtVerify, createLocalJWKSet, JWTPayload } from "jose";
 import { readFileSync, existsSync } from "fs";
-import { join, extname } from "path";
-import { fileURLToPath } from "url";
+import { join } from "path";
 import { timingSafeEqual, createHmac, randomBytes } from "crypto";
-import { createRegistry, type ConnectionType, type WafMetadata } from "./signaling/registry.js";
-import { pairClient, pairClientWithWaf, forwardCandidate, forwardSdp } from "./signaling/pairing.js";
-import { createHttpRelay, handleHttpResponse, handleHttpResponseStart, handleHttpResponseChunk, handleHttpResponseEnd, rejectPendingForWaf } from "./relay/http-relay.js";
+import { createRegistry, type ConnectionType, type GatewayMetadata } from "./signaling/registry.js";
+import { pairClient, pairClientWithGateway, forwardCandidate, forwardSdp } from "./signaling/pairing.js";
+import { createHttpRelay, handleHttpResponse, handleHttpResponseStart, handleHttpResponseChunk, handleHttpResponseEnd, rejectPendingForGateway } from "./relay/http-relay.js";
 
 /**
- * Signal Server — P2P signaling + HTTP relay + portal
+ * Signal Server — P2P signaling + HTTP relay
  *
- * Handles WAF registration, client pairing, SDP/ICE exchange,
- * TURN credential generation, HTTP relay tunneling, and WAF selection portal.
+ * Handles gateway registration, client pairing, SDP/ICE exchange,
+ * TURN credential generation, and HTTP relay tunneling.
  *
  * Environment variables:
  * - PORT: Port to listen on (default: 9090)
  * - client_adapter: JSON string of tidecloak.json config (highest priority)
  * - TIDECLOAK_CONFIG_B64: Base64-encoded config
- * - API_SECRET: Shared secret for WAF registration authentication
+ * - API_SECRET: Shared secret for gateway registration authentication
  * - ICE_SERVERS: Comma-separated STUN server URLs (e.g. "stun:relay.example.com:3478")
  * - TURN_SERVER: TURN server URL for WebRTC relay fallback (e.g. "turn:relay.example.com:3478")
  * - TURN_SECRET: Shared secret for TURN REST API ephemeral credentials (HMAC-SHA256)
@@ -332,37 +331,6 @@ function proxyTideCloak(
 
 console.log(`[Signal] TideCloak proxy: ${tcAuthServerUrl}`);
 
-// ── Static file serving ──────────────────────────────────────────
-
-const __filename = fileURLToPath(import.meta.url);
-const PUBLIC_DIR = join(__filename, "..", "..", "public");
-
-const MIME_TYPES: Record<string, string> = {
-  ".html": "text/html; charset=utf-8",
-  ".js": "application/javascript; charset=utf-8",
-  ".json": "application/json",
-  ".css": "text/css; charset=utf-8",
-};
-
-function serveStaticFile(res: import("http").ServerResponse, filename: string): void {
-  const filePath = join(PUBLIC_DIR, filename);
-  if (filePath.includes("..")) {
-    res.writeHead(403);
-    res.end("Forbidden");
-    return;
-  }
-  try {
-    const content = readFileSync(filePath);
-    const ext = extname(filename);
-    const contentType = MIME_TYPES[ext] || "application/octet-stream";
-    res.writeHead(200, { "Content-Type": contentType });
-    res.end(content);
-  } catch {
-    res.writeHead(404, { "Content-Type": "text/plain" });
-    res.end("Not found");
-  }
-}
-
 function parseCookie(header: string | undefined, name: string): string | null {
   if (!header) return null;
   for (const pair of header.split(";")) {
@@ -403,22 +371,6 @@ const requestHandler = async (req: import("http").IncomingMessage, res: import("
     return;
   }
 
-  // ── Portal: show WAF selection when no cookie is set ─────────
-  if (path === "/portal" && req.method === "GET") {
-    res.setHeader("Set-Cookie", "waf_relay=; Path=/; HttpOnly; Max-Age=0");
-    serveStaticFile(res, "portal.html");
-    return;
-  }
-
-  if (path === "/" && req.method === "GET") {
-    const hasCookie = parseCookie(req.headers.cookie, "waf_relay");
-    if (!hasCookie) {
-      serveStaticFile(res, "portal.html");
-      return;
-    }
-    // Has cookie → fall through to relay
-  }
-
   // ── Health check ──────────────────────────────────────────────
   if (path === "/health") {
     const signalStats = registry.getStats();
@@ -450,19 +402,19 @@ const requestHandler = async (req: import("http").IncomingMessage, res: import("
       webrtcConfig.turnUsername = turnUsername;
       webrtcConfig.turnPassword = turnPassword;
     }
-    // Include selected WAF ID from HttpOnly cookie so JS can target it
-    const selectedWaf = parseCookie(req.headers.cookie, "waf_relay");
-    if (selectedWaf) {
-      webrtcConfig.targetWafId = selectedWaf;
+    // Include selected gateway ID from HttpOnly cookie so JS can target it
+    const selectedGateway = parseCookie(req.headers.cookie, "gateway_relay");
+    if (selectedGateway) {
+      webrtcConfig.targetGatewayId = selectedGateway;
     }
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(webrtcConfig));
     return;
   }
 
-  // ── API: List WAFs ────────────────────────────────────────────
-  if (path === "/api/wafs" && req.method === "GET") {
-    const wafs = registry.getAllWafs().map((w) => ({
+  // ── API: List gateways ────────────────────────────────────────────
+  if (path === "/api/gateways" && req.method === "GET") {
+    const gateways = registry.getAllGateways().map((w) => ({
       id: w.id,
       displayName: w.metadata.displayName || w.id,
       description: w.metadata.description || "",
@@ -471,12 +423,12 @@ const requestHandler = async (req: import("http").IncomingMessage, res: import("
       online: w.ws.readyState === w.ws.OPEN,
     }));
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ wafs }));
+    res.end(JSON.stringify({ gateways }));
     return;
   }
 
-  // ── API: Select WAF (POST — sets affinity cookie) ─────────────
-  if (path === "/api/select-waf" && req.method === "POST") {
+  // ── API: Select gateway (POST — sets affinity cookie) ─────────────
+  if (path === "/api/select-gateway" && req.method === "POST") {
     const chunks: Buffer[] = [];
     let totalSize = 0;
     const MAX_BODY = 64 * 1024;
@@ -501,18 +453,18 @@ const requestHandler = async (req: import("http").IncomingMessage, res: import("
     req.on("end", () => {
       if (res.headersSent) return;
       try {
-        const { wafId, backend } = JSON.parse(Buffer.concat(chunks).toString());
-        const waf = registry.getWaf(wafId);
-        if (!waf) {
+        const { gatewayId, backend } = JSON.parse(Buffer.concat(chunks).toString());
+        const gateway = registry.getGateway(gatewayId);
+        if (!gateway) {
           res.writeHead(404, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: "WAF not found" }));
+          res.end(JSON.stringify({ error: "Gateway not found" }));
           return;
         }
         res.writeHead(200, {
           "Content-Type": "application/json",
-          "Set-Cookie": `waf_relay=${wafId}; Path=/; HttpOnly; SameSite=None; Secure`,
+          "Set-Cookie": `gateway_relay=${gatewayId}; Path=/; HttpOnly; SameSite=None; Secure`,
         });
-        res.end(JSON.stringify({ success: true, wafId, backend: backend || null }));
+        res.end(JSON.stringify({ success: true, gatewayId, backend: backend || null }));
       } catch {
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Invalid request body" }));
@@ -521,29 +473,29 @@ const requestHandler = async (req: import("http").IncomingMessage, res: import("
     return;
   }
 
-  // ── API: Select WAF (GET — redirect with cookie) ──────────────
-  // Accepts optional &token= with a KeyleSSH JWT to forward to the WAF
+  // ── API: Select gateway (GET — redirect with cookie) ──────────────
+  // Accepts optional &token= with a KeyleSSH JWT to forward to the gateway
   // so the user doesn't have to log in again via TideCloak.
   if (path === "/api/select" && req.method === "GET") {
     const params = new URLSearchParams(url.split("?")[1] || "");
-    const wafId = params.get("waf");
+    const gatewayId = params.get("gateway");
     const backend = params.get("backend");
     const token = params.get("token");
-    if (!wafId || !registry.getWaf(wafId)) {
+    if (!gatewayId || !registry.getGateway(gatewayId)) {
       res.writeHead(404, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "WAF not found" }));
+      res.end(JSON.stringify({ error: "Gateway not found" }));
       return;
     }
     const cookies: string[] = [
-      `waf_relay=${wafId}; Path=/; HttpOnly; SameSite=None; Secure`,
+      `gateway_relay=${gatewayId}; Path=/; HttpOnly; SameSite=None; Secure`,
     ];
-    // If a valid KeyleSSH JWT is provided, set it as waf_access cookie
-    // so the WAF accepts the user without triggering its own login flow.
+    // If a valid KeyleSSH JWT is provided, set it as gateway_access cookie
+    // so the gateway accepts the user without triggering its own login flow.
     if (token) {
       const payload = await verifyToken(token);
       if (payload) {
-        // Token is valid — set as waf_access (HttpOnly, forwarded by relay)
-        cookies.push(`waf_access=${token}; Path=/; HttpOnly; SameSite=None; Secure`);
+        // Token is valid — set as gateway_access (HttpOnly, forwarded by relay)
+        cookies.push(`gateway_access=${token}; Path=/; HttpOnly; SameSite=None; Secure`);
       }
     }
     const location = backend
@@ -557,11 +509,11 @@ const requestHandler = async (req: import("http").IncomingMessage, res: import("
     return;
   }
 
-  // ── API: Clear WAF selection ──────────────────────────────────
+  // ── API: Clear gateway selection ──────────────────────────────────
   if (path === "/api/clear-selection" && req.method === "POST") {
     res.writeHead(200, {
       "Content-Type": "application/json",
-      "Set-Cookie": "waf_relay=; Path=/; HttpOnly; Max-Age=0",
+      "Set-Cookie": "gateway_relay=; Path=/; HttpOnly; Max-Age=0",
     });
     res.end(JSON.stringify({ success: true }));
     return;
@@ -578,7 +530,7 @@ const requestHandler = async (req: import("http").IncomingMessage, res: import("
     return;
   }
 
-  // ── Relay all other HTTP requests to a WAF ────────────────────
+  // ── Relay all other HTTP requests to a gateway ────────────────────
   relayHandler(req, res);
 };
 
@@ -606,14 +558,14 @@ server.on("upgrade", (req, socket, head) => {
 
 interface SignalMessage {
   type: string;
-  role?: "waf" | "client";
+  role?: "gateway" | "client";
   id?: string;
   secret?: string;
   token?: string;
   addresses?: string[];
-  metadata?: WafMetadata;
+  metadata?: GatewayMetadata;
   targetId?: string;
-  targetWafId?: string;
+  targetGatewayId?: string;
   fromId?: string;
   candidate?: unknown;
   sdp?: string;
@@ -626,7 +578,7 @@ interface SignalMessage {
 const MAX_CONNECTIONS_PER_IP = 20;
 const MAX_MESSAGES_PER_SEC = 100;
 const connectionsByIp = new Map<string, number>();
-const wafWebSockets = new Set<WebSocket>();
+const gatewayWebSockets = new Set<WebSocket>();
 
 signalWss.on("connection", (ws: WebSocket, req) => {
   const clientIp = (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim()
@@ -641,12 +593,12 @@ signalWss.on("connection", (ws: WebSocket, req) => {
   }
   connectionsByIp.set(clientIp, ipCount + 1);
 
-  // Per-connection message rate limiting (exempt WAFs — they're authenticated)
+  // Per-connection message rate limiting (exempt gateways — they're authenticated)
   let messageCount = 0;
   const rateLimitInterval = setInterval(() => { messageCount = 0; }, 1000);
 
   ws.on("message", (data) => {
-    if (!wafWebSockets.has(ws)) {
+    if (!gatewayWebSockets.has(ws)) {
       messageCount++;
       if (messageCount > MAX_MESSAGES_PER_SEC) {
         ws.close(1008, "Rate limit exceeded");
@@ -699,9 +651,9 @@ signalWss.on("connection", (ws: WebSocket, req) => {
       case "client_status":
         if (msg.clientId && msg.connectionType) {
           const statusClient = registry.getClient(msg.clientId);
-          if (statusClient?.pairedWafId) {
-            const senderWaf = registry.getWaf(statusClient.pairedWafId);
-            if (senderWaf && senderWaf.ws === ws) {
+          if (statusClient?.pairedGatewayId) {
+            const senderGateway = registry.getGateway(statusClient.pairedGatewayId);
+            if (senderGateway && senderGateway.ws === ws) {
               registry.updateClientConnection(msg.clientId, msg.connectionType);
             }
           }
@@ -717,10 +669,10 @@ signalWss.on("connection", (ws: WebSocket, req) => {
 
   ws.on("close", () => {
     clearInterval(rateLimitInterval);
-    wafWebSockets.delete(ws);
+    gatewayWebSockets.delete(ws);
     const info = registry.getInfoByWs(ws);
-    if (info?.type === "waf") {
-      rejectPendingForWaf(info.id);
+    if (info?.type === "gateway") {
+      rejectPendingForGateway(info.id);
     }
     registry.removeByWs(ws);
     const count = connectionsByIp.get(clientIp) || 0;
@@ -733,10 +685,10 @@ signalWss.on("connection", (ws: WebSocket, req) => {
 
   ws.on("error", () => {
     clearInterval(rateLimitInterval);
-    wafWebSockets.delete(ws);
+    gatewayWebSockets.delete(ws);
     const info = registry.getInfoByWs(ws);
-    if (info?.type === "waf") {
-      rejectPendingForWaf(info.id);
+    if (info?.type === "gateway") {
+      rejectPendingForGateway(info.id);
     }
     registry.removeByWs(ws);
     const count = connectionsByIp.get(clientIp) || 0;
@@ -754,23 +706,23 @@ async function handleRegister(ws: WebSocket, msg: SignalMessage, clientIp: strin
     return;
   }
 
-  if (msg.role === "waf") {
-    // WAF registration requires API_SECRET (timing-safe comparison)
+  if (msg.role === "gateway") {
+    // Gateway registration requires API_SECRET (timing-safe comparison)
     if (API_SECRET) {
       const secret = msg.secret || "";
       const expected = Buffer.from(API_SECRET);
       const received = Buffer.from(secret);
       if (expected.length !== received.length || !timingSafeEqual(expected, received)) {
-        console.log(`[Signal] WAF registration rejected: invalid secret (id: ${msg.id})`);
+        console.log(`[Signal] Gateway registration rejected: invalid secret (id: ${msg.id})`);
         safeSend(ws, { type: "error", message: "Invalid API secret" });
         ws.close(4001, "Unauthorized");
         return;
       }
     }
 
-    registry.registerWaf(msg.id, msg.addresses || [], ws, msg.metadata);
-    wafWebSockets.add(ws);
-    safeSend(ws, { type: "registered", role: "waf", id: msg.id });
+    registry.registerGateway(msg.id, msg.addresses || [], ws, msg.metadata);
+    gatewayWebSockets.add(ws);
+    safeSend(ws, { type: "registered", role: "gateway", id: msg.id });
   } else if (msg.role === "client") {
     // Client registration requires a valid JWT from KeyleSSH
     if (!msg.token) {
@@ -791,9 +743,9 @@ async function handleRegister(ws: WebSocket, msg: SignalMessage, clientIp: strin
     registry.updateClientReflexive(msg.id, clientIp);
     safeSend(ws, { type: "registered", role: "client", id: msg.id });
 
-    // Explicit WAF selection or auto-pair
-    if (msg.targetWafId) {
-      pairClientWithWaf(registry, msg.id, msg.targetWafId);
+    // Explicit gateway selection or auto-pair
+    if (msg.targetGatewayId) {
+      pairClientWithGateway(registry, msg.id, msg.targetGatewayId);
     } else {
       pairClient(registry, msg.id);
     }
@@ -840,8 +792,8 @@ async function handleAdminAction(ws: WebSocket, msg: SignalMessage): Promise<voi
   let success = false;
   if (msg.action === "disconnect_client") {
     success = registry.forceDisconnectClient(msg.targetId);
-  } else if (msg.action === "drain_waf") {
-    success = registry.drainWaf(msg.targetId);
+  } else if (msg.action === "drain_gateway") {
+    success = registry.drainGateway(msg.targetId);
   }
 
   safeSend(ws, {
@@ -870,7 +822,6 @@ const wsScheme = useTls ? "wss" : "ws";
 server.listen(PORT, () => {
   console.log(`[Signal] Signal Server listening on ${scheme}://localhost:${PORT}`);
   console.log(`[Signal] Signaling: ${wsScheme}://localhost:${PORT}`);
-  console.log(`[Signal] Portal: ${scheme}://localhost:${PORT}/portal`);
   console.log(`[Signal] Health: ${scheme}://localhost:${PORT}/health`);
   if (useTls) {
     console.log(`[Signal] TLS: ${TLS_CERT_PATH}`);

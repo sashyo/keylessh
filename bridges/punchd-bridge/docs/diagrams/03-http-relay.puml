@@ -1,0 +1,69 @@
+@startuml http-relay
+!theme plain
+title HTTP Relay — Request Tunneling via WebSocket
+
+skinparam {
+  backgroundColor #0f172a
+  defaultFontColor #f8fafc
+  defaultFontName "Segoe UI"
+  defaultFontSize 12
+  SequenceLifeLineBorderColor #334155
+  SequenceLifeLineBackgroundColor #1e293b
+  ParticipantBackgroundColor #1e293b
+  ParticipantBorderColor #3b82f6
+  ParticipantFontColor #f8fafc
+  ArrowColor #94a3b8
+  ArrowFontColor #94a3b8
+  NoteBackgroundColor #1e293b
+  NoteBorderColor #334155
+  NoteFontColor #f8fafc
+  SequenceGroupBackgroundColor #1e293b
+  SequenceGroupBorderColor #334155
+  SequenceDividerBackgroundColor #334155
+  SequenceDividerFontColor #f8fafc
+}
+
+participant "Browser" as browser #1e293b
+participant "Signal Server\n(HTTP + WS)" as stun #1e293b
+participant "Gateway" as gw #1e293b
+participant "Backend App" as backend #1e293b
+
+== Portal Selection ==
+
+browser -> stun : GET /portal
+stun --> browser : portal.html
+
+browser -> stun : GET /api/gateways
+stun --> browser : { gateways: [{ id, displayName, backends }] }
+
+browser -> stun : GET /api/select?gateway=gw-x&backend=App1
+stun --> browser : 302 /__b/App1/\nSet-Cookie: gateway_relay=gw-x
+
+== HTTP Relay (every request before WebRTC) ==
+
+browser -> stun : GET /__b/App1/dashboard\nCookie: gateway_relay=gw-x
+activate stun
+
+stun -> stun : Cookie lookup → gw-x\nBody limit: 10 MB
+
+stun -> gw : WS: http_request\n{ id: "uuid-1", method: "GET",\n  url: "/__b/App1/dashboard",\n  headers: {...}, body: "" }
+activate gw
+
+gw -> gw : HTTP to 127.0.0.1:7891\nValidate method (whitelist)\n30 s request timeout
+
+gw -> gw : Strip /__b/App1 prefix\nCheck JWT → not auth'd\n→ 302 /auth/login
+
+gw --> stun : WS: http_response\n{ id: "uuid-1", statusCode: 302,\n  headers: {Location: "/auth/login"},\n  body: "" }
+deactivate gw
+
+stun --> browser : HTTP 302 /auth/login
+deactivate stun
+
+note over stun
+  30 s relay timeout → HTTP 504
+  Max 5 000 pending requests
+  Session affinity via gateway_relay cookie
+  Pending requests cleaned up on gateway disconnect
+end note
+
+@enduml

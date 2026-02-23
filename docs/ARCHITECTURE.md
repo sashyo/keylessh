@@ -42,7 +42,10 @@ KeyleSSH is a browser-based SSH console with policy-based cryptographic authoriz
 
 - `client/`: React app (UI, xterm.js, SSH client, SFTP browser, session UX).
 - `server/`: Express API + WebSocket bridge + SQLite storage.
-- `tcp-bridge/` (optional external deployment): stateless WS↔TCP forwarder.
+- `signal-server/`: P2P signaling, HTTP relay, and TURN credential generation for punchd-bridge.
+- `bridges/`
+  - `tcp-bridge/` (optional external deployment): stateless WS↔TCP forwarder.
+  - `punchd-bridge/`: NAT-traversing HTTP reverse proxy gateway (WebRTC P2P + HTTP relay).
 - `shared/`: shared types + schema/config.
 
 ## SSH Connection Flow
@@ -276,7 +279,7 @@ This applies to everyone (including admins). If the token does not include the r
 KeyleSSH always requires a WebSocket→TCP bridge.
 
 - **Default (embedded):** `/ws/tcp` opens the TCP socket itself.
-- **External (optional):** set `BRIDGE_URL` and the server forwards the user's JWT to `tcp-bridge/`. Both endpoints independently verify JWTs against the same TideCloak JWKS.
+- **External (optional):** set `BRIDGE_URL` and the server forwards the user's JWT to `bridges/tcp-bridge/`. Both endpoints independently verify JWTs against the same TideCloak JWKS.
 
 ## Local Testing
 
@@ -291,12 +294,12 @@ npm run dev
 
 ```bash
 # Terminal 1: Start the bridge (needs data/tidecloak.json)
-cd tcp-bridge
+cd bridges/tcp-bridge
 npm install
 npm run dev
 
 # Terminal 2: Start main server with bridge URL
-cd ..
+cd ../..
 BRIDGE_URL=ws://localhost:8080 npm run dev
 ```
 

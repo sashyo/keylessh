@@ -1,0 +1,67 @@
+@startuml gateway-registration
+!theme plain
+title Gateway Registration & Client Pairing
+
+skinparam {
+  backgroundColor #0f172a
+  defaultFontColor #f8fafc
+  defaultFontName "Segoe UI"
+  defaultFontSize 12
+  SequenceLifeLineBorderColor #334155
+  SequenceLifeLineBackgroundColor #1e293b
+  ParticipantBackgroundColor #1e293b
+  ParticipantBorderColor #3b82f6
+  ParticipantFontColor #f8fafc
+  ArrowColor #94a3b8
+  ArrowFontColor #94a3b8
+  NoteBackgroundColor #1e293b
+  NoteBorderColor #334155
+  NoteFontColor #f8fafc
+  SequenceGroupBackgroundColor #1e293b
+  SequenceGroupBorderColor #334155
+  SequenceGroupFontColor #f8fafc
+  SequenceDividerBackgroundColor #334155
+  SequenceDividerFontColor #f8fafc
+}
+
+participant "Gateway" as gw #1e293b
+participant "Signal Server\n(signaling)" as stun #1e293b
+participant "Browser" as browser #1e293b
+
+== Gateway Registration ==
+
+gw -> stun : WebSocket connect
+activate stun
+
+gw -> stun : register\n{ role: "gateway", id: "gw-a1b2c3...",\n  secret: "...",\n  addresses: ["10.0.0.5:7891"],\n  metadata: { displayName, backends } }
+
+stun -> stun : Timing-safe validate\nAPI_SECRET → add to registry\n(max 100 gateways)
+
+stun --> gw : registered\n{ role: "gateway", id: "gw-a1b2c3..." }
+
+note over gw, stun
+  Gateway keeps WebSocket open.
+  Reconnects with exponential backoff
+  (1 s → 2 s → 4 s → ... → 30 s max, ±20 % jitter).
+  Resets to 1 s on successful connection.
+end note
+
+== Client Connects ==
+
+browser -> stun : WebSocket connect
+activate browser
+
+stun -> stun : Per-IP connection limit\n(max 20 per IP)
+
+browser -> stun : register\n{ role: "client", id: "client-abc" }
+
+stun -> stun : Add to registry (max 10 000)\nFind least-loaded gateway\nPair client with gateway
+
+stun --> browser : paired\n{ gateway: { id: "gw-a1b2c3...",\n  addresses: ["10.0.0.5:7891"] } }
+
+stun --> gw : paired\n{ client: { id: "client-abc",\n  reflexiveAddress: "1.2.3.4" } }
+
+deactivate stun
+deactivate browser
+
+@enduml

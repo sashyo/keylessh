@@ -1,13 +1,13 @@
 /**
- * HTTP relay that tunnels requests through WAF WebSocket connections.
+ * HTTP relay that tunnels requests through gateway WebSocket connections.
  *
  * When the signal server receives an HTTP request (not /health, not WebSocket, not API),
- * it serializes the request and sends it to a WAF over its existing WebSocket.
- * The WAF processes the request locally and sends the response back.
+ * it serializes the request and sends it to a gateway over its existing WebSocket.
+ * The gateway processes the request locally and sends the response back.
  *
  * Supports two response modes:
- * 1. Buffered: WAF sends a single `http_response` with full body (default)
- * 2. Streaming: WAF sends `http_response_start` (headers) + `http_response_chunk`*
+ * 1. Buffered: gateway sends a single `http_response` with full body (default)
+ * 2. Streaming: gateway sends `http_response_start` (headers) + `http_response_chunk`*
  *    + `http_response_end` (for SSE and long-running responses)
  */
 
@@ -21,13 +21,13 @@ const STREAM_CHUNK_TIMEOUT_MS = 60_000; // 1 min between chunks for streaming
 
 interface PendingRequest {
   res: ServerResponse;
-  wafWs: WebSocket;
+  gatewayWs: WebSocket;
   timer: ReturnType<typeof setTimeout>;
-  wafId: string;
+  gatewayId: string;
   headersSent: boolean;
 }
 
-// Pending requests waiting for WAF response
+// Pending requests waiting for gateway response
 const pending = new Map<string, PendingRequest>();
 
 // ── Cookie helpers ───────────────────────────────────────────────
@@ -64,27 +64,27 @@ function collectBody(stream: import("stream").Readable, maxBytes: number): Promi
   });
 }
 
-/** Add WAF affinity cookie + merge WAF's Set-Cookie headers */
+/** Add gateway affinity cookie + merge gateway's Set-Cookie headers */
 function addAffinityCookie(
   headers: Record<string, string | string[]>,
-  wafId: string,
+  gatewayId: string,
 ): Record<string, string | string[]> {
   const setCookies: string[] = [];
-  setCookies.push(`waf_relay=${wafId}; Path=/; HttpOnly; SameSite=None; Secure`);
+  setCookies.push(`gateway_relay=${gatewayId}; Path=/; HttpOnly; SameSite=None; Secure`);
 
-  const wafSetCookie = headers["set-cookie"];
-  if (wafSetCookie) {
-    if (Array.isArray(wafSetCookie)) {
-      setCookies.push(...wafSetCookie);
+  const gatewaySetCookie = headers["set-cookie"];
+  if (gatewaySetCookie) {
+    if (Array.isArray(gatewaySetCookie)) {
+      setCookies.push(...gatewaySetCookie);
     } else {
-      setCookies.push(wafSetCookie);
+      setCookies.push(gatewaySetCookie);
     }
   }
 
   return { ...headers, "set-cookie": setCookies };
 }
 
-/** Strip CORS headers the WAF may have added (handled at top level) */
+/** Strip CORS headers the gateway may have added (handled at top level) */
 function stripCorsHeaders(headers: Record<string, string | string[]>): void {
   for (const key of Object.keys(headers)) {
     if (key.toLowerCase().startsWith("access-control-")) {
@@ -103,8 +103,8 @@ function cleanupPending(requestId: string): void {
 
 function sendAbort(entry: PendingRequest, requestId: string): void {
   try {
-    if (entry.wafWs.readyState === entry.wafWs.OPEN) {
-      entry.wafWs.send(JSON.stringify({ type: "http_request_abort", id: requestId }));
+    if (entry.gatewayWs.readyState === entry.gatewayWs.OPEN) {
+      entry.gatewayWs.send(JSON.stringify({ type: "http_request_abort", id: requestId }));
     }
   } catch {
     // ignore
@@ -118,24 +118,24 @@ export function createHttpRelay(registry: Registry, useTls = false) {
     req: IncomingMessage,
     res: ServerResponse
   ): Promise<void> {
-    // Find target WAF (session affinity via cookie, then realm-based, then load-balance)
-    const wafId = parseCookie(req.headers.cookie, "waf_relay");
-    let waf = wafId ? registry.getWaf(wafId) : undefined;
+    // Find target gateway (session affinity via cookie, then realm-based, then load-balance)
+    const gatewayId = parseCookie(req.headers.cookie, "gateway_relay");
+    let gateway = gatewayId ? registry.getGateway(gatewayId) : undefined;
 
-    if (!waf) {
+    if (!gateway) {
       const realmMatch = req.url?.match(/\/(?:realms|resources|admin)\/([^/]+)\//);
       if (realmMatch) {
-        waf = registry.getWafByRealm(realmMatch[1]);
+        gateway = registry.getGatewayByRealm(realmMatch[1]);
       }
     }
 
-    if (!waf) {
-      waf = registry.getAvailableWaf();
+    if (!gateway) {
+      gateway = registry.getAvailableGateway();
     }
 
-    if (!waf) {
+    if (!gateway) {
       res.writeHead(503, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "No WAF available" }));
+      res.end(JSON.stringify({ error: "No gateway available" }));
       return;
     }
 
@@ -157,12 +157,12 @@ export function createHttpRelay(registry: Registry, useTls = false) {
       headers["x-forwarded-proto"] = "https";
     }
 
-    // Send to WAF via WebSocket
+    // Send to gateway via WebSocket
     try {
-      if (waf.ws.readyState !== waf.ws.OPEN) {
-        throw new Error("WAF WebSocket not open");
+      if (gateway.ws.readyState !== gateway.ws.OPEN) {
+        throw new Error("Gateway WebSocket not open");
       }
-      waf.ws.send(JSON.stringify({
+      gateway.ws.send(JSON.stringify({
         type: "http_request",
         id: requestId,
         method: req.method || "GET",
@@ -172,7 +172,7 @@ export function createHttpRelay(registry: Registry, useTls = false) {
       }));
     } catch {
       res.writeHead(502, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "Failed to reach WAF" }));
+      res.end(JSON.stringify({ error: "Failed to reach gateway" }));
       return;
     }
 
@@ -187,7 +187,7 @@ export function createHttpRelay(registry: Registry, useTls = false) {
       const entry = pending.get(requestId);
       if (entry && !entry.headersSent && !res.headersSent) {
         res.writeHead(504, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "WAF response timeout" }));
+        res.end(JSON.stringify({ error: "Gateway response timeout" }));
       } else if (entry && entry.headersSent) {
         // Streaming timed out — just end the response
         res.end();
@@ -197,9 +197,9 @@ export function createHttpRelay(registry: Registry, useTls = false) {
 
     pending.set(requestId, {
       res,
-      wafWs: waf.ws,
+      gatewayWs: gateway.ws,
       timer,
-      wafId: waf.id,
+      gatewayId: gateway.id,
       headersSent: false,
     });
 
@@ -217,7 +217,7 @@ export function createHttpRelay(registry: Registry, useTls = false) {
 // ── Response handlers (called from signaling message handler) ────
 
 /**
- * Handle a single `http_response` from a WAF (buffered mode).
+ * Handle a single `http_response` from a gateway (buffered mode).
  * Writes headers + body + end in one shot.
  */
 export function handleHttpResponse(msg: {
@@ -234,7 +234,7 @@ export function handleHttpResponse(msg: {
   if (entry.res.headersSent) return;
 
   stripCorsHeaders(msg.headers);
-  const responseHeaders = addAffinityCookie(msg.headers, entry.wafId);
+  const responseHeaders = addAffinityCookie(msg.headers, entry.gatewayId);
   const responseBody = Buffer.from(msg.body, "base64");
 
   entry.res.writeHead(msg.statusCode, responseHeaders);
@@ -261,7 +261,7 @@ export function handleHttpResponseStart(msg: {
   }, STREAM_CHUNK_TIMEOUT_MS);
 
   stripCorsHeaders(msg.headers);
-  const responseHeaders = addAffinityCookie(msg.headers, entry.wafId);
+  const responseHeaders = addAffinityCookie(msg.headers, entry.gatewayId);
 
   entry.res.writeHead(msg.statusCode, responseHeaders);
   entry.headersSent = true;
@@ -300,17 +300,17 @@ export function handleHttpResponseEnd(msg: { id: string }): void {
 }
 
 /**
- * Reject all pending requests for a given WAF.
- * Called when the WAF disconnects so requests don't wait for timeout.
+ * Reject all pending requests for a given gateway.
+ * Called when the gateway disconnects so requests don't wait for timeout.
  */
-export function rejectPendingForWaf(wafId: string): void {
+export function rejectPendingForGateway(gatewayId: string): void {
   for (const [requestId, entry] of pending) {
-    if (entry.wafId === wafId) {
+    if (entry.gatewayId === gatewayId) {
       clearTimeout(entry.timer);
       pending.delete(requestId);
       if (!entry.res.headersSent) {
         entry.res.writeHead(502, { "Content-Type": "application/json" });
-        entry.res.end(JSON.stringify({ error: "WAF disconnected" }));
+        entry.res.end(JSON.stringify({ error: "Gateway disconnected" }));
       } else {
         entry.res.end();
       }

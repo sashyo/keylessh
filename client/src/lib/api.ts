@@ -98,8 +98,8 @@ export const api = {
     list: () => apiRequest<ServerWithAccess[]>("/api/servers"),
     get: (id: string) => apiRequest<ServerWithAccess>(`/api/servers/${id}`),
   },
-  wafEndpoints: {
-    list: () => apiRequest<WafEndpoint[]>("/api/waf-endpoints"),
+  gatewayEndpoints: {
+    list: () => apiRequest<GatewayEndpoint[]>("/api/gateway-endpoints"),
   },
   sessions: {
     list: () => apiRequest<ActiveSession[]>("/api/sessions"),
@@ -443,8 +443,8 @@ export const api = {
   },
 };
 
-// WAF endpoint from signal server aggregation
-export interface WafEndpoint {
+// Gateway endpoint from signal server aggregation
+export interface GatewayEndpoint {
   id: string;
   displayName: string;
   description: string;
