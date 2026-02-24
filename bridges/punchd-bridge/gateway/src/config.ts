@@ -101,8 +101,8 @@ export function loadConfig(): ServerConfig {
       ? process.env.ICE_SERVERS.split(",")
       : deriveIceServers(stunServerUrl),
     turnServer: process.env.TURN_SERVER || undefined,
-    turnSecret: process.env.TURN_SECRET || "",
-    apiSecret: process.env.API_SECRET || "",
+    turnSecret: warnIfEmpty("TURN_SECRET"),
+    apiSecret: requireSecret("API_SECRET"),
     displayName: process.env.GATEWAY_DISPLAY_NAME || undefined,
     description: process.env.GATEWAY_DESCRIPTION || undefined,
     https: process.env.HTTPS !== "false",
@@ -193,6 +193,23 @@ function detectLanIp(): string {
     }
   }
   return "127.0.0.1";
+}
+
+function requireSecret(envVar: string): string {
+  const value = process.env[envVar] || "";
+  if (!value) {
+    console.error(`[Gateway] ${envVar} is required (cannot be empty)`);
+    process.exit(1);
+  }
+  return value;
+}
+
+function warnIfEmpty(envVar: string): string {
+  const value = process.env[envVar] || "";
+  if (!value) {
+    console.warn(`[Gateway] WARNING: ${envVar} is empty — TURN credentials will be disabled`);
+  }
+  return value;
 }
 
 function resolveTidecloakPath(): string {

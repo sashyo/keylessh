@@ -112,7 +112,14 @@ function serveFile(
   contentType: string
 ): void {
   try {
-    const content = readFileSync(join(PUBLIC_DIR, filename), "utf-8");
+    const resolved = resolve(PUBLIC_DIR, filename);
+    // Prevent path traversal — resolved path must be inside PUBLIC_DIR
+    if (!resolved.startsWith(PUBLIC_DIR + "/")) {
+      res.writeHead(403, { "Content-Type": "text/plain" });
+      res.end("Forbidden");
+      return;
+    }
+    const content = readFileSync(resolved, "utf-8");
     res.writeHead(200, { "Content-Type": contentType });
     res.end(content);
   } catch {
@@ -298,11 +305,14 @@ export function createProxy(options: ProxyOptions): {
   /** Get or create a TC session ID from the browser's tc_sess cookie. */
   function getTcSessionId(req: IncomingMessage): { id: string; isNew: boolean } {
     const cookies = parseCookies(req.headers.cookie);
-    const existing = cookies["tc_sess"] ? tcCookieJar.get(cookies["tc_sess"]) : undefined;
-    if (existing) {
+    const candidateId = cookies["tc_sess"];
+    // Only accept existing session IDs that are in the jar (ignore client-supplied unknown IDs)
+    if (candidateId && tcCookieJar.has(candidateId)) {
+      const existing = tcCookieJar.get(candidateId)!;
       existing.lastAccess = Date.now();
-      return { id: cookies["tc_sess"], isNew: false };
+      return { id: candidateId, isNew: false };
     }
+    // Always generate a new server-side ID — never trust a client-supplied value
     const id = randomBytes(16).toString("hex");
     tcCookieJar.set(id, { cookies: new Map(), lastAccess: Date.now() });
     return { id, isNew: true };
@@ -368,6 +378,7 @@ export function createProxy(options: ProxyOptions): {
   // - Set-Cookie is a forbidden header in SW's new Response()
   // - HttpOnly cookies can't be read from JS
   // So the gateway stores backend cookies server-side, keyed by JWT sub.
+  // Key format: "userId:backendName" to prevent cross-backend cookie leakage
   interface BackendSession { cookies: Map<string, string>; lastAccess: number; }
   const backendCookieJar = new Map<string, BackendSession>();
   const BACKEND_SESS_MAX_AGE = 7 * 24 * 3600; // 7 days (match backend session)
@@ -475,6 +486,13 @@ export function createProxy(options: ProxyOptions): {
       res.setHeader("X-Content-Type-Options", "nosniff");
       res.setHeader("X-Frame-Options", "SAMEORIGIN");
       res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+      res.setHeader(
+        "Content-Security-Policy",
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' wss: ws:; img-src 'self' data: blob:; media-src 'self' blob:; worker-src 'self' blob:; frame-ancestors 'self'"
+      );
+      if (isTls) {
+        res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+      }
 
       let url = req.url || "/";
       let path = url.split("?")[0];
@@ -525,10 +543,11 @@ export function createProxy(options: ProxyOptions): {
       }
 
       // WebRTC config — tells the browser how to connect for P2P upgrade
+      // TURN credentials require valid JWT to prevent bandwidth abuse
       if (path === "/webrtc-config") {
-        const proto = (req.headers["x-forwarded-proto"] as string) || "http";
+        const proto = isTls ? "https" : "http";
         const host = req.headers.host || "localhost";
-        const wsProto = proto === "https" ? "wss" : "ws";
+        const wsProto = isTls ? "wss" : "ws";
         const webrtcConfig: Record<string, unknown> = {
           signalingUrl: `${wsProto}://${host}`,
           stunServer: options.iceServers?.[0]
@@ -536,15 +555,20 @@ export function createProxy(options: ProxyOptions): {
             : null,
         };
         if (options.turnServer && options.turnSecret) {
-          // Generate ephemeral TURN credentials (valid for 1 hour)
-          const expiry = Math.floor(Date.now() / 1000) + 3600;
-          const turnUsername = `${expiry}`;
-          const turnPassword = createHmac("sha1", options.turnSecret)
-            .update(turnUsername)
-            .digest("base64");
-          webrtcConfig.turnServer = options.turnServer;
-          webrtcConfig.turnUsername = turnUsername;
-          webrtcConfig.turnPassword = turnPassword;
+          // Only serve TURN credentials to authenticated users
+          const wrtcCookies = parseCookies(req.headers.cookie);
+          const wrtcToken = wrtcCookies["gateway_access"];
+          const wrtcPayload = wrtcToken ? await options.auth.verifyToken(wrtcToken) : null;
+          if (wrtcPayload) {
+            const expiry = Math.floor(Date.now() / 1000) + 3600;
+            const turnUsername = `${expiry}`;
+            const turnPassword = createHmac("sha1", options.turnSecret)
+              .update(turnUsername)
+              .digest("base64");
+            webrtcConfig.turnServer = options.turnServer;
+            webrtcConfig.turnUsername = turnUsername;
+            webrtcConfig.turnPassword = turnPassword;
+          }
         }
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(webrtcConfig));
@@ -654,8 +678,16 @@ export function createProxy(options: ProxyOptions): {
       }
 
       // Session token — returns JWT from HttpOnly cookie so the page
-      // can include it in WebRTC DataChannel requests (SW can't read cookies)
+      // can include it in WebRTC DataChannel requests (SW can't read cookies).
+      // Requires X-Requested-With header to prevent simple cross-origin requests
+      // (XSS in a proxied backend can still call this, but it blocks CSRF from
+      // external origins since custom headers trigger a CORS preflight).
       if (path === "/auth/session-token") {
+        if (!req.headers["x-requested-with"]) {
+          res.writeHead(403, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Missing X-Requested-With header" }));
+          return;
+        }
         const cookies = parseCookies(req.headers.cookie);
         let accessToken = cookies["gateway_access"];
         if (!accessToken) {
@@ -718,7 +750,11 @@ export function createProxy(options: ProxyOptions): {
         if (logoutToken) {
           const logoutPayload = await options.auth.verifyToken(logoutToken);
           if (logoutPayload?.sub) {
-            backendCookieJar.delete(logoutPayload.sub);
+            // Clear all backend-scoped entries for this user
+            const prefix = `${logoutPayload.sub}:`;
+            for (const key of backendCookieJar.keys()) {
+              if (key.startsWith(prefix)) backendCookieJar.delete(key);
+            }
           }
         }
 
@@ -730,11 +766,18 @@ export function createProxy(options: ProxyOptions): {
           `${proto}/auth/login`
         );
 
+        // Clear tc_sess from jar and cookie
+        const logoutCookies = parseCookies(req.headers.cookie);
+        if (logoutCookies["tc_sess"]) {
+          tcCookieJar.delete(logoutCookies["tc_sess"]);
+        }
+
         res.writeHead(302, {
           Location: logoutUrl,
           "Set-Cookie": [
             clearCookieHeader("gateway_access"),
             clearCookieHeader("gateway_refresh"),
+            clearCookieHeader("tc_sess"),
           ],
         });
         res.end();
@@ -898,7 +941,9 @@ export function createProxy(options: ProxyOptions): {
       stats.totalRequests++;
 
       // Check if this backend skips gateway-side JWT validation
-      const isNoAuth = noAuthBackends.has(activeBackend || options.backends?.[0]?.name || "");
+      const isNoAuth = activeBackend
+        ? noAuthBackends.has(activeBackend)
+        : false; // default backend always requires JWT
 
       let payload: any = null;
 
@@ -1029,8 +1074,10 @@ export function createProxy(options: ProxyOptions): {
       // attach HttpOnly cookies through the SW/DataChannel path)
       const isDcRequest = !!proxyHeaders["x-dc-request"];
       delete proxyHeaders["x-dc-request"]; // don't leak to backend
+      delete proxyHeaders["x-gateway-backend"]; // don't leak routing header to backend
+      const backendKey = activeBackend || options.backends?.[0]?.name || "default";
       if (isDcRequest && payload?.sub) {
-        const jarCookies = getBackendCookieHeader(payload.sub);
+        const jarCookies = getBackendCookieHeader(`${payload.sub}:${backendKey}`);
         if (jarCookies) {
           const existing = (proxyHeaders.cookie as string) || "";
           proxyHeaders.cookie = existing ? `${existing}; ${jarCookies}` : jarCookies;
@@ -1060,7 +1107,7 @@ export function createProxy(options: ProxyOptions): {
           // takes over, preventing session mismatch.
           const cookieJarUser = payload?.sub || "";
           if (cookieJarUser && headers["set-cookie"]) {
-            storeBackendCookies(cookieJarUser, headers["set-cookie"] as string | string[]);
+            storeBackendCookies(`${cookieJarUser}:${backendKey}`, headers["set-cookie"] as string | string[]);
           }
 
           // Rewrite redirects: TideCloak → relative, localhost:PORT → /__b/<name>
@@ -1118,8 +1165,10 @@ export function createProxy(options: ProxyOptions): {
                 // /__b/<name> prefix prepended automatically.
                 // Gateway-internal paths (/auth/*, /js/*, /realms/*, etc.) are
                 // skipped — they work without the prefix.
+                // Escape backendPrefix for safe JS string interpolation (prevents XSS if name contains quotes/backslashes)
+                const safePrefix = backendPrefix.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/</g, "\\x3c");
                 const patchScript = `<script>(function(){` +
-                  `var P="${backendPrefix}";` +
+                  `var P="${safePrefix}";` +
                   `var W=/^\\/(js\\/|auth\\/|login|webrtc-config|realms\\/|resources\\/|portal|health)/;` +
                   `function n(u){return typeof u==="string"&&u[0]==="/"&&u.indexOf("/__b/")!==0&&!W.test(u)}` +
                   `var F=window.fetch;window.fetch=function(u,i){` +

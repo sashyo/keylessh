@@ -177,7 +177,7 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
     const ct = (res.headers["content-type"] || "").toLowerCase();
     return ct.includes("text/event-stream")
       || ct.includes("application/x-ndjson")
-      || ct.includes("text/plain") && res.headers["transfer-encoding"] === "chunked";
+      || (ct.includes("text/plain") && res.headers["transfer-encoding"] === "chunked");
   }
 
   // Responses smaller than this are sent as a single DC message;
@@ -230,6 +230,20 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
 
     console.log(`[WebRTC] DC request: ${method} ${url} cookie=${!!(headers as Record<string, unknown>).cookie} headers=${Object.keys(headers).join(',')}`);
 
+    // Limit decoded body size to 10MB to prevent OOM
+    const MAX_BODY_SIZE = 10 * 1024 * 1024;
+    if (bodyB64 && bodyB64.length > MAX_BODY_SIZE * 1.37) {
+      if (dc.isOpen()) {
+        dc.sendMessageBinary(Buffer.from(JSON.stringify({
+          type: "http_response",
+          id: requestId,
+          statusCode: 413,
+          headers: { "content-type": "application/json" },
+          body: Buffer.from(JSON.stringify({ error: "Request body too large" })).toString("base64"),
+        })));
+      }
+      return;
+    }
     const bodyBuf = bodyB64 ? Buffer.from(bodyB64, "base64") : undefined;
 
     // Mark as DataChannel request so the HTTP proxy can use the backend cookie jar
@@ -412,8 +426,16 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
       return;
     }
 
+    const wsPath = msg.url || "/";
+    if (!wsPath.startsWith("/") || /[\r\n]/.test(wsPath)) {
+      if (dc.isOpen()) {
+        dc.sendMessageBinary(Buffer.from(JSON.stringify({ type: "ws_error", id: msg.id, message: "Invalid URL" })));
+      }
+      return;
+    }
+
     const protocol = options.useTls ? "wss" : "ws";
-    const wsUrl = `${protocol}://127.0.0.1:${options.listenPort}${msg.url || "/"}`;
+    const wsUrl = `${protocol}://127.0.0.1:${options.listenPort}${wsPath}`;
     const headers: Record<string, string> = { ...(msg.headers || {}) };
     headers["x-dc-request"] = "1";
 

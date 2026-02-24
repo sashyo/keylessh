@@ -180,7 +180,7 @@ export function registerWithStun(
     const ct = (res.headers["content-type"] || "").toLowerCase();
     return ct.includes("text/event-stream")
       || ct.includes("application/x-ndjson")
-      || ct.includes("text/plain") && res.headers["transfer-encoding"] === "chunked";
+      || (ct.includes("text/plain") && res.headers["transfer-encoding"] === "chunked");
   }
 
   function handleHttpRequestAbort(msg: Record<string, unknown>): void {
@@ -198,6 +198,18 @@ export function registerWithStun(
     const headers = (msg.headers as Record<string, string | string[]>) || {};
     const bodyB64 = (msg.body as string) || "";
 
+    // Validate URL path — must start with / and contain no CRLF (header injection)
+    if (!url.startsWith("/") || /[\r\n]/.test(url)) {
+      safeSend({
+        type: "http_response",
+        id: requestId,
+        statusCode: 400,
+        headers: { "content-type": "application/json" },
+        body: Buffer.from(JSON.stringify({ error: "Invalid URL" })).toString("base64"),
+      });
+      return;
+    }
+
     // Validate HTTP method
     if (!ALLOWED_METHODS.has(method.toUpperCase())) {
       safeSend({
@@ -212,7 +224,28 @@ export function registerWithStun(
 
     console.log(`[STUN-Reg] Relay: ${method} ${url} (id: ${requestId})`);
 
+    // Limit decoded body size to 10MB to prevent OOM
+    const MAX_BODY_SIZE = 10 * 1024 * 1024;
+    if (bodyB64 && bodyB64.length > MAX_BODY_SIZE * 1.37) { // base64 overhead ~37%
+      safeSend({
+        type: "http_response",
+        id: requestId,
+        statusCode: 413,
+        headers: { "content-type": "application/json" },
+        body: Buffer.from(JSON.stringify({ error: "Request body too large" })).toString("base64"),
+      });
+      return;
+    }
     const bodyBuf = bodyB64 ? Buffer.from(bodyB64, "base64") : undefined;
+
+    // Sanitize relay headers — strip internal routing headers that only
+    // the gateway should set, to prevent the STUN server from injecting them
+    const sanitizedHeaders = { ...headers };
+    for (const h of ["x-forwarded-user", "x-forwarded-for", "x-forwarded-proto",
+                      "x-forwarded-host", "x-forwarded-port", "x-dc-request",
+                      "x-gateway-backend"]) {
+      delete sanitizedHeaders[h];
+    }
 
     // Make local request to the gateway's own HTTP server
     const makeReq = options.useTls ? httpsRequest : httpRequest;
@@ -222,7 +255,7 @@ export function registerWithStun(
         port: options.listenPort,
         path: url,
         method,
-        headers: headers as Record<string, string | string[]>,
+        headers: sanitizedHeaders as Record<string, string | string[]>,
         rejectUnauthorized: false, // self-signed cert
       },
       (res) => {
