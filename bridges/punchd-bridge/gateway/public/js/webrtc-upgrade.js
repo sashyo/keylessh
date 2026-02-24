@@ -7,14 +7,15 @@
  * through the DataChannel for lower latency.
  *
  * Falls back gracefully — if WebRTC fails, HTTP relay continues working.
+ * Automatically reconnects when the DataChannel or signaling drops.
  */
 
 (function () {
   "use strict";
 
-  // Configuration is injected by the gateway via a global or fetched from an endpoint
   const CONFIG_ENDPOINT = "/webrtc-config";
   const RECONNECT_DELAY = 5000;
+  const MAX_RECONNECT_DELAY = 60000;
 
   let signalingWs = null;
   let peerConnection = null;
@@ -23,6 +24,9 @@
   let pairedGatewayId = null;
   let config = null;
   let sessionToken = null;
+  let reconnectAttempts = 0;
+  let reconnectTimer = null;
+  let swRegistered = false;
 
   // Pending requests waiting for DataChannel responses
   const pendingRequests = new Map();
@@ -31,7 +35,6 @@
 
   async function init() {
     try {
-      // Fetch WebRTC config from gateway
       const res = await fetch(CONFIG_ENDPOINT);
       if (!res.ok) {
         console.log("[WebRTC] Config not available, skipping upgrade");
@@ -40,14 +43,64 @@
       config = await res.json();
       console.log("[WebRTC] Config loaded:", config);
 
-      // Fetch session token BEFORE connecting to signaling (needed for JWT auth)
       await fetchSessionToken();
-
-      // Connect to signaling server
       connectSignaling();
     } catch (err) {
       console.log("[WebRTC] Upgrade not available:", err.message);
     }
+  }
+
+  /** Clean up peer connection and DataChannel without triggering reconnect. */
+  function cleanupPeer() {
+    if (dataChannel) {
+      try { dataChannel.onclose = null; dataChannel.onerror = null; dataChannel.close(); } catch {}
+      dataChannel = null;
+    }
+    if (peerConnection) {
+      try { peerConnection.onicecandidate = null; peerConnection.onconnectionstatechange = null; peerConnection.close(); } catch {}
+      peerConnection = null;
+    }
+    pairedGatewayId = null;
+    // Reject pending requests so they fall back to relay
+    for (const [id, entry] of pendingRequests) {
+      entry.resolve({ statusCode: 502, headers: {}, body: "" });
+    }
+    pendingRequests.clear();
+    chunkedResponses.clear();
+    // Tell SW this client no longer has DataChannel
+    if (navigator.serviceWorker.controller) {
+      navigator.serviceWorker.controller.postMessage({ type: "dc_closed" });
+    }
+  }
+
+  /** Schedule a reconnection attempt with exponential backoff. */
+  function scheduleReconnect() {
+    if (reconnectTimer) return;
+    const delay = Math.min(RECONNECT_DELAY * Math.pow(1.5, reconnectAttempts), MAX_RECONNECT_DELAY);
+    reconnectAttempts++;
+    console.log(`[WebRTC] Reconnecting in ${Math.round(delay / 1000)}s (attempt ${reconnectAttempts})...`);
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      reconnect();
+    }, delay);
+  }
+
+  /** Reconnect: refresh token, new client ID, clean state, reconnect signaling. */
+  async function reconnect() {
+    cleanupPeer();
+    if (signalingWs) {
+      try { signalingWs.onclose = null; signalingWs.close(); } catch {}
+      signalingWs = null;
+    }
+    // Get a fresh session token (the old one may have expired)
+    await fetchSessionToken();
+    if (!sessionToken) {
+      console.log("[WebRTC] No session token — skipping reconnect");
+      return;
+    }
+    // New client ID so the signal server doesn't confuse with old state
+    clientId = "client-" + Math.random().toString(36).slice(2, 10);
+    connectSignaling();
   }
 
   function connectSignaling() {
@@ -58,7 +111,6 @@
 
     signalingWs.onopen = () => {
       console.log("[WebRTC] Signaling connected");
-      // Register as client with JWT for hop-by-hop auth
       if (!sessionToken) {
         console.log("[WebRTC] No session token — cannot authenticate with signal server");
         signalingWs.close();
@@ -89,7 +141,8 @@
 
     signalingWs.onclose = () => {
       console.log("[WebRTC] Signaling disconnected");
-      // Don't reconnect — the HTTP relay still works
+      cleanupPeer();
+      scheduleReconnect();
     };
 
     signalingWs.onerror = () => {
@@ -106,7 +159,6 @@
       case "paired":
         pairedGatewayId = msg.gateway?.id;
         console.log("[WebRTC] Paired with gateway:", pairedGatewayId);
-        // Start WebRTC handshake
         startWebRTC();
         break;
 
@@ -142,9 +194,11 @@
   function startWebRTC() {
     if (!pairedGatewayId) return;
 
+    // Clean up any previous peer before starting fresh
+    cleanupPeer();
+
     console.log("[WebRTC] Starting WebRTC handshake with gateway:", pairedGatewayId);
 
-    // Create peer connection with STUN/TURN servers
     const iceServers = [];
     if (config.stunServer) {
       iceServers.push({ urls: config.stunServer });
@@ -162,16 +216,14 @@
       iceServers: iceServers.length > 0 ? iceServers : undefined,
     });
 
-    // Create DataChannel
     dataChannel = peerConnection.createDataChannel("http-tunnel", {
       ordered: true,
     });
 
     dataChannel.onopen = async () => {
       console.log("[WebRTC] DataChannel OPEN — direct connection established!");
-      // Session token was already fetched before signaling connection
+      reconnectAttempts = 0; // Reset backoff on success
       await registerServiceWorker();
-      // Tell SW this client has an active DataChannel
       if (navigator.serviceWorker.controller) {
         navigator.serviceWorker.controller.postMessage({ type: "dc_ready" });
       }
@@ -182,14 +234,12 @@
         const msg = JSON.parse(event.data);
 
         if (msg.type === "http_response" && msg.id) {
-          // Single (non-chunked) response
           const pending = pendingRequests.get(msg.id);
           if (pending) {
             pendingRequests.delete(msg.id);
             pending.resolve(msg);
           }
         } else if (msg.type === "http_response_start" && msg.id) {
-          // Start of a chunked response — store metadata
           chunkedResponses.set(msg.id, {
             statusCode: msg.statusCode,
             headers: msg.headers,
@@ -198,7 +248,6 @@
             chunks: new Array(msg.totalChunks),
           });
         } else if (msg.type === "http_response_chunk" && msg.id) {
-          // Body chunk — store and check completion
           const entry = chunkedResponses.get(msg.id);
           if (entry) {
             entry.chunks[msg.index] = msg.data;
@@ -224,9 +273,10 @@
 
     dataChannel.onclose = () => {
       console.log("[WebRTC] DataChannel closed");
-      // Tell SW this client no longer has DataChannel
-      if (navigator.serviceWorker.controller) {
-        navigator.serviceWorker.controller.postMessage({ type: "dc_closed" });
+      cleanupPeer();
+      // Only reconnect if signaling is still open (otherwise signaling.onclose handles it)
+      if (signalingWs && signalingWs.readyState === WebSocket.OPEN) {
+        scheduleReconnect();
       }
     };
 
@@ -256,12 +306,13 @@
       }
     };
 
-    peerConnection.onicegatheringstatechange = () => {
-      console.log("[WebRTC] ICE gathering state:", peerConnection.iceGatheringState);
-    };
-
     peerConnection.oniceconnectionstatechange = () => {
       console.log("[WebRTC] ICE connection state:", peerConnection.iceConnectionState);
+      if (peerConnection.iceConnectionState === "failed") {
+        console.log("[WebRTC] ICE failed — closing peer");
+        cleanupPeer();
+        scheduleReconnect();
+      }
     };
 
     peerConnection.onconnectionstatechange = () => {
@@ -290,22 +341,20 @@
   }
 
   async function registerServiceWorker() {
-    if (!("serviceWorker" in navigator)) {
-      console.log("[WebRTC] Service Worker not supported");
+    if (swRegistered || !("serviceWorker" in navigator)) {
       return;
     }
 
     try {
       await navigator.serviceWorker.register("/js/sw.js", { scope: "/", updateViaCache: "none" });
       console.log("[WebRTC] Service Worker registered");
+      swRegistered = true;
 
-      // Listen for fetch requests from Service Worker
       navigator.serviceWorker.addEventListener("message", (event) => {
         if (event.data?.type === "dc_fetch") {
           handleSwFetch(event.data, event.ports[0]);
         }
       });
-      // Start receiving messages — addEventListener alone queues them
       navigator.serviceWorker.startMessages();
     } catch (err) {
       console.error("[WebRTC] Service Worker registration failed:", err);
@@ -317,6 +366,7 @@
       const res = await fetch("/auth/session-token");
       if (!res.ok) {
         console.log("[WebRTC] No session token available");
+        sessionToken = null;
         return;
       }
       const data = await res.json();
@@ -324,6 +374,7 @@
       console.log("[WebRTC] Session token acquired");
     } catch (err) {
       console.log("[WebRTC] Failed to fetch session token:", err.message);
+      sessionToken = null;
     }
   }
 
@@ -347,7 +398,6 @@
         : `gateway_access=${sessionToken}`;
     }
 
-    // Send HTTP request over DataChannel
     dataChannel.send(
       JSON.stringify({
         type: "http_request",
@@ -359,7 +409,6 @@
       })
     );
 
-    // Wait for response
     const timeout = setTimeout(() => {
       pendingRequests.delete(requestId);
       responsePort.postMessage({ error: "Timeout" });

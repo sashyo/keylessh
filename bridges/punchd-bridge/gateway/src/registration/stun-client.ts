@@ -42,9 +42,11 @@ export function registerWithStun(
 ): StunRegistration {
   let ws: WebSocket | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let pingTimer: ReturnType<typeof setInterval> | null = null;
   let closed = false;
   let peerHandler: PeerHandler | null = null;
   let reconnectDelay = 1000; // Exponential backoff: 1s → 30s max
+  let pongReceived = true;
 
   function connect() {
     if (closed) return;
@@ -55,6 +57,19 @@ export function registerWithStun(
     ws.on("open", () => {
       console.log("[STUN-Reg] Connected to STUN server");
       reconnectDelay = 1000; // Reset backoff on successful connection
+
+      // Start client-side ping heartbeat to detect dead connections early
+      pongReceived = true;
+      if (pingTimer) clearInterval(pingTimer);
+      pingTimer = setInterval(() => {
+        if (!pongReceived) {
+          console.warn("[STUN-Reg] No pong received — connection dead, reconnecting");
+          ws?.terminate();
+          return;
+        }
+        pongReceived = false;
+        ws?.ping();
+      }, 30_000);
 
       // Initialize WebRTC peer handler
       if (options.iceServers?.length) {
@@ -81,6 +96,8 @@ export function registerWithStun(
         metadata: options.metadata,
       });
     });
+
+    ws.on("pong", () => { pongReceived = true; });
 
     ws.on("message", (data) => {
       let msg: Record<string, unknown>;
@@ -135,6 +152,7 @@ export function registerWithStun(
 
     ws.on("close", () => {
       console.log("[STUN-Reg] Disconnected from STUN server");
+      if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
       scheduleReconnect();
     });
 
@@ -267,6 +285,7 @@ export function registerWithStun(
     close() {
       closed = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
       peerHandler?.cleanup();
       peerHandler = null;
       if (ws) {

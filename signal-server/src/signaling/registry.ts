@@ -84,12 +84,18 @@ export function createRegistry(): Registry {
         ws.close(1013, "Too many gateways registered");
         return;
       }
+      // Clean up stale WS entry if this gateway is re-registering (e.g. after reconnect)
+      const existing = gateways.get(id);
+      if (existing && existing.ws !== ws) {
+        wsByWs.delete(existing.ws);
+        try { existing.ws.terminate(); } catch {}
+      }
       const gateway: RegisteredGateway = {
         id,
         addresses,
         ws,
         registeredAt: Date.now(),
-        pairedClients: new Set(),
+        pairedClients: existing?.pairedClients || new Set(),
         metadata: metadata || {},
       };
       gateways.set(id, gateway);
