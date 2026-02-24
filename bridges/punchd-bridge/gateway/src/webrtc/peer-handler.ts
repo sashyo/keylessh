@@ -12,6 +12,7 @@ import { createHmac } from "crypto";
 import { PeerConnection, DataChannel } from "node-datachannel";
 import { request as httpRequest } from "http";
 import { request as httpsRequest } from "https";
+import WebSocket from "ws";
 
 export interface PeerHandlerOptions {
   /** STUN server for ICE, e.g. "stun:relay.example.com:3478" */
@@ -127,12 +128,23 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
 
     pc.onDataChannel((dc) => {
       console.log(`[WebRTC] DataChannel opened with client: ${clientId} (label: ${dc.getLabel()})`);
+      const wsConnections = new Map<string, WebSocket>();
 
       dc.onMessage((msg) => {
         try {
           const parsed = JSON.parse(typeof msg === "string" ? msg : msg.toString());
           if (parsed.type === "http_request") {
             handleDataChannelRequest(dc, parsed);
+          } else if (parsed.type === "ws_open") {
+            handleWsOpen(dc, parsed, wsConnections);
+          } else if (parsed.type === "ws_message") {
+            const ws = wsConnections.get(parsed.id);
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              ws.send(parsed.binary ? Buffer.from(parsed.data, "base64") : parsed.data);
+            }
+          } else if (parsed.type === "ws_close") {
+            const ws = wsConnections.get(parsed.id);
+            if (ws) ws.close(parsed.code || 1000, parsed.reason || "");
           }
         } catch {
           console.error("[WebRTC] Failed to parse DataChannel message");
@@ -141,6 +153,10 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
 
       dc.onClosed(() => {
         console.log(`[WebRTC] DataChannel closed with client: ${clientId}`);
+        for (const [, ws] of wsConnections) {
+          try { ws.close(); } catch {}
+        }
+        wsConnections.clear();
       });
     });
 
@@ -156,9 +172,21 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
     }
   }
 
+  /** Content types that should be streamed chunk-by-chunk instead of buffered */
+  function isStreamingResponse(res: import("http").IncomingMessage): boolean {
+    const ct = (res.headers["content-type"] || "").toLowerCase();
+    return ct.includes("text/event-stream")
+      || ct.includes("application/x-ndjson")
+      || ct.includes("text/plain") && res.headers["transfer-encoding"] === "chunked";
+  }
+
+  // 200KB threshold — stay well under the ~256KB SCTP limit
+  const MAX_SINGLE_MSG = 200_000;
+  const BODY_CHUNK_SIZE = 150_000;
+
   /**
    * Handle an HTTP request received over DataChannel.
-   * Same format as the WebSocket HTTP relay.
+   * Supports both buffered (small responses) and streaming (SSE, NDJSON) modes.
    */
   function handleDataChannelRequest(
     dc: DataChannel,
@@ -202,59 +230,82 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
         rejectUnauthorized: false,
       },
       (res) => {
-        const chunks: Buffer[] = [];
-        res.on("data", (chunk: Buffer) => chunks.push(chunk));
-        res.on("end", () => {
-          const responseBody = Buffer.concat(chunks).toString("base64");
-
-          const responseHeaders: Record<string, string | string[]> = {};
-          for (const [key, value] of Object.entries(res.headers)) {
-            if (value !== undefined) {
-              responseHeaders[key] = value as string | string[];
-            }
+        const responseHeaders: Record<string, string | string[]> = {};
+        for (const [key, value] of Object.entries(res.headers)) {
+          if (value !== undefined) {
+            responseHeaders[key] = value as string | string[];
           }
+        }
 
+        if (isStreamingResponse(res)) {
+          // Streaming mode: forward chunks as they arrive (SSE, NDJSON, etc.)
+          console.log(`[WebRTC] Streaming DC response: ${res.statusCode} for ${url}`);
           if (!dc.isOpen()) return;
-
-          // 200KB threshold — stay well under the ~256KB SCTP limit
-          const MAX_SINGLE_MSG = 200_000;
-          const BODY_CHUNK_SIZE = 150_000;
-
-          const response = JSON.stringify({
-            type: "http_response",
+          dc.sendMessage(JSON.stringify({
+            type: "http_response_start",
             id: requestId,
-            statusCode: res.statusCode || 500,
+            statusCode: res.statusCode || 200,
             headers: responseHeaders,
-            body: responseBody,
+            streaming: true,
+          }));
+
+          res.on("data", (chunk: Buffer) => {
+            if (!dc.isOpen()) { req.destroy(); return; }
+            dc.sendMessage(JSON.stringify({
+              type: "http_response_chunk",
+              id: requestId,
+              data: chunk.toString("base64"),
+            }));
           });
 
-          if (response.length <= MAX_SINGLE_MSG) {
-            // Small enough — send as a single message
-            dc.sendMessage(response);
-          } else {
-            // Chunk the body across multiple messages
-            const totalChunks = Math.ceil(responseBody.length / BODY_CHUNK_SIZE);
-            console.log(`[WebRTC] Chunking ${method} ${url}: ${responseBody.length} bytes b64 → ${totalChunks} chunks`);
+          res.on("end", () => {
+            if (dc.isOpen()) {
+              dc.sendMessage(JSON.stringify({ type: "http_response_end", id: requestId }));
+            }
+          });
+        } else {
+          // Buffered mode: collect full response, then send (chunked if large)
+          const chunks: Buffer[] = [];
+          res.on("data", (chunk: Buffer) => chunks.push(chunk));
+          res.on("end", () => {
+            const responseBody = Buffer.concat(chunks).toString("base64");
+            if (!dc.isOpen()) return;
 
-            dc.sendMessage(JSON.stringify({
-              type: "http_response_start",
+            const response = JSON.stringify({
+              type: "http_response",
               id: requestId,
               statusCode: res.statusCode || 500,
               headers: responseHeaders,
-              totalChunks,
-            }));
+              body: responseBody,
+            });
 
-            for (let i = 0; i < totalChunks; i++) {
-              if (!dc.isOpen()) break;
+            if (response.length <= MAX_SINGLE_MSG) {
+              dc.sendMessage(response);
+            } else {
+              // Chunk the body across multiple messages for large responses
+              const totalChunks = Math.ceil(responseBody.length / BODY_CHUNK_SIZE);
+              console.log(`[WebRTC] Chunking ${method} ${url}: ${responseBody.length} bytes b64 → ${totalChunks} chunks`);
+
               dc.sendMessage(JSON.stringify({
-                type: "http_response_chunk",
+                type: "http_response_start",
                 id: requestId,
-                index: i,
-                data: responseBody.slice(i * BODY_CHUNK_SIZE, (i + 1) * BODY_CHUNK_SIZE),
+                statusCode: res.statusCode || 500,
+                headers: responseHeaders,
+                totalChunks,
               }));
+
+              for (let i = 0; i < totalChunks; i++) {
+                if (!dc.isOpen()) break;
+                dc.sendMessage(JSON.stringify({
+                  type: "http_response_chunk",
+                  id: requestId,
+                  index: i,
+                  data: responseBody.slice(i * BODY_CHUNK_SIZE, (i + 1) * BODY_CHUNK_SIZE),
+                }));
+              }
             }
-          }
-        });
+          });
+        }
       }
     );
 
@@ -289,6 +340,64 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
     } else {
       req.end();
     }
+  }
+
+  const MAX_WS_PER_DC = 50;
+
+  function handleWsOpen(
+    dc: DataChannel,
+    msg: { id: string; url?: string; protocols?: string[]; headers?: Record<string, string> },
+    wsConnections: Map<string, WebSocket>
+  ): void {
+    if (wsConnections.size >= MAX_WS_PER_DC) {
+      if (dc.isOpen()) {
+        dc.sendMessage(JSON.stringify({ type: "ws_error", id: msg.id, message: "Too many WebSocket connections" }));
+      }
+      return;
+    }
+
+    const protocol = options.useTls ? "wss" : "ws";
+    const wsUrl = `${protocol}://127.0.0.1:${options.listenPort}${msg.url || "/"}`;
+    const headers: Record<string, string> = { ...(msg.headers || {}) };
+    headers["x-dc-request"] = "1";
+
+    const ws = new WebSocket(wsUrl, msg.protocols || [], {
+      rejectUnauthorized: false,
+      headers,
+    });
+
+    ws.on("open", () => {
+      if (dc.isOpen()) {
+        dc.sendMessage(JSON.stringify({ type: "ws_opened", id: msg.id, protocol: ws.protocol || "" }));
+      }
+    });
+
+    ws.on("message", (data: Buffer, isBinary: boolean) => {
+      if (!dc.isOpen()) { ws.close(); return; }
+      dc.sendMessage(JSON.stringify({
+        type: "ws_message",
+        id: msg.id,
+        data: isBinary ? data.toString("base64") : data.toString("utf-8"),
+        binary: isBinary,
+      }));
+    });
+
+    ws.on("close", (code: number, reason: Buffer) => {
+      wsConnections.delete(msg.id);
+      if (dc.isOpen()) {
+        dc.sendMessage(JSON.stringify({ type: "ws_close", id: msg.id, code, reason: reason.toString() }));
+      }
+    });
+
+    ws.on("error", (err: Error) => {
+      wsConnections.delete(msg.id);
+      if (dc.isOpen()) {
+        dc.sendMessage(JSON.stringify({ type: "ws_error", id: msg.id, message: err.message }));
+      }
+    });
+
+    wsConnections.set(msg.id, ws);
+    console.log(`[WebRTC] WS tunnel opened: ${msg.url} (id: ${msg.id})`);
   }
 
   function cleanup(): void {
