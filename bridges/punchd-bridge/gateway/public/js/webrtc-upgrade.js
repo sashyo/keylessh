@@ -14,6 +14,7 @@
   "use strict";
 
   const CONFIG_ENDPOINT = "/webrtc-config";
+  const NativeWebSocket = window.WebSocket;
   const RECONNECT_DELAY = 5000;
   const MAX_RECONNECT_DELAY = 60000;
 
@@ -32,6 +33,10 @@
   const pendingRequests = new Map();
   // In-flight chunked responses being reassembled
   const chunkedResponses = new Map();
+  // MessagePorts for streaming responses (SSE, NDJSON) back to SW
+  const streamingPorts = new Map();
+  // Active WebSocket connections tunneled through DataChannel
+  const dcWebSockets = new Map();
 
   async function init() {
     try {
@@ -67,6 +72,11 @@
     }
     pendingRequests.clear();
     chunkedResponses.clear();
+    // Close all DataChannel-tunneled WebSocket connections
+    for (const [id, ws] of dcWebSockets) {
+      ws._fireClose(1001, "DataChannel closed");
+    }
+    dcWebSockets.clear();
     // Tell SW this client no longer has DataChannel
     if (navigator.serviceWorker.controller) {
       navigator.serviceWorker.controller.postMessage({ type: "dc_closed" });
@@ -107,7 +117,7 @@
     if (!config?.signalingUrl) return;
 
     console.log("[WebRTC] Connecting to signaling:", config.signalingUrl);
-    signalingWs = new WebSocket(config.signalingUrl);
+    signalingWs = new NativeWebSocket(config.signalingUrl);
 
     signalingWs.onopen = () => {
       console.log("[WebRTC] Signaling connected");
@@ -223,6 +233,7 @@
     dataChannel.onopen = async () => {
       console.log("[WebRTC] DataChannel OPEN — direct connection established!");
       reconnectAttempts = 0; // Reset backoff on success
+      installWebSocketShim();
       await registerServiceWorker();
       if (navigator.serviceWorker.controller) {
         navigator.serviceWorker.controller.postMessage({ type: "dc_ready" });
@@ -234,22 +245,48 @@
         const msg = JSON.parse(event.data);
 
         if (msg.type === "http_response" && msg.id) {
+          // Single buffered response
           const pending = pendingRequests.get(msg.id);
           if (pending) {
             pendingRequests.delete(msg.id);
             pending.resolve(msg);
           }
         } else if (msg.type === "http_response_start" && msg.id) {
-          chunkedResponses.set(msg.id, {
-            statusCode: msg.statusCode,
-            headers: msg.headers,
-            totalChunks: msg.totalChunks,
-            received: 0,
-            chunks: new Array(msg.totalChunks),
-          });
+          if (msg.streaming) {
+            // True streaming (SSE, NDJSON) — forward chunks progressively to SW
+            const pending = pendingRequests.get(msg.id);
+            if (pending) {
+              pendingRequests.delete(msg.id);
+              pending.resolve({
+                statusCode: msg.statusCode,
+                headers: msg.headers,
+                streaming: true,
+              });
+            }
+            // Store stream entry so subsequent chunks/end get forwarded
+            chunkedResponses.set(msg.id, { streaming: true });
+          } else {
+            // Size-chunked reassembly (large buffered responses)
+            chunkedResponses.set(msg.id, {
+              statusCode: msg.statusCode,
+              headers: msg.headers,
+              totalChunks: msg.totalChunks,
+              received: 0,
+              chunks: new Array(msg.totalChunks),
+            });
+          }
         } else if (msg.type === "http_response_chunk" && msg.id) {
           const entry = chunkedResponses.get(msg.id);
-          if (entry) {
+          if (!entry) return;
+
+          if (entry.streaming) {
+            // Forward chunk to SW via the streaming port
+            const port = streamingPorts.get(msg.id);
+            if (port) {
+              port.postMessage({ type: "chunk", data: msg.data });
+            }
+          } else {
+            // Size-chunked reassembly
             entry.chunks[msg.index] = msg.data;
             entry.received++;
             if (entry.received === entry.totalChunks) {
@@ -265,6 +302,25 @@
               }
             }
           }
+        } else if (msg.type === "http_response_end" && msg.id) {
+          chunkedResponses.delete(msg.id);
+          const port = streamingPorts.get(msg.id);
+          if (port) {
+            port.postMessage({ type: "end" });
+            streamingPorts.delete(msg.id);
+          }
+        } else if (msg.type === "ws_opened" && msg.id) {
+          const ws = dcWebSockets.get(msg.id);
+          if (ws) ws._fireOpen(msg.protocol);
+        } else if (msg.type === "ws_message" && msg.id) {
+          const ws = dcWebSockets.get(msg.id);
+          if (ws) ws._fireMessage(msg.data, msg.binary);
+        } else if (msg.type === "ws_close" && msg.id) {
+          const ws = dcWebSockets.get(msg.id);
+          if (ws) ws._fireClose(msg.code, msg.reason);
+        } else if (msg.type === "ws_error" && msg.id) {
+          const ws = dcWebSockets.get(msg.id);
+          if (ws) ws._fireError(msg.message);
         }
       } catch {
         console.error("[WebRTC] Failed to parse DataChannel message");
@@ -411,19 +467,168 @@
 
     const timeout = setTimeout(() => {
       pendingRequests.delete(requestId);
+      streamingPorts.delete(requestId);
       responsePort.postMessage({ error: "Timeout" });
     }, 15000);
 
     pendingRequests.set(requestId, {
       resolve: (msg) => {
         clearTimeout(timeout);
-        responsePort.postMessage({
-          statusCode: msg.statusCode,
-          headers: msg.headers,
-          body: msg.body,
-        });
+        if (msg.streaming) {
+          // Streaming response (SSE, NDJSON) — keep the port open for chunks
+          streamingPorts.set(requestId, responsePort);
+          responsePort.postMessage({
+            statusCode: msg.statusCode,
+            headers: msg.headers,
+            streaming: true,
+          });
+        } else {
+          responsePort.postMessage({
+            statusCode: msg.statusCode,
+            headers: msg.headers,
+            body: msg.body,
+          });
+        }
       },
     });
+  }
+
+  // --- WebSocket shim: tunnels same-origin WS connections through DataChannel ---
+
+  function bufToBase64(bytes) {
+    let binary = "";
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    return btoa(binary);
+  }
+
+  class DCWebSocket {
+    constructor(url, protocols) {
+      this._id = crypto.randomUUID();
+      this._listeners = {};
+      this.readyState = 0; // CONNECTING
+      this.protocol = "";
+      this.extensions = "";
+      this.bufferedAmount = 0;
+      this.binaryType = "blob";
+      this.onopen = null;
+      this.onmessage = null;
+      this.onclose = null;
+      this.onerror = null;
+
+      const parsed = new URL(url, window.location.origin);
+      this.url = parsed.href;
+
+      // Prepend /__b/<name> prefix from current page if needed
+      let wsPath = parsed.pathname + parsed.search;
+      if (!wsPath.startsWith("/__b/")) {
+        const prefixMatch = window.location.pathname.match(/^\/__b\/[^/]+/);
+        if (prefixMatch) wsPath = prefixMatch[0] + wsPath;
+      }
+
+      dcWebSockets.set(this._id, this);
+
+      const headers = {};
+      if (sessionToken) {
+        headers.cookie = "gateway_access=" + sessionToken;
+      }
+
+      dataChannel.send(JSON.stringify({
+        type: "ws_open",
+        id: this._id,
+        url: wsPath,
+        protocols: Array.isArray(protocols) ? protocols : protocols ? [protocols] : [],
+        headers: headers,
+      }));
+    }
+
+    addEventListener(type, fn) {
+      if (!this._listeners[type]) this._listeners[type] = [];
+      if (this._listeners[type].indexOf(fn) === -1) this._listeners[type].push(fn);
+    }
+
+    removeEventListener(type, fn) {
+      if (!this._listeners[type]) return;
+      this._listeners[type] = this._listeners[type].filter(function (f) { return f !== fn; });
+    }
+
+    _dispatch(type, event) {
+      if (typeof this["on" + type] === "function") this["on" + type](event);
+      const listeners = this._listeners[type];
+      if (listeners) listeners.forEach(function (fn) { fn(event); });
+    }
+
+    send(data) {
+      if (this.readyState !== 1) throw new DOMException("WebSocket not open", "InvalidStateError");
+      if (typeof data === "string") {
+        dataChannel.send(JSON.stringify({ type: "ws_message", id: this._id, data: data, binary: false }));
+      } else if (data instanceof ArrayBuffer) {
+        dataChannel.send(JSON.stringify({ type: "ws_message", id: this._id, data: bufToBase64(new Uint8Array(data)), binary: true }));
+      } else if (ArrayBuffer.isView(data)) {
+        dataChannel.send(JSON.stringify({ type: "ws_message", id: this._id, data: bufToBase64(new Uint8Array(data.buffer, data.byteOffset, data.byteLength)), binary: true }));
+      } else if (data instanceof Blob) {
+        const wsId = this._id;
+        const ws = this;
+        data.arrayBuffer().then(function (buf) {
+          if (ws.readyState !== 1) return;
+          dataChannel.send(JSON.stringify({ type: "ws_message", id: wsId, data: bufToBase64(new Uint8Array(buf)), binary: true }));
+        });
+      }
+    }
+
+    close(code, reason) {
+      if (this.readyState >= 2) return;
+      this.readyState = 2; // CLOSING
+      if (dataChannel && dataChannel.readyState === "open") {
+        dataChannel.send(JSON.stringify({ type: "ws_close", id: this._id, code: code || 1000, reason: reason || "" }));
+      }
+    }
+
+    _fireOpen(protocol) {
+      this.readyState = 1;
+      this.protocol = protocol || "";
+      this._dispatch("open", new Event("open"));
+    }
+
+    _fireMessage(data, binary) {
+      let payload;
+      if (binary) {
+        const raw = atob(data);
+        const bytes = new Uint8Array(raw.length);
+        for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+        payload = this.binaryType === "arraybuffer" ? bytes.buffer : new Blob([bytes]);
+      } else {
+        payload = data;
+      }
+      this._dispatch("message", new MessageEvent("message", { data: payload }));
+    }
+
+    _fireClose(code, reason) {
+      if (this.readyState === 3) return;
+      this.readyState = 3;
+      dcWebSockets.delete(this._id);
+      this._dispatch("close", new CloseEvent("close", { code: code || 1000, reason: reason || "", wasClean: code !== 1006 }));
+    }
+
+    _fireError(message) {
+      dcWebSockets.delete(this._id);
+      this._dispatch("error", new Event("error"));
+      this._fireClose(1006, message || "Connection failed");
+    }
+  }
+
+  function installWebSocketShim() {
+    window.WebSocket = function (url, protocols) {
+      const parsed = new URL(url, window.location.origin);
+      if (parsed.origin !== window.location.origin || !dataChannel || dataChannel.readyState !== "open") {
+        return new NativeWebSocket(url, protocols);
+      }
+      return new DCWebSocket(url, protocols);
+    };
+    window.WebSocket.CONNECTING = 0;
+    window.WebSocket.OPEN = 1;
+    window.WebSocket.CLOSING = 2;
+    window.WebSocket.CLOSED = 3;
+    window.WebSocket.prototype = NativeWebSocket.prototype;
   }
 
   // Start upgrade after page load

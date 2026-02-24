@@ -167,10 +167,6 @@ async function handleViaDataChannel(clientId, request) {
           return;
         }
 
-        var bodyBytes = Uint8Array.from(atob(e.data.body), function (c) {
-          return c.charCodeAt(0);
-        });
-
         var responseHeaders = new Headers();
         for (var key in e.data.headers || {}) {
           try {
@@ -184,6 +180,42 @@ async function handleViaDataChannel(clientId, request) {
             // skip forbidden headers
           }
         }
+
+        if (e.data.streaming) {
+          // Streaming response (SSE, NDJSON) — return a ReadableStream
+          // that receives chunks progressively from the page via the port
+          var stream = new ReadableStream({
+            start: function (controller) {
+              mc.port1.onmessage = function (ev) {
+                if (ev.data.type === "chunk" && ev.data.data) {
+                  var raw = atob(ev.data.data);
+                  var bytes = new Uint8Array(raw.length);
+                  for (var i = 0; i < raw.length; i++) {
+                    bytes[i] = raw.charCodeAt(i);
+                  }
+                  controller.enqueue(bytes);
+                } else if (ev.data.type === "end") {
+                  controller.close();
+                }
+              };
+            },
+            cancel: function () {
+              mc.port1.onmessage = null;
+            },
+          });
+
+          resolve(
+            new Response(stream, {
+              status: e.data.statusCode,
+              headers: responseHeaders,
+            })
+          );
+          return;
+        }
+
+        var bodyBytes = Uint8Array.from(atob(e.data.body || ""), function (c) {
+          return c.charCodeAt(0);
+        });
 
         resolve(
           new Response(bodyBytes, {

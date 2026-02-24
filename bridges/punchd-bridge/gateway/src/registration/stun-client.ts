@@ -144,6 +144,10 @@ export function registerWithStun(
           handleHttpRequest(msg);
           break;
 
+        case "http_request_abort":
+          handleHttpRequestAbort(msg);
+          break;
+
         case "error":
           console.error(`[STUN-Reg] Error: ${msg.message}`);
           break;
@@ -168,6 +172,25 @@ export function registerWithStun(
    */
   const ALLOWED_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]);
 
+  // Track in-flight requests so the signal server can abort them (e.g. client disconnected)
+  const pendingRequests = new Map<string, import("http").ClientRequest>();
+
+  /** Content types that should be streamed chunk-by-chunk instead of buffered */
+  function isStreamingResponse(res: import("http").IncomingMessage): boolean {
+    const ct = (res.headers["content-type"] || "").toLowerCase();
+    return ct.includes("text/event-stream")
+      || ct.includes("application/x-ndjson")
+      || ct.includes("text/plain") && res.headers["transfer-encoding"] === "chunked";
+  }
+
+  function handleHttpRequestAbort(msg: Record<string, unknown>): void {
+    const req = pendingRequests.get(msg.id as string);
+    if (req) {
+      req.destroy();
+      pendingRequests.delete(msg.id as string);
+    }
+  }
+
   function handleHttpRequest(msg: Record<string, unknown>): void {
     const requestId = msg.id as string;
     const method = (msg.method as string) || "GET";
@@ -191,7 +214,7 @@ export function registerWithStun(
 
     const bodyBuf = bodyB64 ? Buffer.from(bodyB64, "base64") : undefined;
 
-    // Make local request to the gateway's own listen port
+    // Make local request to the gateway's own HTTP server
     const makeReq = options.useTls ? httpsRequest : httpRequest;
     const req = makeReq(
       {
@@ -203,33 +226,67 @@ export function registerWithStun(
         rejectUnauthorized: false, // self-signed cert
       },
       (res) => {
-        const chunks: Buffer[] = [];
-        res.on("data", (chunk: Buffer) => chunks.push(chunk));
-        res.on("end", () => {
-          const responseBody = Buffer.concat(chunks).toString("base64");
-
-          // Normalize headers: convert arrays for Set-Cookie
-          const responseHeaders: Record<string, string | string[]> = {};
-          for (const [key, value] of Object.entries(res.headers)) {
-            if (value !== undefined) {
-              responseHeaders[key] = value as string | string[];
-            }
+        // Normalize response headers
+        const responseHeaders: Record<string, string | string[]> = {};
+        for (const [key, value] of Object.entries(res.headers)) {
+          if (value !== undefined) {
+            responseHeaders[key] = value as string | string[];
           }
+        }
 
-          console.log(`[STUN-Reg] Relay response: ${res.statusCode} for ${url} (${responseBody.length} bytes b64)`);
+        if (isStreamingResponse(res)) {
+          // Streaming mode: forward chunks as they arrive (SSE, NDJSON, etc.)
+          console.log(`[STUN-Reg] Streaming relay: ${res.statusCode} for ${url}`);
           safeSend({
-            type: "http_response",
+            type: "http_response_start",
             id: requestId,
-            statusCode: res.statusCode || 500,
+            statusCode: res.statusCode || 200,
             headers: responseHeaders,
-            body: responseBody,
           });
+
+          res.on("data", (chunk: Buffer) => {
+            safeSend({
+              type: "http_response_chunk",
+              id: requestId,
+              data: chunk.toString("base64"),
+            });
+          });
+
+          res.on("end", () => {
+            pendingRequests.delete(requestId);
+            safeSend({ type: "http_response_end", id: requestId });
+          });
+        } else {
+          // Buffered mode: collect full response then send
+          const chunks: Buffer[] = [];
+          res.on("data", (chunk: Buffer) => chunks.push(chunk));
+          res.on("end", () => {
+            pendingRequests.delete(requestId);
+            const responseBody = Buffer.concat(chunks).toString("base64");
+            console.log(`[STUN-Reg] Relay response: ${res.statusCode} for ${url} (${responseBody.length} bytes b64)`);
+            safeSend({
+              type: "http_response",
+              id: requestId,
+              statusCode: res.statusCode || 500,
+              headers: responseHeaders,
+              body: responseBody,
+            });
+          });
+        }
+
+        res.on("error", () => {
+          pendingRequests.delete(requestId);
         });
       }
     );
 
+    pendingRequests.set(requestId, req);
+
+    // Timeout only applies to non-streaming (initial response). Streaming responses
+    // clear the timeout once headers arrive (handled by node http client).
     req.setTimeout(30000, () => {
       req.destroy();
+      pendingRequests.delete(requestId);
       safeSend({
         type: "http_response",
         id: requestId,
@@ -240,6 +297,7 @@ export function registerWithStun(
     });
 
     req.on("error", (err) => {
+      pendingRequests.delete(requestId);
       console.error(`[STUN-Reg] Relay request failed: ${err.message}`);
       safeSend({
         type: "http_response",
