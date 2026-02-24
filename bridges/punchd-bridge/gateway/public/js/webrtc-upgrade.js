@@ -29,6 +29,7 @@
   let reconnectAttempts = 0;
   let reconnectTimer = null;
   let swRegistered = false;
+  let dcReadySignaled = false;
 
   // Pending requests waiting for DataChannel responses
   const pendingRequests = new Map();
@@ -85,6 +86,7 @@
     }
     dcWebSockets.clear();
     // Tell SW this client no longer has DataChannel
+    dcReadySignaled = false;
     if (navigator.serviceWorker.controller) {
       navigator.serviceWorker.controller.postMessage({ type: "dc_closed" });
     }
@@ -250,6 +252,14 @@
       tokenRefreshTimer = setInterval(fetchSessionToken, 4 * 60 * 1000);
       installWebSocketShim();
       await registerServiceWorker();
+
+      // Only signal dc_ready if we have a valid session token — without it,
+      // DC requests would 401 and fall back to relay anyway (wasted round-trip)
+      if (!sessionToken) {
+        console.warn("[WebRTC] No session token — DC routing deferred until token acquired");
+        return;
+      }
+
       // Wait for SW to claim this page (clients.claim() may still be pending)
       if (!navigator.serviceWorker.controller) {
         await navigator.serviceWorker.ready;
@@ -260,12 +270,7 @@
           });
         }
       }
-      if (navigator.serviceWorker.controller) {
-        navigator.serviceWorker.controller.postMessage({ type: "dc_ready" });
-        console.log("[WebRTC] Signaled dc_ready to Service Worker");
-      } else {
-        console.warn("[WebRTC] No SW controller — DC routing unavailable");
-      }
+      signalDcReady();
     };
 
     dataChannel.onmessage = (event) => {
@@ -519,9 +524,10 @@
       // re-signal dc_ready so the new SW knows this client has an active DC.
       navigator.serviceWorker.addEventListener("controllerchange", function () {
         console.log("[WebRTC] New Service Worker took control");
-        if (dataChannel && dataChannel.readyState === "open" && navigator.serviceWorker.controller) {
-          navigator.serviceWorker.controller.postMessage({ type: "dc_ready" });
-          console.log("[WebRTC] Re-signaled dc_ready to new Service Worker");
+        // New SW needs to be told about our DC — reset flag and re-signal
+        dcReadySignaled = false;
+        if (sessionToken && dataChannel && dataChannel.readyState === "open") {
+          signalDcReady();
         }
       });
 
@@ -530,9 +536,9 @@
           handleSwFetch(event.data, event.ports[0]);
         } else if (event.data?.type === "dc_check") {
           // New SW is asking if we have an active DC — re-signal readiness
-          if (dataChannel && dataChannel.readyState === "open" && navigator.serviceWorker.controller) {
-            navigator.serviceWorker.controller.postMessage({ type: "dc_ready" });
-            console.log("[WebRTC] Responded to dc_check with dc_ready");
+          dcReadySignaled = false;
+          if (sessionToken && dataChannel && dataChannel.readyState === "open") {
+            signalDcReady();
           }
         }
       });
@@ -542,9 +548,22 @@
     }
   }
 
+  function signalDcReady() {
+    if (dcReadySignaled) return;
+    if (!navigator.serviceWorker.controller) return;
+    if (!dataChannel || dataChannel.readyState !== "open") return;
+    navigator.serviceWorker.controller.postMessage({ type: "dc_ready" });
+    dcReadySignaled = true;
+    window.__dcReady = true;
+    window.dispatchEvent(new CustomEvent("dc-ready"));
+    console.log("[WebRTC] Signaled dc_ready to Service Worker");
+  }
+
   async function fetchSessionToken() {
     try {
-      const res = await fetch("/auth/session-token");
+      const res = await fetch("/auth/session-token", {
+        headers: { "X-Requested-With": "XMLHttpRequest" },
+      });
       if (!res.ok) {
         console.log("[WebRTC] No session token available");
         sessionToken = null;
@@ -553,6 +572,11 @@
       const data = await res.json();
       sessionToken = data.token;
       console.log("[WebRTC] Session token acquired");
+      // If dc_ready was deferred because we had no token, signal now
+      // Only when SW is already registered (avoid signaling old SW before update)
+      if (!dcReadySignaled && swRegistered && dataChannel && dataChannel.readyState === "open") {
+        signalDcReady();
+      }
     } catch (err) {
       console.log("[WebRTC] Failed to fetch session token:", err.message);
       sessionToken = null;
