@@ -69,39 +69,63 @@ stun --> browser : 200 (app page + upgrade script)
 == Phase 3: WebRTC Upgrade (async, background) ==
 
 browser -> browser : webrtc-upgrade.js executes
-browser -> stun : WS: register { role: "client" }
+browser -> stun : GET /auth/session-token (via relay)
+stun --> browser : { token: "<JWT>" }
+
+browser -> stun : WS: register { role: "client",\n  token, targetGatewayId }
 stun --> browser : paired { gateway: "gw-x" }
 stun --> gw : paired { client: "client-abc" }
 
-browser -> browser : new RTCPeerConnection + createOffer
-browser -> stun : sdp_offer
+browser -> browser : **Browser creates:**\nnew RTCPeerConnection\n+ createDataChannel("http-tunnel")\n+ createOffer()
+browser -> stun : sdp_offer { sdp, fromId, targetId }
 stun -> gw : forward sdp_offer
-gw -> stun : sdp_answer
-stun -> browser : forward sdp_answer
 
-browser <-> coturn : STUN Binding (port 3478)\n→ discover reflexive address
+gw -> gw : **Gateway creates:**\nnew PeerConnection\nsetRemoteDescription(offer)\n→ auto-generates answer
+gw -> stun : sdp_answer { sdp, fromId }
+stun -> browser : forward sdp_answer
+browser -> browser : setRemoteDescription(answer)
+
+browser <-> coturn : STUN Binding (port 3478)\n→ discover reflexive addresses
 browser <-> stun : ICE candidates ←→ forwarded ←→ Gateway
 browser <-> gw : **ICE connectivity check → hole punched!**
 
+gw -> gw : onDataChannel("http-tunnel")\n(receives browser's DC)
 browser <-> gw : **DataChannel OPEN**
 
 == Phase 4: Service Worker Takeover ==
 
-browser -> browser : GET /auth/session-token (via relay)
 browser -> browser : Register Service Worker
 browser -> browser : SW.postMessage("dc_ready")
 
 note over browser, gw #334155
   From this point:
   - Page navigations → HTTP relay (cookie-based auth)
-  - Sub-resource fetches → DataChannel (JWT injected)
+  - Sub-resource fetches → DataChannel (only if dc_ready)
+  - No dc_ready → browser handles natively
   - 10 s DC timeout → fallback to relay
 end note
 
 user -> browser : Click link / API call
 browser -> gw : **DataChannel: http_request**
+gw -> gw : Inject backend cookie jar\n(keyed by JWT sub)
 gw -> backend : Proxy (authenticated, 30 s timeout)
-backend --> gw : Response
+backend --> gw : Response + Set-Cookie
+gw -> gw : Store Set-Cookie\nin backend cookie jar
 gw -> browser : **DataChannel: http_response**
+
+== Phase 5: Reconnection (if DC drops) ==
+
+browser -> browser : DataChannel closes or\nICE fails or signaling drops
+browser -> browser : cleanupPeer() → reject pending\nSW.postMessage("dc_closed")
+browser -> browser : Exponential backoff:\n5 s × 1.5^n (max 60 s)
+
+browser -> stun : GET /auth/session-token\n(fresh token)
+browser -> stun : WS: register { new clientId }
+stun --> browser : paired → repeat Phase 3
+
+note over browser, gw #334155
+  Reconnect resets backoff on success.
+  During reconnect: all requests use HTTP relay.
+end note
 
 @enduml

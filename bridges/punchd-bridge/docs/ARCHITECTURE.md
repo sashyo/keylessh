@@ -92,8 +92,8 @@ Once the DataChannel is open, a Service Worker is registered to transparently ro
 - Requests to localhost targeting `/realms/*` or `/resources/*` are rewritten to same-origin (catches TideCloak SDK requests that use internal URLs)
 - Non-same-origin requests are ignored
 - Gateway-internal paths (`/js/`, `/auth/`, `/login`, `/webrtc-config`, `/_idp/`, `/realms/`, `/resources/`, `/portal`, `/health`) skip DataChannel and go through relay
+- **DC readiness gate:** The SW only intercepts requests from clients that have signaled `dc_ready` (tracked in a `dcClients` set). If the requesting client has no active DataChannel, the SW does not call `event.respondWith()` — the browser handles the request natively with proper cookie handling and caching. This prevents stale data when navigating back before the DataChannel reconnects.
 - Sub-resource requests without a `/__b/` prefix get the prefix prepended from the requesting page's URL
-- If the requesting client has signaled `dc_ready`, the request goes through the DataChannel
 - DataChannel requests time out after 10 seconds, falling back to relay
 - The page-side DataChannel handler times out after 15 seconds, also falling back to relay
 
@@ -121,6 +121,8 @@ End-to-end view: portal selection → authentication → HTTP relay → WebRTC u
 
 TideCloak traffic (`/realms/*`, `/resources/*`) is reverse-proxied through the gateway so the browser never needs direct access to the TideCloak server. The gateway maintains a server-side cookie jar (`tc_sess` cookie → stored TideCloak cookies) with per-session LRU eviction (1-hour TTL, max 10,000 sessions) to avoid relying on the signal relay to forward `Set-Cookie` headers.
 
+**Backend cookie jar:** The gateway also maintains a server-side cookie jar for backend `Set-Cookie` headers, keyed by JWT subject (`sub` claim). When backend responses include `Set-Cookie` headers, the gateway stores them. On DataChannel requests (marked with `x-dc-request: 1` by the peer handler), the gateway injects the stored cookies into the proxied request. This is necessary because DataChannel responses bypass the browser's native cookie handling — the Service Worker cannot set `Set-Cookie` headers on constructed `Response` objects (forbidden header). The backend cookie jar uses the same LRU eviction strategy (7-day TTL, max 10,000 entries). Cookies are stored for all authenticated responses so the jar is seeded from the initial HTTP relay page load.
+
 When `KC_HOSTNAME` is a public URL but TideCloak runs locally, `TC_INTERNAL_URL` tells the gateway where to actually send proxied requests and server-side token exchanges. Browser-facing auth URLs use `AUTH_SERVER_PUBLIC_URL` if set, otherwise relative paths (`/realms/...`) so auth traffic routes through the gateway.
 
 The gateway also handles an `/_idp/` prefix: TideCloak URLs are rewritten to `{publicOrigin}/_idp/...` so the Tide SDK enclave iframe can reach TideCloak through the relay. The gateway strips this prefix before proxying.
@@ -130,7 +132,6 @@ The gateway also handles an `/_idp/` prefix: TideCloak URLs are rewritten to `{p
 ![OIDC Login](diagrams/oidc-login.svg)
 
 **Auth endpoints on the gateway:**
-- `/login` — static login page
 - `/auth/login?redirect=<url>` — initiates OIDC redirect to TideCloak (redirect param sanitized)
 - `/auth/callback?code=<code>&state=<state>` — exchanges code for tokens, sets `gateway_access` and `gateway_refresh` cookies
 - `/auth/session-token` — returns the JWT from the HttpOnly cookie (for DataChannel auth, `Cache-Control: no-store`)
@@ -326,9 +327,17 @@ All proxy requests (TideCloak, backend, relay loopback, DataChannel loopback) ha
 
 ### Connection Resilience
 
-The gateway reconnects to the signal server with exponential backoff: 1 s → 2 s → 4 s → 8 s → ... → 30 s max, with ±20% jitter. The delay resets to 1 s on successful connection.
+**Gateway → signal server:** The gateway reconnects to the signal server with exponential backoff: 1 s → 2 s → 4 s → 8 s → ... → 30 s max, with ±20% jitter. The delay resets to 1 s on successful connection. When a gateway disconnects, all its pending relay requests are rejected immediately (502) rather than waiting for the 30 s timeout.
 
-When a gateway disconnects, all its pending relay requests are rejected immediately (502) rather than waiting for the 30 s timeout.
+**Browser → DataChannel:** The `webrtc-upgrade.js` script automatically reconnects when the DataChannel or signaling WebSocket drops. On disconnect:
+1. Cleans up the PeerConnection and DataChannel
+2. Rejects all pending DataChannel requests (falling back to relay)
+3. Notifies the Service Worker (`dc_closed`) so it stops intercepting
+4. Schedules reconnect with exponential backoff: 5 s × 1.5^n, max 60 s
+5. On reconnect: fetches a fresh session token, generates a new client ID, reconnects signaling
+6. Backoff resets to 0 on successful DataChannel open
+
+ICE failure (`iceConnectionState === "failed"`) also triggers cleanup and reconnect.
 
 ## Port Summary
 
@@ -371,7 +380,7 @@ See [turnserver.conf](../signal-server/turnserver.conf) for the full configurati
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SIGNAL_SERVER_URL` | (required) | WebSocket URL of the signal server signaling port |
+| `STUN_SERVER_URL` | (required) | WebSocket URL of the signal server signaling port |
 | `LISTEN_PORT` | 7891 | Gateway HTTP/HTTPS port |
 | `HEALTH_PORT` | 7892 | Health check port |
 | `BACKENDS` | (none) | `"Name=http://host:port,Auth=http://host2:port;noauth"` |
@@ -379,7 +388,7 @@ See [turnserver.conf](../signal-server/turnserver.conf) for the full configurati
 | `GATEWAY_ID` | random (`gw-<16hex>`) | Unique gateway identifier (cryptographic random) |
 | `GATEWAY_DISPLAY_NAME` | GATEWAY_ID | Display name in portal |
 | `GATEWAY_DESCRIPTION` | (none) | Description shown in portal |
-| `ICE_SERVERS` | derived from `SIGNAL_SERVER_URL` | STUN server for WebRTC, e.g. `stun:host:3478` |
+| `ICE_SERVERS` | derived from `STUN_SERVER_URL` | STUN server for WebRTC, e.g. `stun:host:3478` |
 | `TURN_SERVER` | (none) | TURN server URL, e.g. `turn:host:3478` |
 | `TURN_SECRET` | (none) | Shared secret for TURN credentials (HMAC-SHA256) |
 | `API_SECRET` | (none) | Shared secret for signal server registration |
@@ -507,7 +516,7 @@ cd gateway
 npm install
 
 # Required: signal server URL and secrets (from the signal server operator)
-export SIGNAL_SERVER_URL=wss://signal.example.com:9090
+export STUN_SERVER_URL=wss://signal.example.com:9090
 export API_SECRET=<from-signal-operator>
 export TURN_SECRET=<from-signal-operator>
 
@@ -553,7 +562,7 @@ docker compose up --build
 - Verify `/webrtc-config` returns valid STUN/TURN URLs
 - Ensure coturn port 3478 is reachable (UDP and TCP)
 - Check that `TURN_SECRET` matches between gateway and coturn
-- Verify `ICE_SERVERS` is set on the gateway (derived from `SIGNAL_SERVER_URL` if not explicit)
+- Verify `ICE_SERVERS` is set on the gateway (derived from `STUN_SERVER_URL` if not explicit)
 
 ### TURN allocation failing
 

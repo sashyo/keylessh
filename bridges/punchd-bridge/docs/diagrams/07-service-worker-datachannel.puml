@@ -44,7 +44,7 @@ sw -> sw : Add client to dcClients set
 app -> sw : fetch("/api/data")
 activate sw
 
-sw -> sw : Decision:\n  navigate? → NO\n  cross-origin? → NO\n  Gateway path? → NO\n  → Route via DataChannel
+sw -> sw : Decision:\n  navigate? → NO\n  cross-origin? → NO\n  Gateway path? → NO\n  dcClients.has(clientId)? → YES\n  → Route via DataChannel
 
 sw -> sw : Rewrite URL prefix:\npage at /__b/App1/...\n→ /__b/App1/api/data
 
@@ -60,10 +60,11 @@ dc -> gw : DataChannel message
 activate gw
 
 gw -> gw : Validate HTTP method\nHTTP to 127.0.0.1:7891\n(30 s timeout)
-gw -> gw : Strip /__b/App1 prefix\nVerify JWT → OK
+gw -> gw : Strip /__b/App1 prefix\nVerify JWT → OK\nInject backend cookie jar\n(keyed by JWT sub)
 
-gw -> backend : GET /api/data
-backend --> gw : 200 { data: [...] }
+gw -> backend : GET /api/data\n(with stored backend cookies)
+backend --> gw : 200 { data: [...] }\n+ Set-Cookie (if any)
+gw -> gw : Store Set-Cookie\nin backend cookie jar
 
 alt Response < 200KB
   gw -> dc : http_response\n{ id, statusCode: 200,\n  headers, body: base64 }
@@ -91,8 +92,10 @@ deactivate sw
 
 note over app, gw #334155
   Page navigations bypass SW → use HTTP relay.
-  Sub-resource fetches (API, assets) → DataChannel.
+  Sub-resource fetches → DataChannel (only if dc_ready).
+  No dc_ready → browser handles natively (proper cookies).
   10 s timeout → fallback to HTTP relay.
+  Backend Set-Cookie stored server-side (SW can't set them).
 end note
 
 @enduml
