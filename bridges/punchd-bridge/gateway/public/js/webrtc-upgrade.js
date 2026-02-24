@@ -335,10 +335,16 @@
 
     const requestId = crypto.randomUUID();
 
-    // Inject session cookie that the SW can't read (HttpOnly)
+    // Inject session cookie that the SW can't read (HttpOnly).
+    // Merge with any existing cookies from the request (non-HttpOnly cookies
+    // the browser may have set). The gateway's backend cookie jar handles
+    // HttpOnly cookies server-side for DataChannel sessions.
     const headers = { ...request.headers };
     if (sessionToken) {
-      headers.cookie = `gateway_access=${sessionToken}`;
+      const existing = headers.cookie || "";
+      headers.cookie = existing
+        ? `${existing}; gateway_access=${sessionToken}`
+        : `gateway_access=${sessionToken}`;
     }
 
     // Send HTTP request over DataChannel

@@ -86,6 +86,12 @@ self.addEventListener("fetch", function (event) {
   // Skip gateway-internal paths (strip prefix first for matching)
   if (GATEWAY_PATHS.test(stripPrefix(url.pathname))) return;
 
+  // Only intercept when this client has an active DataChannel.
+  // Without DC, let the browser handle the request natively —
+  // this preserves proper cookie handling (HttpOnly), caching,
+  // and avoids stale data when navigating back.
+  if (!event.clientId || !dcClients.has(event.clientId)) return;
+
   event.respondWith(rewriteAndHandle(event));
 });
 
@@ -115,11 +121,6 @@ async function rewriteAndHandle(event) {
 
 async function handleViaDataChannel(clientId, request) {
   var fallbackRequest = request.clone();
-
-  // Only try DataChannel if the requesting client has signaled readiness
-  if (!clientId || !dcClients.has(clientId)) {
-    return fetch(fallbackRequest);
-  }
 
   try {
     var client = await self.clients.get(clientId);

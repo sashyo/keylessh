@@ -1,7 +1,7 @@
 /**
  * HTTP auth gateway with server-side OIDC login flow.
  *
- * Public routes (no auth): /login, /auth/*, /health
+ * Public routes (no auth): /auth/*, /health
  * Protected routes: everything else → validate JWT → proxy to backend
  *
  * Auth is extracted from:
@@ -363,6 +363,70 @@ export function createProxy(options: ProxyOptions): {
     }
   }, 600_000).unref();
 
+  // ── Backend cookie jar ─────────────────────────────────────────
+  // DataChannel requests (WebRTC) bypass the browser's cookie handling:
+  // - Set-Cookie is a forbidden header in SW's new Response()
+  // - HttpOnly cookies can't be read from JS
+  // So the gateway stores backend cookies server-side, keyed by JWT sub.
+  interface BackendSession { cookies: Map<string, string>; lastAccess: number; }
+  const backendCookieJar = new Map<string, BackendSession>();
+  const BACKEND_SESS_MAX_AGE = 7 * 24 * 3600; // 7 days (match backend session)
+  const BACKEND_SESS_MAX_ENTRIES = 10000;
+
+  /** Store backend Set-Cookie values in the jar for DataChannel sessions. */
+  function storeBackendCookies(
+    userId: string,
+    setCookieHeaders: string | string[] | undefined
+  ): void {
+    if (!setCookieHeaders || !userId) return;
+    let session = backendCookieJar.get(userId);
+    if (!session) {
+      session = { cookies: new Map(), lastAccess: Date.now() };
+      backendCookieJar.set(userId, session);
+    }
+    session.lastAccess = Date.now();
+    const headers = Array.isArray(setCookieHeaders) ? setCookieHeaders : [setCookieHeaders];
+    for (const h of headers) {
+      const eq = h.indexOf("=");
+      if (eq < 0) continue;
+      const name = h.slice(0, eq).trim();
+      const rest = h.slice(eq + 1);
+      const semi = rest.indexOf(";");
+      const value = semi >= 0 ? rest.slice(0, semi) : rest;
+      if (!value || /Max-Age=0/i.test(h)) {
+        session.cookies.delete(name);
+      } else {
+        session.cookies.set(name, value);
+      }
+    }
+  }
+
+  /** Build a Cookie header from the backend jar. */
+  function getBackendCookieHeader(userId: string): string {
+    const session = backendCookieJar.get(userId);
+    if (!session || session.cookies.size === 0) return "";
+    session.lastAccess = Date.now();
+    return Array.from(session.cookies.entries()).map(([k, v]) => `${k}=${v}`).join("; ");
+  }
+
+  // Evict stale backend sessions (piggyback on TC timer interval)
+  setInterval(() => {
+    const now = Date.now();
+    const maxAge = BACKEND_SESS_MAX_AGE * 1000;
+    for (const [id, session] of backendCookieJar) {
+      if (now - session.lastAccess > maxAge) {
+        backendCookieJar.delete(id);
+      }
+    }
+    if (backendCookieJar.size > BACKEND_SESS_MAX_ENTRIES) {
+      const sorted = [...backendCookieJar.entries()].sort((a, b) => a[1].lastAccess - b[1].lastAccess);
+      const toRemove = sorted.slice(0, backendCookieJar.size - BACKEND_SESS_MAX_ENTRIES);
+      for (const [id] of toRemove) {
+        backendCookieJar.delete(id);
+      }
+    }
+  }, 600_000).unref();
+
   // TideCloak internal URL for reverse-proxying and server-side requests.
   // When KC_HOSTNAME is a public URL, TC_INTERNAL_URL points to the actual
   // TideCloak instance (e.g. http://localhost:8080).
@@ -512,13 +576,13 @@ export function createProxy(options: ProxyOptions): {
 
         if (error) {
           console.log(`[Gateway] Auth error from TideCloak: ${error} — ${errorDesc || "no description"}`);
-          redirect(res, `/login?error=${encodeURIComponent(error)}`);
+          redirect(res, `/auth/login?error=${encodeURIComponent(error)}`);
           return;
         }
 
         if (!code) {
           console.log("[Gateway] Auth callback missing code parameter");
-          redirect(res, `/login?error=no_code`);
+          redirect(res, `/auth/login?error=no_code`);
           return;
         }
 
@@ -566,7 +630,7 @@ export function createProxy(options: ProxyOptions): {
           res.end();
         } catch (err) {
           console.error("[Gateway] Token exchange failed:", err);
-          redirect(res, `/login?error=token_exchange`);
+          redirect(res, `/auth/login?error=token_exchange`);
         }
         return;
       }
@@ -603,7 +667,7 @@ export function createProxy(options: ProxyOptions): {
         const logoutUrl = buildLogoutUrl(
           getBrowserEndpoints(req),
           clientId,
-          `${proto}/login`
+          `${proto}/auth/login`
         );
 
         res.writeHead(302, {
@@ -842,13 +906,9 @@ export function createProxy(options: ProxyOptions): {
           if (isBrowserRequest(req)) {
             const fullUrl = backendPrefix + url;
             const redirectTarget = encodeURIComponent(fullUrl);
-            if (!token && !cookies["gateway_refresh"]) {
-              // No session at all — go straight to auth (TideCloak SSO will handle it)
-              redirect(res, `/auth/login?redirect=${redirectTarget}`);
-            } else {
-              // Had a session but it expired and couldn't be refreshed
-              redirect(res, `/login?redirect=${redirectTarget}&error=expired`);
-            }
+            // Redirect to TideCloak SSO — handles both fresh sessions
+            // and expired ones (refresh failed or no refresh token)
+            redirect(res, `/auth/login?redirect=${redirectTarget}`);
           } else {
             res.writeHead(401, { "Content-Type": "application/json" });
             res.end(
@@ -891,6 +951,18 @@ export function createProxy(options: ProxyOptions): {
       // Strip x-gateway-backend header (internal routing, not for backend)
       delete proxyHeaders["x-gateway-backend"];
 
+      // DataChannel requests: inject stored backend cookies (browser can't
+      // attach HttpOnly cookies through the SW/DataChannel path)
+      const isDcRequest = !!proxyHeaders["x-dc-request"];
+      delete proxyHeaders["x-dc-request"]; // don't leak to backend
+      if (isDcRequest && payload?.sub) {
+        const jarCookies = getBackendCookieHeader(payload.sub);
+        if (jarCookies) {
+          const existing = (proxyHeaders.cookie as string) || "";
+          proxyHeaders.cookie = existing ? `${existing}; ${jarCookies}` : jarCookies;
+        }
+      }
+
       const proxyReq = makeBackendReq(
         {
           hostname: targetBackend.hostname,
@@ -901,6 +973,16 @@ export function createProxy(options: ProxyOptions): {
         },
         (proxyRes) => {
           const headers = { ...proxyRes.headers };
+
+          // Backend cookie jar: store Set-Cookie values server-side so that
+          // DataChannel requests (where the browser can't set cookies) still
+          // get the right session cookies. Store for ALL authenticated requests
+          // — the initial page load (direct HTTP) seeds the jar before DC
+          // takes over, preventing session mismatch.
+          const cookieJarUser = payload?.sub || "";
+          if (cookieJarUser && headers["set-cookie"]) {
+            storeBackendCookies(cookieJarUser, headers["set-cookie"] as string | string[]);
+          }
 
           // Rewrite redirects: TideCloak → relative, localhost:PORT → /__b/<name>
           rewriteRedirects(headers, tcProxyUrl.origin, portToBackend);
@@ -1032,7 +1114,7 @@ export function createProxy(options: ProxyOptions): {
     } else {
       console.log(`[Proxy] Backend: ${options.backendUrl}`);
     }
-    console.log(`[Proxy] Login: ${scheme}://localhost:${options.listenPort}/login`);
+    console.log(`[Proxy] Login: ${scheme}://localhost:${options.listenPort}/auth/login`);
   });
 
   return {

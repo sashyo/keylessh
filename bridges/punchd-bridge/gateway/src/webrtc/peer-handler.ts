@@ -188,6 +188,9 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
 
     const bodyBuf = bodyB64 ? Buffer.from(bodyB64, "base64") : undefined;
 
+    // Mark as DataChannel request so the HTTP proxy can use the backend cookie jar
+    (headers as Record<string, string>)["x-dc-request"] = "1";
+
     const makeReq = options.useTls ? httpsRequest : httpRequest;
     const req = makeReq(
       {
