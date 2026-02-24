@@ -150,7 +150,7 @@ function isBrowserRequest(req: IncomingMessage): boolean {
 }
 
 function getCallbackUrl(req: IncomingMessage, isTls: boolean): string {
-  const proto = req.headers["x-forwarded-proto"] || (isTls ? "https" : "http");
+  const proto = isTls ? "https" : "http";
   const host = req.headers.host || `localhost`;
   return `${proto}://${host}/auth/callback`;
 }
@@ -556,13 +556,19 @@ export function createProxy(options: ProxyOptions): {
         const params = new URLSearchParams(url.split("?")[1] || "");
         const originalUrl = sanitizeRedirect(params.get("redirect") || "/");
         const callbackUrl = getCallbackUrl(req, isTls);
-        const { url: authUrl } = buildAuthUrl(
+        const { url: authUrl, state } = buildAuthUrl(
           getBrowserEndpoints(req),
           clientId,
           callbackUrl,
           originalUrl
         );
-        redirect(res, authUrl);
+        // Store state nonce in a short-lived cookie for CSRF validation on callback
+        const parsedState = parseState(state);
+        res.writeHead(302, {
+          Location: authUrl,
+          "Set-Cookie": `oidc_nonce=${parsedState.nonce}; HttpOnly; Path=/auth/callback; Max-Age=600; SameSite=Lax`,
+        });
+        res.end();
         return;
       }
 
@@ -586,6 +592,16 @@ export function createProxy(options: ProxyOptions): {
           return;
         }
 
+        // CSRF validation: compare state nonce against oidc_nonce cookie
+        const callbackCookies = parseCookies(req.headers.cookie);
+        const state = parseState(stateParam);
+        const expectedNonce = callbackCookies["oidc_nonce"];
+        if (!expectedNonce || expectedNonce !== state.nonce) {
+          console.log("[Gateway] OIDC CSRF check failed: nonce mismatch");
+          redirect(res, `/auth/login?error=csrf_failed`);
+          return;
+        }
+
         try {
           const callbackUrl = getCallbackUrl(req, isTls);
           console.log(`[Gateway] Token exchange:`);
@@ -601,7 +617,6 @@ export function createProxy(options: ProxyOptions): {
           );
           console.log(`[Gateway] Token exchange succeeded (expires_in=${tokens.expires_in})`);
 
-          const state = parseState(stateParam);
           const cookies: string[] = [
             buildCookieHeader(
               "gateway_access",
@@ -620,6 +635,9 @@ export function createProxy(options: ProxyOptions): {
               )
             );
           }
+
+          // Clear the one-time CSRF nonce cookie
+          cookies.push("oidc_nonce=; HttpOnly; Path=/auth/callback; Max-Age=0");
 
           const safeRedirect = sanitizeRedirect(state.redirect || "/");
           console.log(`[Gateway] Auth complete, redirecting to: ${safeRedirect}`);
@@ -694,6 +712,16 @@ export function createProxy(options: ProxyOptions): {
 
       // OIDC: logout
       if (path === "/auth/logout") {
+        // Clear backend cookie jar for this user before logout
+        const cookies = parseCookies(req.headers.cookie);
+        const logoutToken = cookies["gateway_access"];
+        if (logoutToken) {
+          const logoutPayload = await options.auth.verifyToken(logoutToken);
+          if (logoutPayload?.sub) {
+            backendCookieJar.delete(logoutPayload.sub);
+          }
+        }
+
         const callbackUrl = getCallbackUrl(req, isTls);
         const proto = callbackUrl.split("/auth/callback")[0];
         const logoutUrl = buildLogoutUrl(
@@ -976,6 +1004,17 @@ export function createProxy(options: ProxyOptions): {
         delete proxyHeaders.authorization;
       }
 
+      // ── Sanitize client-spoofable headers ─────────────────
+      // Strip forwarded headers before setting them from trusted sources.
+      // Prevents clients from injecting identities or spoofing IPs.
+      // x-gateway-backend is stripped later (line ~998) before proxying —
+      // it's needed by resolveBackend() above, and is already JWT-gated.
+      delete proxyHeaders["x-forwarded-user"];
+      delete proxyHeaders["x-forwarded-for"];
+      delete proxyHeaders["x-forwarded-proto"];
+      delete proxyHeaders["x-forwarded-host"];
+      delete proxyHeaders["x-forwarded-port"];
+
       if (payload) {
         proxyHeaders["x-forwarded-user"] = payload.sub || "unknown";
       }
@@ -985,9 +1024,6 @@ export function createProxy(options: ProxyOptions): {
       const targetBackend = resolveBackend(req, activeBackend);
       const targetIsHttps = targetBackend.protocol === "https:";
       const makeBackendReq = targetIsHttps ? httpsRequest : httpRequest;
-
-      // Strip x-gateway-backend header (internal routing, not for backend)
-      delete proxyHeaders["x-gateway-backend"];
 
       // DataChannel requests: inject stored backend cookies (browser can't
       // attach HttpOnly cookies through the SW/DataChannel path)

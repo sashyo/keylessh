@@ -200,6 +200,20 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
     const headers = msg.headers || {};
     const bodyB64 = msg.body || "";
 
+    // Validate URL path — must start with / and contain no CRLF (header injection)
+    if (!url.startsWith("/") || /[\r\n]/.test(url)) {
+      if (dc.isOpen()) {
+        dc.sendMessageBinary(Buffer.from(JSON.stringify({
+          type: "http_response",
+          id: requestId,
+          statusCode: 400,
+          headers: { "content-type": "application/json" },
+          body: Buffer.from(JSON.stringify({ error: "Invalid URL" })).toString("base64"),
+        })));
+      }
+      return;
+    }
+
     // Validate HTTP method
     if (!ALLOWED_METHODS.has(method.toUpperCase())) {
       if (dc.isOpen()) {
