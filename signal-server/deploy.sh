@@ -94,10 +94,15 @@ docker pull "$COTURN_IMAGE"
 for cname in "$SIGNAL_CONTAINER" "$COTURN_CONTAINER"; do
   if docker ps -a --format '{{.Names}}' | grep -q "^${cname}$"; then
     echo "[Deploy] Stopping old container: ${cname}"
-    docker stop "$cname" 2>/dev/null || true
-    docker rm "$cname" 2>/dev/null || true
+    docker rm -f "$cname" 2>/dev/null || true
   fi
 done
+
+# Kill any rogue process on the signal port (e.g. bare node, leaked container)
+if command -v fuser &>/dev/null; then
+  fuser -k "${SIGNAL_PORT}/tcp" 2>/dev/null || true
+  sleep 1
+fi
 
 # ── TLS certs (optional — Let's Encrypt) ─────────────────────
 TLS_ARGS=""
