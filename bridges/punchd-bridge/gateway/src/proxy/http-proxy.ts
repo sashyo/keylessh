@@ -25,7 +25,7 @@ import {
   request as httpsRequest,
 } from "https";
 import { createHmac, randomBytes } from "crypto";
-import { readFileSync } from "fs";
+import { readFileSync, realpathSync } from "fs";
 import { join, resolve } from "path";
 import type { TidecloakAuth } from "../auth/tidecloak.js";
 import type { TidecloakConfig } from "../config.js";
@@ -94,7 +94,8 @@ function buildCookieHeader(
 }
 
 function clearCookieHeader(name: string): string {
-  return `${name}=; HttpOnly; Path=/; Max-Age=0`;
+  const secure = _useSecureCookies ? "; Secure" : "";
+  return `${name}=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax${secure}`;
 }
 
 // ── Static file serving ──────────────────────────────────────────
@@ -113,13 +114,14 @@ function serveFile(
 ): void {
   try {
     const resolved = resolve(PUBLIC_DIR, filename);
-    // Prevent path traversal — resolved path must be inside PUBLIC_DIR
-    if (!resolved.startsWith(PUBLIC_DIR + "/")) {
+    // Prevent path traversal and symlink escape — real path must be inside PUBLIC_DIR
+    const realPath = realpathSync(resolved);
+    if (!realPath.startsWith(PUBLIC_DIR + "/")) {
       res.writeHead(403, { "Content-Type": "text/plain" });
       res.end("Forbidden");
       return;
     }
-    const content = readFileSync(resolved, "utf-8");
+    const content = readFileSync(realPath, "utf-8");
     res.writeHead(200, { "Content-Type": contentType });
     res.end(content);
   } catch {
@@ -590,7 +592,7 @@ export function createProxy(options: ProxyOptions): {
         const parsedState = parseState(state);
         res.writeHead(302, {
           Location: authUrl,
-          "Set-Cookie": `oidc_nonce=${parsedState.nonce}; HttpOnly; Path=/auth/callback; Max-Age=600; SameSite=Lax`,
+          "Set-Cookie": `oidc_nonce=${parsedState.nonce}; HttpOnly; Path=/auth/callback; Max-Age=600; SameSite=Lax${isTls ? "; Secure" : ""}`,
         });
         res.end();
         return;
@@ -798,7 +800,7 @@ export function createProxy(options: ProxyOptions): {
       // both levels causes duplicate Access-Control-Allow-Origin headers
       // which makes the browser reject the response entirely.
       if (path.startsWith("/realms/") || path.startsWith("/resources/") || path.startsWith("/admin")) {
-        const publicProto = req.headers["x-forwarded-proto"] || (isTls ? "https" : "http");
+        const publicProto = isTls ? "https" : "http";
         const publicHost = req.headers.host || "localhost";
         const publicBase = `${publicProto}://${publicHost}/_idp`;
 
@@ -1028,10 +1030,9 @@ export function createProxy(options: ProxyOptions): {
 
       // ── Proxy to backend ─────────────────────────────────
 
-      // DEBUG: trace DC auth flow
-      if (req.headers["x-dc-request"]) {
-        const cookies = parseCookies(req.headers.cookie);
-        console.log(`[Gateway] DC auth: url=${req.url} hasToken=${!!cookies["gateway_access"]} tokenLen=${(cookies["gateway_access"] || "").length} payload=${!!payload} sub=${payload?.sub || "none"} backend=${activeBackend || "default"} target=${resolveBackend(req, activeBackend).href}`);
+      // DC auth trace (opt-in via DEBUG_DC=true)
+      if (process.env.DEBUG_DC && req.headers["x-dc-request"]) {
+        console.log(`[Gateway] DC request: url=${req.url} authed=${!!payload} backend=${activeBackend || "default"}`);
       }
 
       // Validate HTTP method
@@ -1094,11 +1095,6 @@ export function createProxy(options: ProxyOptions): {
         },
         (proxyRes) => {
           const headers = { ...proxyRes.headers };
-
-          // DEBUG: trace backend response for DC requests
-          if (isDcRequest) {
-            console.log(`[Gateway] DC backend response: url=${req.url} status=${proxyRes.statusCode} content-type=${headers["content-type"]} content-length=${headers["content-length"]} content-range=${headers["content-range"]}`);
-          }
 
           // Backend cookie jar: store Set-Cookie values server-side so that
           // DataChannel requests (where the browser can't set cookies) still
