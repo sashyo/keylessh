@@ -363,9 +363,29 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
         } else {
           // Small response: buffer and send as single message (binary to avoid PPID confusion)
           const chunks: Buffer[] = [];
-          res.on("data", (chunk: Buffer) => chunks.push(chunk));
+          let totalResponseSize = 0;
+          const MAX_BUFFERED = 50 * 1024 * 1024; // 50MB
+          let aborted = false;
+          res.on("data", (chunk: Buffer) => {
+            totalResponseSize += chunk.length;
+            if (totalResponseSize > MAX_BUFFERED) {
+              if (!aborted) {
+                aborted = true;
+                req.destroy();
+                if (dc.isOpen()) {
+                  dc.sendMessageBinary(Buffer.from(JSON.stringify({
+                    type: "http_response", id: requestId, statusCode: 502,
+                    headers: { "content-type": "application/json" },
+                    body: Buffer.from('{"error":"Response too large"}').toString("base64"),
+                  })));
+                }
+              }
+              return;
+            }
+            chunks.push(chunk);
+          });
           res.on("end", () => {
-            if (!dc.isOpen()) return;
+            if (aborted || !dc.isOpen()) return;
             const responseBody = Buffer.concat(chunks).toString("base64");
             dc.sendMessageBinary(Buffer.from(JSON.stringify({
               type: "http_response",

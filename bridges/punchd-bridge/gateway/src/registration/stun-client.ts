@@ -292,8 +292,28 @@ export function registerWithStun(
         } else {
           // Buffered mode: collect full response then send
           const chunks: Buffer[] = [];
-          res.on("data", (chunk: Buffer) => chunks.push(chunk));
+          let totalResponseSize = 0;
+          const MAX_RESPONSE = 50 * 1024 * 1024; // 50MB
+          let aborted = false;
+          res.on("data", (chunk: Buffer) => {
+            totalResponseSize += chunk.length;
+            if (totalResponseSize > MAX_RESPONSE) {
+              if (!aborted) {
+                aborted = true;
+                req.destroy();
+                pendingRequests.delete(requestId);
+                safeSend({
+                  type: "http_response", id: requestId, statusCode: 502,
+                  headers: { "content-type": "application/json" },
+                  body: Buffer.from(JSON.stringify({ error: "Response too large" })).toString("base64"),
+                });
+              }
+              return;
+            }
+            chunks.push(chunk);
+          });
           res.on("end", () => {
+            if (aborted) return;
             pendingRequests.delete(requestId);
             const responseBody = Buffer.concat(chunks).toString("base64");
             console.log(`[STUN-Reg] Relay response: ${res.statusCode} for ${url} (${responseBody.length} bytes b64)`);
