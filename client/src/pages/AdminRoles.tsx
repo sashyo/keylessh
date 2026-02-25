@@ -44,11 +44,11 @@ import {
 } from "@/components/ui/table";
 import { useToast } from "@/hooks/use-toast";
 import { queryClient } from "@/lib/queryClient";
-import { api, type PolicyTemplate, type TemplateParameter } from "@/lib/api";
+import { api, type PolicyTemplate, type TemplateParameter, type GatewayEndpoint } from "@/lib/api";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 import { RefreshButton } from "@/components/RefreshButton";
 import { useAuth, useAuthConfig } from "@/contexts/AuthContext";
-import { KeyRound, Pencil, Plus, Trash2, Search, Shield, FileCode } from "lucide-react";
+import { KeyRound, Pencil, Plus, Trash2, Search, Shield, FileCode, Globe } from "lucide-react";
 import type { AdminRole } from "@shared/schema";
 import { ADMIN_ROLE_SET } from "@shared/config/roles";
 import { createSshPolicyRequest, createSshPolicyRequestWithCode, bytesToBase64, SSH_MODEL_IDS, SSH_FORSETI_CONTRACT } from "@/lib/sshPolicy";
@@ -86,7 +86,7 @@ export default function AdminRoles() {
   const [editingRole, setEditingRole] = useState<AdminRole | null>(null);
   const [creatingRole, setCreatingRole] = useState(false);
   const [deletingRole, setDeletingRole] = useState<AdminRole | null>(null);
-  const [createAsSshRole, setCreateAsSshRole] = useState(true);
+  const [roleType, setRoleType] = useState<"ssh" | "endpoint" | "custom">("ssh");
   const [isCreatingPolicy, setIsCreatingPolicy] = useState(false);
   const [formData, setFormData] = useState<{ name: string; description: string }>({
     name: "",
@@ -95,6 +95,9 @@ export default function AdminRoles() {
   const [policyConfig, setPolicyConfig] = useState<PolicyConfig>(defaultPolicyConfig);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
   const [templateParams, setTemplateParams] = useState<Record<string, any>>({});
+  // Endpoint role selection state
+  const [selectedGatewayId, setSelectedGatewayId] = useState<string>("");
+  const [selectedBackendName, setSelectedBackendName] = useState<string>("");
 
   const normalizeSshRoleName = (value: string) => {
     const trimmed = value.trim();
@@ -115,6 +118,12 @@ export default function AdminRoles() {
   });
 
   const roles = rolesData?.roles || [];
+
+  // Query for gateway endpoints (for endpoint role creation)
+  const { data: gatewayEndpoints } = useQuery({
+    queryKey: ["/api/gateway-endpoints"],
+    queryFn: api.gatewayEndpoints.list,
+  });
 
   // Query for policy templates
   const { data: templatesData } = useQuery({
@@ -189,6 +198,8 @@ export default function AdminRoles() {
       setPolicyConfig(defaultPolicyConfig);
       setSelectedTemplateId(null);
       setTemplateParams({});
+      setSelectedGatewayId("");
+      setSelectedBackendName("");
       toast({ title: "Role created successfully" });
     },
     onError: (error: Error) => {
@@ -283,10 +294,12 @@ export default function AdminRoles() {
 
   const handleCreate = () => {
     setFormData({ name: "", description: "" });
-    setCreateAsSshRole(true);
+    setRoleType("ssh");
     setPolicyConfig(defaultPolicyConfig);
     setSelectedTemplateId(null);
     setTemplateParams({});
+    setSelectedGatewayId("");
+    setSelectedBackendName("");
     setCreatingRole(true);
   };
 
@@ -379,7 +392,18 @@ export default function AdminRoles() {
 
   const handleCreateSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const name = createAsSshRole ? normalizeSshRoleName(formData.name) : formData.name.trim();
+    let name: string;
+    if (roleType === "ssh") {
+      name = normalizeSshRoleName(formData.name);
+    } else if (roleType === "endpoint") {
+      if (!selectedGatewayId || !selectedBackendName) {
+        toast({ title: "Please select a gateway and backend", variant: "destructive" });
+        return;
+      }
+      name = `dest:${selectedGatewayId}:${selectedBackendName}`;
+    } else {
+      name = formData.name.trim();
+    }
     if (!name) {
       toast({ title: "Role name is required", variant: "destructive" });
       return;
@@ -389,11 +413,11 @@ export default function AdminRoles() {
     createMutation.mutate({
       name,
       description: formData.description || undefined,
-      policy: createAsSshRole && policyConfig.enabled ? policyConfig : undefined,
+      policy: roleType === "ssh" && policyConfig.enabled ? policyConfig : undefined,
     });
 
     // If policy is enabled, create the PolicySignRequest with Forseti contract
-    if (createAsSshRole && policyConfig.enabled) {
+    if (roleType === "ssh" && policyConfig.enabled) {
       setIsCreatingPolicy(true);
       try {
         let policyRequest;
@@ -484,6 +508,11 @@ export default function AdminRoles() {
     [roles]
   );
 
+  const destRoleCount = useMemo(
+    () => roles.filter((r) => /^dest[:\-]/i.test(r.name)).length,
+    [roles]
+  );
+
   return (
     <div className="p-4 sm:p-6 space-y-4 sm:space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -496,8 +525,8 @@ export default function AdminRoles() {
             Create and manage user roles for access control
           </p>
           <p className="text-xs text-muted-foreground">
-            SSH username roles use the format <span className="font-mono">ssh:&lt;username&gt;</span> (e.g.{" "}
-            <span className="font-mono">ssh:root</span>) — {sshRoleCount} configured.
+            <span className="font-mono">ssh:&lt;username&gt;</span> for SSH access ({sshRoleCount}),{" "}
+            <span className="font-mono">dest:&lt;gateway&gt;:&lt;backend&gt;</span> for endpoint access ({destRoleCount}).
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -562,9 +591,14 @@ export default function AdminRoles() {
                         </div>
                         <div className="flex items-center gap-2">
                           <p className="font-medium">{role.name}</p>
-                          {/^(ssh[:\-])/i.test(role.name) && (
+                          {/^ssh[:\-]/i.test(role.name) && (
                             <Badge variant="outline" className="text-xs label-info">
                               SSH
+                            </Badge>
+                          )}
+                          {/^dest[:\-]/i.test(role.name) && (
+                            <Badge variant="outline" className="text-xs label-success">
+                              Endpoint
                             </Badge>
                           )}
                         </div>
@@ -852,7 +886,7 @@ export default function AdminRoles() {
 
       {/* Create Role Dialog */}
       <Dialog open={creatingRole} onOpenChange={(open) => !open && setCreatingRole(false)}>
-        <DialogContent className="max-w-md">
+        <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Add New Role</DialogTitle>
             <DialogDescription>
@@ -860,37 +894,130 @@ export default function AdminRoles() {
             </DialogDescription>
           </DialogHeader>
           <form onSubmit={handleCreateSubmit} className="space-y-4">
+            {/* Role Type Selector */}
             <div className="space-y-2">
-              <Label htmlFor="roleName">Role Name</Label>
-              <div className="flex items-center gap-2">
-                <Checkbox
-                  id="createAsSshRole"
-                  checked={createAsSshRole}
-                  onCheckedChange={(v) => setCreateAsSshRole(Boolean(v))}
-                />
-                <Label htmlFor="createAsSshRole" className="text-sm font-normal">
-                  SSH role (auto-prefix <span className="font-mono">ssh:</span>)
-                </Label>
+              <Label>Role Type</Label>
+              <div className="flex gap-1 p-1 bg-muted rounded-lg">
+                <button
+                  type="button"
+                  className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${roleType === "ssh" ? "bg-background shadow-sm" : "text-muted-foreground hover:text-foreground"}`}
+                  onClick={() => { setRoleType("ssh"); setFormData({ ...formData, name: "" }); }}
+                >
+                  <KeyRound className="h-3.5 w-3.5" />
+                  SSH
+                </button>
+                <button
+                  type="button"
+                  className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${roleType === "endpoint" ? "bg-background shadow-sm" : "text-muted-foreground hover:text-foreground"}`}
+                  onClick={() => { setRoleType("endpoint"); setFormData({ ...formData, name: "" }); setSelectedGatewayId(""); setSelectedBackendName(""); }}
+                >
+                  <Globe className="h-3.5 w-3.5" />
+                  Endpoint
+                </button>
+                <button
+                  type="button"
+                  className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${roleType === "custom" ? "bg-background shadow-sm" : "text-muted-foreground hover:text-foreground"}`}
+                  onClick={() => { setRoleType("custom"); setFormData({ ...formData, name: "" }); }}
+                >
+                  Custom
+                </button>
               </div>
-              <Input
-                id="roleName"
-                value={formData.name}
-                onChange={(e) => {
-                  const raw = e.target.value;
-                  setFormData({
-                    ...formData,
-                    name: createAsSshRole ? normalizeSshRoleName(raw) : raw,
-                  });
-                }}
-                placeholder={createAsSshRole ? "e.g., root" : "e.g., developer"}
-                required
-              />
-              {createAsSshRole && (
-                <p className="text-xs text-muted-foreground">
-                  This will create a role like <span className="font-mono">ssh:root</span>, which grants SSH username access.
-                </p>
-              )}
             </div>
+
+            {/* SSH Role Name Input */}
+            {roleType === "ssh" && (
+              <div className="space-y-2">
+                <Label htmlFor="roleName">SSH Username</Label>
+                <Input
+                  id="roleName"
+                  value={formData.name}
+                  onChange={(e) => {
+                    const raw = e.target.value;
+                    setFormData({ ...formData, name: normalizeSshRoleName(raw) });
+                  }}
+                  placeholder="e.g., root"
+                  required
+                />
+                <p className="text-xs text-muted-foreground">
+                  Creates role <span className="font-mono">ssh:{formData.name.replace(/^ssh[:\-]/i, "") || "username"}</span> — grants SSH access as this user.
+                </p>
+              </div>
+            )}
+
+            {/* Endpoint Role - Gateway & Backend Dropdowns */}
+            {roleType === "endpoint" && (
+              <div className="space-y-3">
+                <div className="space-y-2">
+                  <Label>Gateway</Label>
+                  <Select
+                    value={selectedGatewayId}
+                    onValueChange={(v) => {
+                      setSelectedGatewayId(v);
+                      setSelectedBackendName("");
+                    }}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select a gateway..." />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {(gatewayEndpoints || []).map((gw) => (
+                        <SelectItem key={gw.id} value={gw.id}>
+                          {gw.displayName || gw.id}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                {selectedGatewayId && (
+                  <div className="space-y-2">
+                    <Label>Backend</Label>
+                    <Select
+                      value={selectedBackendName}
+                      onValueChange={setSelectedBackendName}
+                    >
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select a backend..." />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {(() => {
+                          const gw = (gatewayEndpoints || []).find((g) => g.id === selectedGatewayId);
+                          const backends = gw?.backends?.length ? gw.backends : [{ name: "Default", accessible: true }];
+                          return backends.map((b) => (
+                            <SelectItem key={b.name} value={b.name}>
+                              {b.name}
+                            </SelectItem>
+                          ));
+                        })()}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
+                {selectedGatewayId && selectedBackendName && (
+                  <p className="text-xs text-muted-foreground">
+                    Creates role <span className="font-mono">dest:{selectedGatewayId}:{selectedBackendName}</span> — grants access to this endpoint.
+                  </p>
+                )}
+                {(!gatewayEndpoints || gatewayEndpoints.length === 0) && (
+                  <p className="text-xs text-amber-600 dark:text-amber-400">
+                    No gateways are currently online. You can still create the role manually using "Custom" type.
+                  </p>
+                )}
+              </div>
+            )}
+
+            {/* Custom Role Name Input */}
+            {roleType === "custom" && (
+              <div className="space-y-2">
+                <Label htmlFor="roleName">Role Name</Label>
+                <Input
+                  id="roleName"
+                  value={formData.name}
+                  onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                  placeholder="e.g., developer"
+                  required
+                />
+              </div>
+            )}
 
             <div className="space-y-2">
               <Label htmlFor="roleDescription">Description</Label>
@@ -904,7 +1031,7 @@ export default function AdminRoles() {
             </div>
 
             {/* Policy Configuration Section - only for SSH roles */}
-            {createAsSshRole && (
+            {roleType === "ssh" && (
               <div className="space-y-4 pt-4 border-t">
                 <div className="flex items-center gap-2">
                   <Shield className="h-4 w-4 text-muted-foreground" />
@@ -1128,7 +1255,14 @@ export default function AdminRoles() {
               <Button type="button" variant="outline" onClick={() => setCreatingRole(false)}>
                 Cancel
               </Button>
-              <Button type="submit" disabled={createMutation.isPending || isCreatingPolicy}>
+              <Button
+                type="submit"
+                disabled={
+                  createMutation.isPending ||
+                  isCreatingPolicy ||
+                  (roleType === "endpoint" && (!selectedGatewayId || !selectedBackendName))
+                }
+              >
                 {createMutation.isPending || isCreatingPolicy ? "Creating..." : "Create Role"}
               </Button>
             </DialogFooter>

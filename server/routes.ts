@@ -126,6 +126,7 @@ import {
 } from "./lib/tidecloakApi";
 import type { ChangeSetRequest, AccessApproval } from "./lib/auth/keycloakTypes";
 import { getAllowedSshUsersFromToken } from "./lib/auth/sshUsers";
+import { parseDestRolesFromToken, hasDestAccess } from "./lib/auth/destRoles";
 import { verifyTideCloakToken } from "./lib/auth/tideJWT";
 
 // SSH connections are handled via WebSocket TCP bridge
@@ -1266,6 +1267,7 @@ export async function registerRoutes(
               for (const gw of data.gateways) {
                 results.push({
                   ...gw,
+                  backends: gw.backends || [],
                   signalServerId: ss.id,
                   signalServerName: ss.name,
                   signalServerUrl: ss.url,
@@ -1278,7 +1280,25 @@ export async function registerRoutes(
         });
 
         await Promise.all(fetches);
-        res.json(results);
+
+        // Annotate backends with access info based on dest: roles.
+        // Every user (including admins) must have an explicit
+        // dest:<gatewayId>:<backendName> role to access a backend.
+        const destPerms = parseDestRolesFromToken(req.tokenPayload);
+        // Debug: show raw token roles alongside parsed dest permissions
+        const rawRealmRoles = req.tokenPayload?.realm_access?.roles || [];
+        const rawClientRoles = Object.values(req.tokenPayload?.resource_access || {}).flatMap((a: any) => a.roles || []);
+        log(`[dest-roles] user=${req.user?.username} realmRoles=${JSON.stringify(rawRealmRoles)} clientRoles=${JSON.stringify(rawClientRoles)} destPerms=${JSON.stringify(destPerms)} gateways=${results.map(g => `${g.id}:[${g.backends.map(b => b.name).join(",")}]`).join("; ")}`);
+
+        const annotated = results.map((gw) => {
+          const backends = (gw.backends.length > 0 ? gw.backends : [{ name: "Default" }]).map((b) => ({
+            name: b.name,
+            accessible: hasDestAccess(destPerms, gw.id, b.name),
+          }));
+          return { ...gw, backends };
+        });
+
+        res.json(annotated);
       } catch (error) {
         log(`Failed to fetch gateway endpoints: ${error}`);
         res.status(500).json({ message: "Failed to fetch gateway endpoints" });

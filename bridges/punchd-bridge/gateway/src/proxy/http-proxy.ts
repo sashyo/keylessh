@@ -58,6 +58,8 @@ export interface ProxyOptions {
   tls?: { key: string; cert: string };
   /** Internal TideCloak URL for proxying (when KC_HOSTNAME is a public URL) */
   tcInternalUrl?: string;
+  /** Gateway ID for dest: role enforcement */
+  gatewayId?: string;
 }
 
 export interface ProxyStats {
@@ -1026,6 +1028,39 @@ export function createProxy(options: ProxyOptions): {
         }
 
         stats.authorizedRequests++;
+
+        // ── dest: role enforcement ─────────────────────────
+        // Users must have an explicit dest:<gatewayId>:<backendName> role
+        // to access any gateway backend. No matching role = 403.
+        if (options.gatewayId && payload) {
+          // dest:<gatewayId>:<backendName> — split on first and second ':'
+          const realmRoles: string[] = (payload as any)?.realm_access?.roles ?? [];
+          const clientId = options.tcConfig.resource;
+          const clientRoles: string[] = (payload as any)?.resource_access?.[clientId]?.roles ?? [];
+          const allRoles = [...realmRoles, ...clientRoles];
+
+          const backend = activeBackend || "Default";
+          const gwIdLower = options.gatewayId!.toLowerCase();
+          const backendLower = backend.toLowerCase();
+          const hasAccess = allRoles.some((r: string) => {
+            if (!/^dest:/i.test(r)) return false;
+            // Split "dest:<gatewayId>:<backendName>" on first two colons
+            const firstColon = r.indexOf(":");
+            const secondColon = r.indexOf(":", firstColon + 1);
+            if (secondColon < 0) return false;
+            const gwId = r.slice(firstColon + 1, secondColon);
+            const bk = r.slice(secondColon + 1);
+            return gwId.toLowerCase() === gwIdLower && bk.toLowerCase() === backendLower;
+          });
+          if (!hasAccess) {
+            const destRoles = allRoles.filter((r: string) => /^dest:/i.test(r));
+            console.log(`[Gateway] dest role denied: gwId=${options.gatewayId} backend="${backend}" clientId="${clientId}" destRoles=${JSON.stringify(destRoles)} allRolesCount=${allRoles.length}`);
+            stats.rejectedRequests++;
+            res.writeHead(403, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Forbidden: no dest role for this backend" }));
+            return;
+          }
+        }
       }
 
       // ── Proxy to backend ─────────────────────────────────

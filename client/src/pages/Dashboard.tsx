@@ -17,7 +17,7 @@ import { api, type GatewayEndpoint } from "@/lib/api";
 
 type ServiceItem =
   | { kind: "ssh"; server: ServerWithAccess }
-  | { kind: "web"; endpoint: GatewayEndpoint; backend: { name: string } };
+  | { kind: "web"; endpoint: GatewayEndpoint; backend: { name: string; accessible?: boolean } };
 
 function ServerCard({ server, sshBlocked }: { server: ServerWithAccess; sshBlocked?: boolean }) {
   const [selectedUser, setSelectedUser] = useState<string>(server.allowedSshUsers[0] || "");
@@ -152,7 +152,9 @@ function ServerCardSkeleton() {
   );
 }
 
-function GatewayEndpointCard({ endpoint, backend }: { endpoint: GatewayEndpoint; backend: { name: string } }) {
+function GatewayEndpointCard({ endpoint, backend }: { endpoint: GatewayEndpoint; backend: { name: string; accessible?: boolean } }) {
+  const accessible = backend.accessible !== false;
+  const isDisabled = !accessible || !endpoint.online;
   const handleConnect = () => {
     const url = endpoint.signalServerUrl.replace(/\/$/, "");
     const token = localStorage.getItem("access_token") || "";
@@ -164,9 +166,6 @@ function GatewayEndpointCard({ endpoint, backend }: { endpoint: GatewayEndpoint;
     window.open(`${url}/api/select?${params.toString()}`, "_blank");
   };
 
-  const isDefaultBackend = !endpoint.backends?.length || (endpoint.backends.length === 1 && endpoint.backends[0].name === backend.name);
-  const title = isDefaultBackend ? endpoint.displayName : `${endpoint.displayName} — ${backend.name}`;
-
   return (
     <Card className="group cyber-card hover-neon-glow">
       <CardHeader className="pb-3">
@@ -176,9 +175,9 @@ function GatewayEndpointCard({ endpoint, backend }: { endpoint: GatewayEndpoint;
               <Globe className="h-5 w-5 text-[hsl(var(--neon-purple))]" />
             </div>
             <div>
-              <CardTitle className="text-base">{title}</CardTitle>
+              <CardTitle className="text-base">{backend.name}</CardTitle>
               <CardDescription className="text-xs">
-                {endpoint.signalServerName}
+                {endpoint.displayName}
               </CardDescription>
             </div>
           </div>
@@ -202,15 +201,29 @@ function GatewayEndpointCard({ endpoint, backend }: { endpoint: GatewayEndpoint;
           <p className="text-sm text-muted-foreground">{endpoint.description}</p>
         )}
 
-        <Button
-          className="w-full gap-2 btn-primary-glow"
-          onClick={handleConnect}
-          disabled={!endpoint.online}
-        >
-          <ExternalLink className="h-4 w-4" />
-          Connect
-          <ArrowRight className="h-4 w-4" />
-        </Button>
+        {!accessible && (
+          <p className="text-xs text-muted-foreground">
+            No access to this endpoint. Ask an admin to grant a role like{" "}
+            <span className="font-mono">dest:{endpoint.id}:{backend.name}</span>.
+          </p>
+        )}
+
+        {isDisabled ? (
+          <Button className="w-full gap-2" disabled>
+            <ExternalLink className="h-4 w-4" />
+            Connect
+            <ArrowRight className="h-4 w-4" />
+          </Button>
+        ) : (
+          <Button
+            className="w-full gap-2 btn-primary-glow"
+            onClick={handleConnect}
+          >
+            <ExternalLink className="h-4 w-4" />
+            Connect
+            <ArrowRight className="h-4 w-4" />
+          </Button>
+        )}
       </CardContent>
     </Card>
   );
@@ -288,9 +301,8 @@ function ServiceListItem({ item, sshBlocked }: { item: ServiceItem; sshBlocked?:
 
   // Web endpoint
   const { endpoint, backend } = item;
-  const isDefaultBackend = !endpoint.backends?.length || (endpoint.backends.length === 1 && endpoint.backends[0].name === backend.name);
-  const title = isDefaultBackend ? endpoint.displayName : `${endpoint.displayName} — ${backend.name}`;
-
+  const accessible = backend.accessible !== false;
+  const isDisabled = !accessible || !endpoint.online;
   const handleConnect = () => {
     const url = endpoint.signalServerUrl.replace(/\/$/, "");
     const token = localStorage.getItem("access_token") || "";
@@ -306,9 +318,9 @@ function ServiceListItem({ item, sshBlocked }: { item: ServiceItem; sshBlocked?:
           <Globe className="h-5 w-5 text-[hsl(var(--neon-purple))]" />
         </div>
         <div className="min-w-0">
-          <p className="text-sm font-medium truncate">{title}</p>
+          <p className="text-sm font-medium truncate">{backend.name}</p>
           <p className="text-xs text-muted-foreground truncate">
-            {endpoint.signalServerName}
+            {endpoint.displayName}
           </p>
         </div>
       </div>
@@ -324,15 +336,17 @@ function ServiceListItem({ item, sshBlocked }: { item: ServiceItem; sshBlocked?:
             Offline
           </Badge>
         )}
-        <Button
-          size="sm"
-          className="gap-1.5 btn-primary-glow min-h-[36px]"
-          onClick={handleConnect}
-          disabled={!endpoint.online}
-        >
-          <ExternalLink className="h-4 w-4" />
-          Connect
-        </Button>
+        {isDisabled ? (
+          <Button size="sm" disabled className="gap-1.5 min-h-[36px]">
+            <ExternalLink className="h-4 w-4" />
+            Connect
+          </Button>
+        ) : (
+          <Button size="sm" className="gap-1.5 btn-primary-glow min-h-[36px]" onClick={handleConnect}>
+            <ExternalLink className="h-4 w-4" />
+            Connect
+          </Button>
+        )}
       </div>
     </div>
   );
@@ -444,6 +458,7 @@ export default function Dashboard() {
 
   const [search, setSearch] = useState("");
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
+  const [typeFilter, setTypeFilter] = useState<"all" | "ssh" | "web">("all");
 
   const allServices: ServiceItem[] = useMemo(() => {
     const items: ServiceItem[] = [];
@@ -451,32 +466,51 @@ export default function Dashboard() {
       items.push({ kind: "ssh", server });
     }
     for (const endpoint of gatewayEndpoints ?? []) {
-      const backends = endpoint.backends?.length > 0 ? endpoint.backends : [{ name: "Default" }];
+      const backends = endpoint.backends?.length > 0 ? endpoint.backends : [{ name: "Default", accessible: true }];
       for (const backend of backends) {
         items.push({ kind: "web", endpoint, backend });
       }
     }
+    // Sort: accessible/connectable items first
+    items.sort((a, b) => {
+      const aOk = a.kind === "ssh"
+        ? (a.server.allowedSshUsers.length > 0 && a.server.status === "online") ? 0 : 1
+        : (a.backend.accessible !== false ? 0 : 1);
+      const bOk = b.kind === "ssh"
+        ? (b.server.allowedSshUsers.length > 0 && b.server.status === "online") ? 0 : 1
+        : (b.backend.accessible !== false ? 0 : 1);
+      return aOk - bOk;
+    });
     return items;
   }, [servers, gatewayEndpoints]);
 
+  const sshCount = useMemo(() => allServices.filter((i) => i.kind === "ssh").length, [allServices]);
+  const webCount = useMemo(() => allServices.filter((i) => i.kind === "web").length, [allServices]);
+
   const filteredServices = useMemo(() => {
-    if (!search.trim()) return allServices;
-    const q = search.toLowerCase();
-    return allServices.filter((item) => {
-      if (item.kind === "ssh") {
-        const s = item.server;
-        return s.name.toLowerCase().includes(q)
-          || s.host.toLowerCase().includes(q)
-          || s.environment.toLowerCase().includes(q)
-          || s.tags?.some((t) => t.toLowerCase().includes(q));
-      }
-      const { endpoint, backend } = item;
-      return endpoint.displayName.toLowerCase().includes(q)
-        || backend.name.toLowerCase().includes(q)
-        || endpoint.description?.toLowerCase().includes(q)
-        || endpoint.signalServerName.toLowerCase().includes(q);
-    });
-  }, [allServices, search]);
+    let list = allServices;
+    if (typeFilter !== "all") {
+      list = list.filter((item) => item.kind === typeFilter);
+    }
+    if (search.trim()) {
+      const q = search.toLowerCase();
+      list = list.filter((item) => {
+        if (item.kind === "ssh") {
+          const s = item.server;
+          return s.name.toLowerCase().includes(q)
+            || s.host.toLowerCase().includes(q)
+            || s.environment.toLowerCase().includes(q)
+            || s.tags?.some((t) => t.toLowerCase().includes(q));
+        }
+        const { endpoint, backend } = item;
+        return endpoint.displayName.toLowerCase().includes(q)
+          || backend.name.toLowerCase().includes(q)
+          || endpoint.description?.toLowerCase().includes(q)
+          || endpoint.signalServerName.toLowerCase().includes(q);
+      });
+    }
+    return list;
+  }, [allServices, search, typeFilter]);
 
   return (
     <div className="p-4 sm:p-6 space-y-6 sm:space-y-8">
@@ -535,14 +569,14 @@ export default function Dashboard() {
             Available Services
           </h2>
           <Badge variant="secondary" className="label-info">
-            {search.trim() && filteredServices.length !== allServices.length
+            {filteredServices.length !== allServices.length
               ? `${filteredServices.length} / ${allServices.length}`
               : allServices.length}
           </Badge>
         </div>
 
         {!serversLoading && allServices.length > 0 && (
-          <div className="flex items-center gap-2">
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
             <div className="relative flex-1">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
               <Input
@@ -552,25 +586,59 @@ export default function Dashboard() {
                 className="pl-9"
               />
             </div>
-            <div className="flex items-center border border-border rounded-md">
-              <Button
-                variant="ghost"
-                size="sm"
-                className={`h-9 px-2.5 rounded-r-none ${viewMode === "grid" ? "bg-accent" : ""}`}
-                onClick={() => setViewMode("grid")}
-                title="Grid view"
-              >
-                <LayoutGrid className="h-4 w-4" />
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                className={`h-9 px-2.5 rounded-l-none ${viewMode === "list" ? "bg-accent" : ""}`}
-                onClick={() => setViewMode("list")}
-                title="List view"
-              >
-                <List className="h-4 w-4" />
-              </Button>
+            <div className="flex items-center gap-2">
+              <div className="flex items-center border border-border rounded-md">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className={`h-9 px-3 rounded-r-none text-xs ${typeFilter === "all" ? "bg-accent" : ""}`}
+                  onClick={() => setTypeFilter("all")}
+                >
+                  All
+                </Button>
+                {sshCount > 0 && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className={`h-9 px-3 rounded-none border-x border-border text-xs gap-1.5 ${typeFilter === "ssh" ? "bg-accent" : ""}`}
+                    onClick={() => setTypeFilter("ssh")}
+                  >
+                    <Terminal className="h-3.5 w-3.5" />
+                    SSH
+                  </Button>
+                )}
+                {webCount > 0 && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className={`h-9 px-3 rounded-l-none text-xs gap-1.5 ${typeFilter === "web" ? "bg-accent" : ""}`}
+                    onClick={() => setTypeFilter("web")}
+                  >
+                    <Globe className="h-3.5 w-3.5" />
+                    Endpoints
+                  </Button>
+                )}
+              </div>
+              <div className="flex items-center border border-border rounded-md">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className={`h-9 px-2.5 rounded-r-none ${viewMode === "grid" ? "bg-accent" : ""}`}
+                  onClick={() => setViewMode("grid")}
+                  title="Grid view"
+                >
+                  <LayoutGrid className="h-4 w-4" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className={`h-9 px-2.5 rounded-l-none ${viewMode === "list" ? "bg-accent" : ""}`}
+                  onClick={() => setViewMode("list")}
+                  title="List view"
+                >
+                  <List className="h-4 w-4" />
+                </Button>
+              </div>
             </div>
           </div>
         )}
