@@ -48,6 +48,7 @@ async function main() {
     turnSecret: config.turnSecret,
     tls,
     tcInternalUrl: config.tcInternalUrl,
+    gatewayId: config.gatewayId,
   });
 
   // ── Health Check ─────────────────────────────────────────────────
