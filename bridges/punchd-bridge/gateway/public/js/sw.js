@@ -17,6 +17,9 @@
 // Clients that have signaled an active DataChannel
 var dcClients = new Set();
 
+// Callbacks waiting for a specific client's DC to become ready
+var dcWaiters = new Map(); // clientId → [resolve, ...]
+
 self.addEventListener("install", function () {
   self.skipWaiting();
 });
@@ -42,10 +45,34 @@ self.addEventListener("message", function (event) {
   if (!clientId) return;
   if (event.data && event.data.type === "dc_ready") {
     dcClients.add(clientId);
+    // Wake up any fetch handlers waiting for this client's DC
+    var waiters = dcWaiters.get(clientId);
+    if (waiters) {
+      waiters.forEach(function (resolve) { resolve(true); });
+      dcWaiters.delete(clientId);
+    }
   } else if (event.data && event.data.type === "dc_closed") {
     dcClients.delete(clientId);
   }
 });
+
+/** Wait for a client's DataChannel to become ready, with timeout. */
+function waitForDc(clientId, timeoutMs) {
+  if (dcClients.has(clientId)) return Promise.resolve(true);
+  return new Promise(function (resolve) {
+    var timer = setTimeout(function () { resolve(false); }, timeoutMs);
+    var wrapped = function (ready) {
+      clearTimeout(timer);
+      resolve(ready);
+    };
+    var list = dcWaiters.get(clientId);
+    if (!list) {
+      list = [];
+      dcWaiters.set(clientId, list);
+    }
+    list.push(wrapped);
+  });
+}
 
 /** Gateway-internal paths — skip DataChannel, go through relay. */
 var GATEWAY_PATHS = /^\/(js\/|auth\/|login|webrtc-config|_idp\/|realms\/|resources\/|portal|health)/;
@@ -97,15 +124,26 @@ self.addEventListener("fetch", function (event) {
   // Skip gateway-internal paths (strip prefix first for matching)
   if (GATEWAY_PATHS.test(stripPrefix(url.pathname))) return;
 
-  // Only intercept when this client has an active DataChannel.
-  // Without DC, let the browser handle the request natively —
-  // this preserves proper cookie handling (HttpOnly), caching,
-  // and avoids stale data when navigating back.
-  if (!event.clientId || !dcClients.has(event.clientId)) {
+  // If DC is already active, route through it immediately.
+  // If not yet ready, wait up to 8s for it — this prevents the burst
+  // of sub-resource requests from flooding the STUN relay while
+  // WebRTC is still connecting. Falls back to network on timeout.
+  if (!event.clientId) return;
+
+  if (dcClients.has(event.clientId)) {
+    event.respondWith(rewriteAndHandle(event));
     return;
   }
 
-  event.respondWith(rewriteAndHandle(event));
+  event.respondWith(
+    waitForDc(event.clientId, 8000).then(function (ready) {
+      if (ready) {
+        return rewriteAndHandle(event);
+      }
+      // DC didn't connect in time — fall back to network (relay)
+      return fetch(event.request);
+    })
+  );
 });
 
 async function rewriteAndHandle(event) {

@@ -546,7 +546,7 @@ const server = useTls
 
 // ── WebSocket Server (signaling on any path) ────────────────────
 
-const signalWss = new WebSocketServer({ noServer: true, maxPayload: 1 * 1024 * 1024 });
+const signalWss = new WebSocketServer({ noServer: true, maxPayload: 5 * 1024 * 1024 });
 
 server.on("upgrade", (req, socket, head) => {
   signalWss.handleUpgrade(req, socket, head, (ws) => {

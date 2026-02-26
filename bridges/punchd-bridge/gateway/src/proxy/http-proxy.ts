@@ -42,7 +42,7 @@ import {
 export interface ProxyOptions {
   listenPort: number;
   backendUrl: string;
-  backends?: { name: string; url: string; noAuth?: boolean }[];
+  backends?: { name: string; url: string; noAuth?: boolean; stripAuth?: boolean }[];
   auth: TidecloakAuth;
   stripAuthHeader: boolean;
   tcConfig: TidecloakConfig;
@@ -278,15 +278,6 @@ export function createProxy(options: ProxyOptions): {
       `$1${prefix}$2`
     );
   }
-
-  // Floating button injected into HTML pages so users can switch backend
-  // without manually clearing cookies. Navigates to /portal on the STUN
-  // server which clears selection cookies and shows the portal UI.
-  const switchButtonHtml = `<div id="kls-switch" style="position:fixed;bottom:16px;right:16px;z-index:99999;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif">` +
-    `<a href="/portal" style="display:inline-flex;align-items:center;gap:6px;padding:8px 14px;background:#1e293b;color:#f8fafc;border:1px solid #334155;border-radius:8px;font-size:13px;font-weight:500;text-decoration:none;box-shadow:0 2px 8px rgba(0,0,0,.3);transition:background .15s" ` +
-    `onmouseover="this.style.background='#334155'" onmouseout="this.style.background='#1e293b'">` +
-    `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/></svg>` +
-    `Switch</a></div>`;
 
   function resolveBackend(req: IncomingMessage, activeBackend?: string): URL {
     // 1. Path-based /__b/<name> prefix (highest priority)
@@ -541,6 +532,13 @@ export function createProxy(options: ProxyOptions): {
 
       // ── Public routes ────────────────────────────────────
 
+      // Favicon — return empty 204 to avoid falling through to backend role check
+      if (path === "/favicon.ico") {
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+
       // Static JS files
       if (path.startsWith("/js/") && path.endsWith(".js")) {
         // Allow SW to control root scope even though it lives under /js/
@@ -700,6 +698,13 @@ export function createProxy(options: ProxyOptions): {
         }
         const cookies = parseCookies(req.headers.cookie);
         let accessToken = cookies["gateway_access"];
+        // Also accept Authorization: Bearer token (relay flow has no cookies)
+        if (!accessToken) {
+          const authHeader = req.headers.authorization;
+          if (authHeader?.startsWith("Bearer ")) {
+            accessToken = authHeader.slice(7);
+          }
+        }
         if (!accessToken) {
           res.writeHead(401, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "No session" }));
@@ -1045,7 +1050,7 @@ export function createProxy(options: ProxyOptions): {
           const clientRoles: string[] = (payload as any)?.resource_access?.[clientId]?.roles ?? [];
           const allRoles = [...realmRoles, ...clientRoles];
 
-          const backend = activeBackend || "Default";
+          const backend = activeBackend || options.backends?.[0]?.name || "Default";
           const gwIdLower = options.gatewayId!.toLowerCase();
           const backendLower = backend.toLowerCase();
           const hasAccess = allRoles.some((r: string) => {
@@ -1117,6 +1122,8 @@ export function createProxy(options: ProxyOptions): {
       const isDcRequest = !!proxyHeaders["x-dc-request"];
       delete proxyHeaders["x-dc-request"]; // don't leak to backend
       delete proxyHeaders["x-gateway-backend"]; // don't leak routing header to backend
+      // Request uncompressed responses so we can rewrite HTML (URL prefixing, script injection)
+      delete proxyHeaders["accept-encoding"];
       const backendKey = activeBackend || options.backends?.[0]?.name || "default";
       if (isDcRequest && payload?.sub) {
         const jarCookies = getBackendCookieHeader(`${payload.sub}:${backendKey}`);
@@ -1240,10 +1247,6 @@ export function createProxy(options: ProxyOptions): {
                 } else {
                   html += script;
                 }
-              }
-              // Inject floating "Switch" button for multi-backend gateways
-              if (backendMap.size > 1 && html.includes("</body>")) {
-                html = html.replace("</body>", `${switchButtonHtml}\n</body>`);
               }
               delete headers["content-length"];
               res.writeHead(proxyRes.statusCode || 502, headers);

@@ -315,15 +315,39 @@ export function registerWithStun(
           res.on("end", () => {
             if (aborted) return;
             pendingRequests.delete(requestId);
-            const responseBody = Buffer.concat(chunks).toString("base64");
-            console.log(`[STUN-Reg] Relay response: ${res.statusCode} for ${url} (${responseBody.length} bytes b64)`);
-            safeSend({
-              type: "http_response",
-              id: requestId,
-              statusCode: res.statusCode || 500,
-              headers: responseHeaders,
-              body: responseBody,
-            });
+            const responseBody = Buffer.concat(chunks);
+
+            // If response body > 512KB, send as chunked to stay under WS maxPayload.
+            // Base64 of 512KB ≈ 700KB which fits in a 1MB WS frame with headroom.
+            const MAX_SINGLE_WS = 512 * 1024;
+            if (responseBody.length > MAX_SINGLE_WS) {
+              console.log(`[STUN-Reg] Relay response (chunked): ${res.statusCode} for ${url} (${responseBody.length} bytes)`);
+              safeSend({
+                type: "http_response_start",
+                id: requestId,
+                statusCode: res.statusCode || 200,
+                headers: responseHeaders,
+              });
+              const CHUNK_SIZE = 256 * 1024;
+              for (let i = 0; i < responseBody.length; i += CHUNK_SIZE) {
+                safeSend({
+                  type: "http_response_chunk",
+                  id: requestId,
+                  data: responseBody.subarray(i, Math.min(i + CHUNK_SIZE, responseBody.length)).toString("base64"),
+                });
+              }
+              safeSend({ type: "http_response_end", id: requestId });
+            } else {
+              const bodyB64 = responseBody.toString("base64");
+              console.log(`[STUN-Reg] Relay response: ${res.statusCode} for ${url} (${bodyB64.length} bytes b64)`);
+              safeSend({
+                type: "http_response",
+                id: requestId,
+                statusCode: res.statusCode || 500,
+                headers: responseHeaders,
+                body: bodyB64,
+              });
+            }
           });
         }
 

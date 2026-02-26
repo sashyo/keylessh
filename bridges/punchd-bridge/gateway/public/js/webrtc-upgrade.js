@@ -13,7 +13,13 @@
 (function () {
   "use strict";
 
-  const CONFIG_ENDPOINT = "/webrtc-config";
+  // Detect /__b/<name> prefix from current page URL so gateway-internal
+  // fetches (session-token, webrtc-config) route through the STUN relay
+  const BACKEND_PREFIX = (function () {
+    const m = location.pathname.match(/^\/__b\/[^/]+/);
+    return m ? m[0] : "";
+  })();
+  const CONFIG_ENDPOINT = BACKEND_PREFIX + "/webrtc-config";
   const NativeWebSocket = window.WebSocket;
   const RECONNECT_DELAY = 5000;
   const MAX_RECONNECT_DELAY = 60000;
@@ -206,6 +212,27 @@
 
       case "error":
         console.error("[WebRTC] Signaling error:", msg.message);
+        // Retry pairing if gateway was temporarily unavailable
+        if (msg.message && msg.message.indexOf("No gateway") !== -1 && !pairedGatewayId) {
+          var retryDelay = Math.min(3000 * Math.pow(1.5, reconnectAttempts), 30000);
+          reconnectAttempts++;
+          console.log("[WebRTC] Will retry pairing in " + Math.round(retryDelay / 1000) + "s...");
+          setTimeout(function () {
+            if (signalingWs && signalingWs.readyState === WebSocket.OPEN && !pairedGatewayId) {
+              console.log("[WebRTC] Retrying registration/pairing...");
+              var registerMsg = {
+                type: "register",
+                role: "client",
+                id: clientId,
+                token: sessionToken,
+              };
+              if (config.targetGatewayId) {
+                registerMsg.targetGatewayId = config.targetGatewayId;
+              }
+              signalingWs.send(JSON.stringify(registerMsg));
+            }
+          }, retryDelay);
+        }
         break;
     }
   }
@@ -561,7 +588,7 @@
 
   async function fetchSessionToken() {
     try {
-      const res = await fetch("/auth/session-token", {
+      const res = await fetch(BACKEND_PREFIX + "/auth/session-token", {
         headers: { "X-Requested-With": "XMLHttpRequest" },
       });
       if (!res.ok) {
