@@ -212,6 +212,14 @@ async function handleViaDataChannel(clientId, request) {
       }, 10000);
 
       mc.port1.onmessage = function (e) {
+        // Progress signal: large response started downloading, extend timeout
+        if (e.data && e.data.type === "progress") {
+          clearTimeout(timer);
+          timer = setTimeout(function () {
+            resolve(fetch(fallbackRequest));
+          }, 300000); // 5 minutes for large downloads (video segments)
+          return;
+        }
         clearTimeout(timer);
         if (e.data.error) {
           resolve(fetch(fallbackRequest));
