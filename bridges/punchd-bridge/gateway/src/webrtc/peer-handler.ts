@@ -289,7 +289,7 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
 
           // Queue-based sending with flow control.
           // All messages sent as binary to avoid SCTP PPID confusion.
-          const DC_MAX_BUFFER = 65_536;
+          const DC_MAX_BUFFER = 512_000; // 512KB — higher buffer for video throughput
           const queue: { binary: Buffer }[] = [];
           let scheduled = false;
 
@@ -300,7 +300,7 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
               if (dc.bufferedAmount() > DC_MAX_BUFFER) {
                 res.pause();
                 scheduled = true;
-                setTimeout(flush, 5);
+                setTimeout(flush, 1);
                 return;
               }
               try {
@@ -308,7 +308,7 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
                 if (!sent) {
                   res.pause();
                   scheduled = true;
-                  setTimeout(flush, 10);
+                  setTimeout(flush, 2);
                   return;
                 }
               } catch {
