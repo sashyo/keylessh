@@ -1,6 +1,6 @@
 import type { Express } from "express";
 import type { Server } from "http";
-import { storage, approvalStorage, policyStorage, pendingPolicyStorage, templateStorage, subscriptionStorage, recordingStorage, fileOperationStorage, bridgeStorage, type ApprovalType } from "./storage";
+import { storage, approvalStorage, policyStorage, pendingPolicyStorage, templateStorage, subscriptionStorage, recordingStorage, fileOperationStorage, bridgeStorage, signalServerStorage, type ApprovalType } from "./storage";
 import { subscriptionTiers, type SubscriptionTier } from "@shared/schema";
 import * as stripeLib from "./lib/stripe";
 import { log, logForseti, logError } from "./logger";
@@ -126,6 +126,7 @@ import {
 } from "./lib/tidecloakApi";
 import type { ChangeSetRequest, AccessApproval } from "./lib/auth/keycloakTypes";
 import { getAllowedSshUsersFromToken } from "./lib/auth/sshUsers";
+import { parseDestRolesFromToken, hasDestAccess } from "./lib/auth/destRoles";
 import { verifyTideCloakToken } from "./lib/auth/tideJWT";
 
 // SSH connections are handled via WebSocket TCP bridge
@@ -1110,6 +1111,197 @@ export async function registerRoutes(
       } catch (error) {
         log(`Failed to delete bridge: ${error}`);
         res.status(500).json({ message: "Failed to delete bridge" });
+      }
+    }
+  );
+
+  // ============================================
+  // Admin Signal Server Routes
+  // ============================================
+
+  // GET /api/admin/signal-servers - List all signal servers
+  app.get(
+    "/api/admin/signal-servers",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const list = await signalServerStorage.getSignalServers();
+        res.json(list);
+      } catch (error) {
+        log(`Failed to fetch signal servers: ${error}`);
+        res.status(500).json({ message: "Failed to fetch signal servers" });
+      }
+    }
+  );
+
+  // POST /api/admin/signal-servers - Create new signal server
+  app.post(
+    "/api/admin/signal-servers",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const { name, url, description, enabled } = req.body;
+        if (!name || !url) {
+          return res.status(400).json({ message: "Name and URL are required" });
+        }
+        const signalServer = await signalServerStorage.createSignalServer({
+          name,
+          url,
+          description,
+          enabled: enabled !== false,
+        });
+        res.status(201).json(signalServer);
+      } catch (error) {
+        log(`Failed to create signal server: ${error}`);
+        res.status(500).json({ message: "Failed to create signal server" });
+      }
+    }
+  );
+
+  // GET /api/admin/signal-servers/:id - Get a specific signal server
+  app.get(
+    "/api/admin/signal-servers/:id",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const signalServer = await signalServerStorage.getSignalServer(req.params.id);
+        if (!signalServer) {
+          return res.status(404).json({ message: "Signal server not found" });
+        }
+        res.json(signalServer);
+      } catch (error) {
+        log(`Failed to fetch signal server: ${error}`);
+        res.status(500).json({ message: "Failed to fetch signal server" });
+      }
+    }
+  );
+
+  // PUT /api/admin/signal-servers/:id - Update a signal server
+  app.put(
+    "/api/admin/signal-servers/:id",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const { name, url, description, enabled } = req.body;
+        const signalServer = await signalServerStorage.updateSignalServer(req.params.id, {
+          name,
+          url,
+          description,
+          enabled,
+        });
+        if (!signalServer) {
+          return res.status(404).json({ message: "Signal server not found" });
+        }
+        res.json(signalServer);
+      } catch (error) {
+        log(`Failed to update signal server: ${error}`);
+        res.status(500).json({ message: "Failed to update signal server" });
+      }
+    }
+  );
+
+  // DELETE /api/admin/signal-servers/:id - Delete a signal server
+  app.delete(
+    "/api/admin/signal-servers/:id",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const deleted = await signalServerStorage.deleteSignalServer(req.params.id);
+        if (!deleted) {
+          return res.status(404).json({ message: "Signal server not found" });
+        }
+        res.status(204).send();
+      } catch (error) {
+        log(`Failed to delete signal server: ${error}`);
+        res.status(500).json({ message: "Failed to delete signal server" });
+      }
+    }
+  );
+
+  // ============================================
+  // Gateway Endpoints (user-facing aggregation from signal servers)
+  // ============================================
+
+  // GET /api/gateway-endpoints - Aggregate gateways from all enabled signal servers
+  app.get(
+    "/api/gateway-endpoints",
+    authenticate,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const enabledServers = await signalServerStorage.getEnabledSignalServers();
+        const results: Array<{
+          id: string;
+          displayName: string;
+          description: string;
+          backends: { name: string }[];
+          online: boolean;
+          clientCount: number;
+          signalServerId: string;
+          signalServerName: string;
+          signalServerUrl: string;
+        }> = [];
+
+        // Fetch gateways from each signal server in parallel (with timeout)
+        const fetches = enabledServers.map(async (ss) => {
+          try {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 5000);
+            const apiUrl = ss.url.replace(/\/$/, "") + "/api/gateways";
+            const resp = await fetch(apiUrl, { signal: controller.signal });
+            clearTimeout(timeout);
+            if (!resp.ok) return;
+            const data = await resp.json() as { gateways?: Array<{
+              id: string;
+              displayName: string;
+              description: string;
+              backends: { name: string }[];
+              online: boolean;
+              clientCount: number;
+            }> };
+            if (data.gateways) {
+              for (const gw of data.gateways) {
+                results.push({
+                  ...gw,
+                  backends: gw.backends || [],
+                  signalServerId: ss.id,
+                  signalServerName: ss.name,
+                  signalServerUrl: ss.url,
+                });
+              }
+            }
+          } catch {
+            // Signal server unreachable — skip silently
+          }
+        });
+
+        await Promise.all(fetches);
+
+        // Annotate backends with access info based on dest: roles.
+        // Every user (including admins) must have an explicit
+        // dest:<gatewayId>:<backendName> role to access a backend.
+        const destPerms = parseDestRolesFromToken(req.tokenPayload);
+        // Debug: show raw token roles alongside parsed dest permissions
+        const rawRealmRoles = req.tokenPayload?.realm_access?.roles || [];
+        const rawClientRoles = Object.values(req.tokenPayload?.resource_access || {}).flatMap((a: any) => a.roles || []);
+        log(`[dest-roles] user=${req.user?.username} realmRoles=${JSON.stringify(rawRealmRoles)} clientRoles=${JSON.stringify(rawClientRoles)} destPerms=${JSON.stringify(destPerms)} gateways=${results.map(g => `${g.id}:[${g.backends.map(b => b.name).join(",")}]`).join("; ")}`);
+
+        const annotated = results.map((gw) => {
+          const backends = (gw.backends.length > 0 ? gw.backends : [{ name: "Default" }]).map((b) => ({
+            name: b.name,
+            accessible: hasDestAccess(destPerms, gw.id, b.name),
+          }));
+          return { ...gw, backends };
+        });
+
+        res.json(annotated);
+      } catch (error) {
+        log(`Failed to fetch gateway endpoints: ${error}`);
+        res.status(500).json({ message: "Failed to fetch gateway endpoints" });
       }
     }
   );

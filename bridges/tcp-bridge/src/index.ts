@@ -6,15 +6,13 @@ import { readFileSync, existsSync } from "fs";
 import { join } from "path";
 
 /**
- * TCP Bridge - Stateless WebSocket to TCP bridge for SSH connections.
+ * TCP Bridge — Stateless WebSocket-to-TCP forwarder for SSH connections.
  *
- * - Validates JWT using embedded JWKS (no external API calls)
- * - Receives host/port from browser (browser got them from main server session creation)
- * - Forwards WebSocket data to TCP and vice versa
- * - Scales horizontally (Azure Container Apps)
+ * Clients connect via WebSocket with JWT auth, and the bridge opens a TCP
+ * connection to the target SSH server, forwarding data bidirectionally.
  *
  * Environment variables:
- * - PORT: Port to listen on (default: 8080)
+ * - PORT: Port to listen on (default: 8081)
  * - client_adapter: JSON string of tidecloak.json config (highest priority)
  * - TIDECLOAK_CONFIG_B64: Base64-encoded config (alternative for Azure)
  */
@@ -118,17 +116,28 @@ if (!loadConfig()) {
   process.exit(1);
 }
 
+// ── HTTP Server ─────────────────────────────────────────────────
+
+let activeTcpConnections = 0;
+
 const server = createServer((req, res) => {
-  if (req.url === "/health") {
+  const url = req.url || "/";
+  const path = url.split("?")[0];
+
+  if (path === "/health") {
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ status: "ok", connections: activeConnections }));
+    res.end(JSON.stringify({
+      status: "ok",
+      tcpConnections: activeTcpConnections,
+    }));
     return;
   }
-  res.writeHead(404);
+
+  res.writeHead(404, { "Content-Type": "text/plain" });
   res.end("Not found");
 });
 
-let activeConnections = 0;
+// ── WebSocket Server ────────────────────────────────────────────
 
 const wss = new WebSocketServer({ server });
 
@@ -158,7 +167,7 @@ wss.on("connection", async (ws: WebSocket, req) => {
 
   const userId = payload.sub || "unknown";
   console.log(`[Bridge] Connection: ${userId} -> ${host}:${port} (session: ${sessionId})`);
-  activeConnections++;
+  activeTcpConnections++;
 
   // Connect to SSH server
   const tcpSocket: Socket = connect({ host, port });
@@ -199,7 +208,7 @@ wss.on("connection", async (ws: WebSocket, req) => {
 
   ws.on("close", () => {
     console.log("[Bridge] WebSocket closed");
-    activeConnections--;
+    activeTcpConnections--;
     if (!tcpSocket.destroyed) {
       tcpSocket.destroy();
     }
@@ -213,9 +222,11 @@ wss.on("connection", async (ws: WebSocket, req) => {
   });
 });
 
+// ── Start ───────────────────────────────────────────────────────
+
 server.listen(PORT, () => {
   console.log(`[Bridge] TCP Bridge listening on port ${PORT}`);
-  console.log(`[Bridge] Health check: http://localhost:${PORT}/health`);
+  console.log(`[Bridge] Health: http://localhost:${PORT}/health`);
 });
 
 process.on("SIGTERM", () => {

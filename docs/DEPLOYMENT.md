@@ -4,10 +4,12 @@ This app has two deployable services and requires a TideCloak docker instance an
 
 1. **Main server** (required): serves the React app + REST API + default local `/ws/tcp` WebSocket bridge.
 2. **TideCloak server** (required): serves the authentication and authorization services.
-3. **Blind bridge** (optional): `tcp-bridge` as a separate, auto-scaling WS↔TCP forwarder (recommended for high concurrency).
-4. **Tide Fabric** (provided by Tide): Tide's Decentralized Network for Policy authorization and SSH signing.
+3. **Signal server** (optional): P2P signaling + HTTP relay for punchd-bridge gateways.
+4. **Blind bridge** (optional): `bridges/tcp-bridge` as a separate, auto-scaling WS↔TCP forwarder (recommended for high concurrency).
+5. **Punchd bridge** (optional): `bridges/punchd-bridge` NAT-traversing HTTP reverse proxy gateway.
+6. **Tide Fabric** (provided by Tide): Tide's Decentralized Network for Policy authorization and SSH signing.
 
-For most deployments you run **one main server** with a persistent `data/` volume, connectivity to the Tide Fabric, and optionally an external `tcp-bridge`.
+For most deployments you run **one main server** with a persistent `data/` volume, connectivity to the Tide Fabric, and optionally an external `bridges/tcp-bridge`.
 
 ## Main Server (Required)
 
@@ -71,7 +73,7 @@ The external bridge is stateless and can scale independently. Both the main serv
 ### Deploy
 
 ```bash
-cd tcp-bridge
+cd bridges/tcp-bridge
 
 # Deploy (creates RG + ACR + Container Apps env + app)
 # The script reads tidecloak.json and passes it to the container
@@ -90,7 +92,7 @@ BRIDGE_URL=wss://<bridge-fqdn>
 
 ### Scaling
 
-The provided Azure Container Apps config (`tcp-bridge/azure/container-app.yaml`) scales based on concurrent requests (WebSocket upgrades are HTTP):
+The provided Azure Container Apps config (`bridges/tcp-bridge/azure/container-app.yaml`) scales based on concurrent requests (WebSocket upgrades are HTTP):
 
 - `minReplicas: 0` (scales to zero)
 - `maxReplicas: 100`

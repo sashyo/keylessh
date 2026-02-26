@@ -1,0 +1,80 @@
+@startuml oidc-login
+!theme plain
+title OIDC Login Flow (through HTTP Relay)
+
+skinparam {
+  backgroundColor #0f172a
+  defaultFontColor #f8fafc
+  defaultFontName "Segoe UI"
+  defaultFontSize 12
+  SequenceLifeLineBorderColor #334155
+  SequenceLifeLineBackgroundColor #1e293b
+  ParticipantBackgroundColor #1e293b
+  ParticipantBorderColor #3b82f6
+  ParticipantFontColor #f8fafc
+  ArrowColor #94a3b8
+  ArrowFontColor #94a3b8
+  NoteBackgroundColor #1e293b
+  NoteBorderColor #334155
+  NoteFontColor #f8fafc
+  SequenceDividerBackgroundColor #334155
+  SequenceDividerFontColor #f8fafc
+}
+
+participant "Browser" as browser #1e293b
+participant "Signal Server\n(relay)" as stun #1e293b
+participant "Gateway" as gw #1e293b
+participant "TideCloak" as tc #1e293b
+
+== Redirect to Login ==
+
+browser -> stun : GET /auth/login?redirect=/dashboard
+stun -> gw : WS: http_request (relay)
+gw -> gw : Sanitize redirect param\n(reject non-relative URLs)\nBuild TideCloak auth URL\nwith state={nonce, redirect}
+gw --> stun : WS: http_response 302\nLocation: /realms/.../openid-connect/auth
+stun --> browser : HTTP 302
+
+== TideCloak Login (proxied through Gateway) ==
+
+browser -> stun : GET /realms/.../auth?client_id=...
+stun -> gw : WS: http_request (relay)
+gw -> tc : Proxy: GET /realms/.../auth\n(30 s timeout)
+tc --> gw : Login page HTML
+gw -> gw : Rewrite TC URLs → /_idp/...\nStore TC cookies server-side
+gw --> stun : WS: http_response 200
+stun --> browser : Login page
+
+browser -> browser : User enters credentials
+
+browser -> stun : POST /realms/.../login-actions/authenticate
+stun -> gw : WS: http_request (relay)
+gw -> tc : Proxy: POST authenticate
+tc --> gw : 302 /auth/callback?code=xyz
+gw --> stun : WS: http_response 302
+stun --> browser : HTTP 302
+
+== Code Exchange ==
+
+browser -> stun : GET /auth/callback?code=xyz
+stun -> gw : WS: http_request (relay)
+activate gw
+
+gw -> tc : POST /realms/.../token\n{ grant_type: authorization_code,\n  code: xyz }
+tc --> gw : { access_token, refresh_token }
+
+gw -> gw : Set cookies:\n  gateway_access = JWT (HttpOnly)\n  gateway_refresh = token (HttpOnly, Strict)\nSanitize redirect from state
+
+gw --> stun : WS: http_response 302\nLocation: /dashboard\nSet-Cookie: gateway_access=...\nSet-Cookie: gateway_refresh=...
+deactivate gw
+
+stun --> browser : HTTP 302 + cookies
+
+note over browser, gw
+  All subsequent requests include gateway_access cookie.
+  Gateway validates JWT on every request.
+  Transparent refresh via gateway_refresh when expired.
+  Session token endpoint returns JWT for DataChannel auth
+  (Cache-Control: no-store).
+end note
+
+@enduml

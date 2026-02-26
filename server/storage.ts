@@ -33,6 +33,8 @@ import {
   type InsertBillingHistory,
   type Bridge,
   type InsertBridge,
+  type SignalServer,
+  type InsertSignalServer,
   type SubscriptionTier,
   type LicenseInfo,
   type LimitCheck,
@@ -314,6 +316,17 @@ sqlite.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_bridges_enabled ON bridges(enabled);
   CREATE INDEX IF NOT EXISTS idx_bridges_default ON bridges(is_default);
+
+  -- Signal servers - P2P signaling + HTTP relay endpoints
+  CREATE TABLE IF NOT EXISTS signal_servers (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    url TEXT NOT NULL,
+    description TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_signal_servers_enabled ON signal_servers(enabled);
 `);
 
 // Lightweight migrations for existing DBs (CREATE TABLE IF NOT EXISTS doesn't alter).
@@ -2543,6 +2556,112 @@ export class BridgeStorage {
   }
 }
 
+// Signal server storage class for P2P signaling + HTTP relay endpoints
+export class SignalServerStorage {
+  async createSignalServer(data: InsertSignalServer): Promise<SignalServer> {
+    const id = randomUUID();
+    const now = Math.floor(Date.now() / 1000);
+
+    sqlite.prepare(`
+      INSERT INTO signal_servers (id, name, url, description, enabled, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      data.name,
+      data.url,
+      data.description || null,
+      data.enabled !== false ? 1 : 0,
+      now
+    );
+
+    return {
+      id,
+      name: data.name,
+      url: data.url,
+      description: data.description || null,
+      enabled: data.enabled !== false,
+      createdAt: new Date(now * 1000),
+    };
+  }
+
+  async getSignalServer(id: string): Promise<SignalServer | undefined> {
+    const row = sqlite.prepare(`
+      SELECT * FROM signal_servers WHERE id = ?
+    `).get(id) as any | undefined;
+
+    if (!row) return undefined;
+    return this.mapRow(row);
+  }
+
+  async getSignalServers(): Promise<SignalServer[]> {
+    const rows = sqlite.prepare(`
+      SELECT * FROM signal_servers ORDER BY name ASC
+    `).all() as any[];
+
+    return rows.map(row => this.mapRow(row));
+  }
+
+  async getEnabledSignalServers(): Promise<SignalServer[]> {
+    const rows = sqlite.prepare(`
+      SELECT * FROM signal_servers WHERE enabled = 1 ORDER BY name ASC
+    `).all() as any[];
+
+    return rows.map(row => this.mapRow(row));
+  }
+
+  async updateSignalServer(id: string, data: Partial<InsertSignalServer>): Promise<SignalServer | undefined> {
+    const existing = await this.getSignalServer(id);
+    if (!existing) return undefined;
+
+    const updates: string[] = [];
+    const values: any[] = [];
+
+    if (data.name !== undefined) {
+      updates.push('name = ?');
+      values.push(data.name);
+    }
+    if (data.url !== undefined) {
+      updates.push('url = ?');
+      values.push(data.url);
+    }
+    if (data.description !== undefined) {
+      updates.push('description = ?');
+      values.push(data.description || null);
+    }
+    if (data.enabled !== undefined) {
+      updates.push('enabled = ?');
+      values.push(data.enabled ? 1 : 0);
+    }
+
+    if (updates.length > 0) {
+      values.push(id);
+      sqlite.prepare(`
+        UPDATE signal_servers SET ${updates.join(', ')} WHERE id = ?
+      `).run(...values);
+    }
+
+    return this.getSignalServer(id);
+  }
+
+  async deleteSignalServer(id: string): Promise<boolean> {
+    const result = sqlite.prepare(`
+      DELETE FROM signal_servers WHERE id = ?
+    `).run(id);
+    return result.changes > 0;
+  }
+
+  private mapRow(row: any): SignalServer {
+    return {
+      id: row.id,
+      name: row.name,
+      url: row.url,
+      description: row.description,
+      enabled: !!row.enabled,
+      createdAt: new Date(row.created_at * 1000),
+    };
+  }
+}
+
 export const storage = new SQLiteStorage();
 export const approvalStorage = new ApprovalStorage();
 export const policyStorage = new PolicyStorage();
@@ -2552,3 +2671,4 @@ export const subscriptionStorage = new SubscriptionStorage();
 export const recordingStorage = new RecordingStorage();
 export const fileOperationStorage = new FileOperationStorage();
 export const bridgeStorage = new BridgeStorage();
+export const signalServerStorage = new SignalServerStorage();

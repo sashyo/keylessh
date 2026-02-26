@@ -1,0 +1,36 @@
+version: "3.8"
+
+services:
+  coturn:
+    image: coturn/coturn:latest
+    network_mode: host
+    command:
+      - "--listening-port=3478"
+      - "--external-ip=${EXTERNAL_IP:-}"
+      - "--use-auth-secret"
+      - "--static-auth-secret=${TURN_SECRET:-}"
+      - "--realm=keylessh"
+      - "--min-port=49152"
+      - "--max-port=65535"
+      - "--fingerprint"
+      - "--no-multicast-peers"
+      - "--no-cli"
+      - "--log-file=stdout"
+      - "--verbose"
+    restart: unless-stopped
+
+  gateway:
+    build: ./gateway
+    environment:
+      - LISTEN_PORT=7891
+      - HEALTH_PORT=7892
+      - BACKEND_URL=${BACKEND_URL:-http://host.docker.internal:3000}
+      - STUN_SERVER_URL=${STUN_SERVER_URL:-}
+      - TIDECLOAK_CONFIG_B64=${TIDECLOAK_CONFIG_B64:-}
+      - ICE_SERVERS=${ICE_SERVERS:-}
+      - TURN_SERVER=${TURN_SERVER:-}
+      - TURN_SECRET=${TURN_SECRET:-}
+      - AUTH_SERVER_PUBLIC_URL=${AUTH_SERVER_PUBLIC_URL:-}
+      - STRIP_AUTH_HEADER=${STRIP_AUTH_HEADER:-false}
+      - API_SECRET=${API_SECRET:-}
+    restart: unless-stopped

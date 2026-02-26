@@ -35,13 +35,35 @@ The result: enterprise-grade SSH access control without any private keys to mana
 - **Programmable policy encforcement** with Forseti contracts for SSH access
 - **Simple, static, trustless SSH account access** (e.g., only `ssh:root` role holders can SSH as root)
 - **Admin UX**: servers, users, roles, policy templates, change requests (access, roles, policies), sessions, logs
-- **Optional external bastion** (`tcp-bridge`) for scalable WS↔TCP tunneling
+- **Optional external bastion** (`bridges/tcp-bridge`) for scalable WS↔TCP tunneling
+- **NAT-traversing HTTP gateway** (`bridges/punchd-bridge`) with WebRTC P2P upgrade
+
+## Project Structure
+
+```
+keylessh/
+├── client/                  # React UI (xterm.js, SSH client, SFTP browser)
+├── server/                  # Express API + WebSocket bridge + SQLite
+├── shared/                  # Shared types + schema
+├── signal-server/           # P2P signaling + HTTP relay for punchd-bridge
+├── bridges/
+│   ├── tcp-bridge/          # Stateless WS↔TCP forwarder (optional)
+│   └── punchd-bridge/       # NAT-traversing HTTP reverse proxy gateway
+│       └── gateway/         # Gateway source code
+├── docs/                    # Architecture, deployment, developer guides
+└── script/                  # TideCloak setup scripts
+```
 
 ## Documentation
 
 - Architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - Deployment: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
 - Developer guide: [docs/DEVELOPERS.md](docs/DEVELOPERS.md)
+
+### Component docs
+
+- **Punc'd Bridge** — NAT-traversing HTTP reverse proxy that lets you expose local web apps through a public signal server without port forwarding. Starts with HTTP relay over WebSocket, then upgrades to peer-to-peer WebRTC DataChannels. See [bridges/punchd-bridge/docs/ARCHITECTURE.md](bridges/punchd-bridge/docs/ARCHITECTURE.md) for the full connection lifecycle, PlantUML diagrams, and multi-backend routing.
+- **Signal Server** — Public signaling hub that brokers WebSocket connections between gateways and clients. Handles gateway registration, ICE candidate exchange, HTTP request relay, and TURN credential provisioning. Deployed alongside a coturn sidecar for STUN/TURN. See [signal-server/deploy.sh](signal-server/deploy.sh) for the automated VM deployment script.
 
 ## Quickstart (Local Dev)
 
