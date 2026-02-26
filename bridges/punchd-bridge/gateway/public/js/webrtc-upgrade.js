@@ -371,6 +371,20 @@
                 streaming: true,
               });
             }
+          } else {
+            // Buffered streaming (video, large files) — extend timeouts since
+            // the full response must be received before we can deliver it.
+            // A 50MB 4K segment over DataChannel can take minutes.
+            var pending = pendingRequests.get(msg.id);
+            if (pending) {
+              clearTimeout(pending.timeout);
+              pending.timeout = setTimeout(function () {
+                pendingRequests.delete(msg.id);
+                pending.port.postMessage({ error: "Timeout" });
+              }, 300000); // 5 minutes for large downloads
+              // Tell SW to extend its timeout too
+              pending.port.postMessage({ type: "progress" });
+            }
           }
           // live=true: forward chunks to SW via ReadableStream
           // live=false: buffer chunks page-side, deliver complete Response on end
@@ -641,13 +655,15 @@
       })
     );
 
-    const timeout = setTimeout(() => {
+    var timeout = setTimeout(() => {
       pendingRequests.delete(requestId);
       streamingPorts.delete(requestId);
       responsePort.postMessage({ error: "Timeout" });
     }, 15000);
 
     pendingRequests.set(requestId, {
+      timeout: timeout,
+      port: responsePort,
       resolve: (msg) => {
         clearTimeout(timeout);
         if (msg.streaming) {
