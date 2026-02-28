@@ -6,10 +6,15 @@
  * the gateway creates a PeerConnection, establishes a DataChannel,
  * and tunnels HTTP requests/responses over it — same format
  * as the WebSocket-based HTTP relay.
+ *
+ * Supports dual DataChannels for high-throughput scenarios (4K video, gaming):
+ *   - "http-tunnel" (control): JSON control messages, small responses
+ *   - "bulk-data" (bulk): binary streaming chunks, binary WebSocket frames
+ * Falls back to single-channel mode for older clients.
  */
 
 import { createHmac } from "crypto";
-import { PeerConnection, DataChannel } from "node-datachannel";
+import { PeerConnection, DataChannel, setSctpSettings } from "node-datachannel";
 import { request as httpRequest } from "http";
 import { request as httpsRequest } from "https";
 import WebSocket from "ws";
@@ -40,8 +45,140 @@ export interface PeerHandler {
 const MAX_PEERS = 200;
 const ALLOWED_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]);
 
+// Buffer thresholds — separate for control (small JSON) and bulk (streaming data)
+const CONTROL_MAX_BUFFER = 512_000;     // 512KB for control channel
+const BULK_MAX_BUFFER    = 4_194_304;   // 4MB for bulk channel — keeps pipe full for 4K video
+
+// Chunk coalescing: batch small HTTP response chunks into larger DC messages
+const COALESCE_TARGET  = 65_536; // 64KB target coalesced message size
+const COALESCE_TIMEOUT = 1;      // 1ms max coalescing delay
+
+// Binary WebSocket fast-path magic byte (avoids JSON+base64 overhead for gaming)
+const BINARY_WS_MAGIC = 0x02;
+
+// Tune SCTP buffers for high-throughput streaming
+let sctpConfigured = false;
+function ensureSctpSettings(): void {
+  if (sctpConfigured) return;
+  sctpConfigured = true;
+  try {
+    setSctpSettings({
+      sendBufferSize: 8 * 1024 * 1024,      // 8MB send buffer
+      recvBufferSize: 8 * 1024 * 1024,      // 8MB receive buffer
+      maxChunksOnQueue: 65536,               // up from default 8192
+      initialCongestionWindow: 32,            // faster ramp-up
+    });
+  } catch {
+    // setSctpSettings may fail if PeerConnections already exist
+  }
+}
+
+/** Per-peer state shared between control and bulk channels. */
+interface PeerState {
+  wsConnections: Map<string, WebSocket>;
+  capabilities: Set<string>;
+  controlDc: DataChannel | null;
+  bulkDc: DataChannel | null;
+  controlQueue: Buffer[];
+  bulkQueue: Buffer[];
+  controlPaused: boolean;
+  bulkPaused: boolean;
+  pausedStreams: Set<import("http").IncomingMessage>;
+}
+
 export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
+  ensureSctpSettings();
+
   const peers = new Map<string, PeerConnection>();
+  const peerStates = new Map<string, PeerState>();
+
+  function getPeerState(clientId: string): PeerState {
+    let state = peerStates.get(clientId);
+    if (!state) {
+      state = {
+        wsConnections: new Map(),
+        capabilities: new Set(),
+        controlDc: null,
+        bulkDc: null,
+        controlQueue: [],
+        bulkQueue: [],
+        controlPaused: false,
+        bulkPaused: false,
+        pausedStreams: new Set(),
+      };
+      peerStates.set(clientId, state);
+    }
+    return state;
+  }
+
+  // --- Shared send-queue helpers with event-driven flow control ---
+
+  function setupFlowControl(dc: DataChannel, queue: Buffer[], maxBuffer: number, getPaused: () => boolean, setPaused: (v: boolean) => void, state: PeerState): void {
+    dc.setBufferedAmountLowThreshold(maxBuffer / 4);
+    dc.onBufferedAmountLow(() => {
+      if (getPaused()) {
+        setPaused(false);
+        drainQueue(dc, queue, maxBuffer, getPaused, setPaused, state);
+      }
+    });
+  }
+
+  function drainQueue(dc: DataChannel, queue: Buffer[], maxBuffer: number, getPaused: () => boolean, setPaused: (v: boolean) => void, state: PeerState): void {
+    while (queue.length > 0) {
+      if (!dc.isOpen()) return;
+      if (dc.bufferedAmount() > maxBuffer) {
+        setPaused(true);
+        // Pause all in-flight HTTP response streams
+        for (const stream of state.pausedStreams) {
+          stream.pause();
+        }
+        return;
+      }
+      try {
+        const sent = dc.sendMessageBinary(queue[0]);
+        if (!sent) {
+          setPaused(true);
+          return;
+        }
+      } catch {
+        return;
+      }
+      queue.shift();
+    }
+    // Queue drained — resume any paused streams
+    for (const stream of state.pausedStreams) {
+      stream.resume();
+    }
+  }
+
+  function enqueueControl(state: PeerState, buf: Buffer): void {
+    const dc = state.controlDc;
+    if (!dc || !dc.isOpen()) return;
+    state.controlQueue.push(buf);
+    if (!state.controlPaused) {
+      drainQueue(dc, state.controlQueue, CONTROL_MAX_BUFFER,
+        () => state.controlPaused, (v) => { state.controlPaused = v; }, state);
+    }
+  }
+
+  function enqueueBulk(state: PeerState, buf: Buffer): void {
+    // Use bulk channel if available, otherwise fall back to control
+    const dc = state.bulkDc && state.bulkDc.isOpen() ? state.bulkDc : state.controlDc;
+    if (!dc || !dc.isOpen()) return;
+
+    if (dc === state.bulkDc) {
+      state.bulkQueue.push(buf);
+      if (!state.bulkPaused) {
+        drainQueue(dc, state.bulkQueue, BULK_MAX_BUFFER,
+          () => state.bulkPaused, (v) => { state.bulkPaused = v; }, state);
+      }
+    } else {
+      // Fallback to control channel (single-channel mode)
+      enqueueControl(state, buf);
+    }
+  }
+
+  // --- Channel setup ---
 
   function handleSdpOffer(clientId: string, sdp: string): void {
     // Clean up existing peer if reconnecting
@@ -49,6 +186,7 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
     if (existing) {
       existing.close();
       peers.delete(clientId);
+      peerStates.delete(clientId);
     }
 
     // Reject new peers if at capacity (reconnects already cleaned up above)
@@ -123,45 +261,136 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
       }
       if (state === "closed" || state === "failed") {
         peers.delete(clientId);
+        peerStates.delete(clientId);
       }
     });
 
     pc.onDataChannel((dc) => {
-      console.log(`[WebRTC] DataChannel opened with client: ${clientId} (label: ${dc.getLabel()})`);
-      const wsConnections = new Map<string, WebSocket>();
+      const label = dc.getLabel();
+      console.log(`[WebRTC] DataChannel opened with client: ${clientId} (label: ${label})`);
 
-      dc.onMessage((msg) => {
-        try {
-          const parsed = JSON.parse(typeof msg === "string" ? msg : msg.toString());
-          if (parsed.type === "http_request") {
-            handleDataChannelRequest(dc, parsed);
-          } else if (parsed.type === "ws_open") {
-            handleWsOpen(dc, parsed, wsConnections);
-          } else if (parsed.type === "ws_message") {
-            const ws = wsConnections.get(parsed.id);
-            if (ws && ws.readyState === WebSocket.OPEN) {
-              ws.send(parsed.binary ? Buffer.from(parsed.data, "base64") : parsed.data);
-            }
-          } else if (parsed.type === "ws_close") {
-            const ws = wsConnections.get(parsed.id);
-            if (ws) ws.close(parsed.code || 1000, parsed.reason || "");
-          }
-        } catch {
-          console.error("[WebRTC] Failed to parse DataChannel message");
-        }
-      });
-
-      dc.onClosed(() => {
-        console.log(`[WebRTC] DataChannel closed with client: ${clientId}`);
-        for (const [, ws] of wsConnections) {
-          try { ws.close(); } catch {}
-        }
-        wsConnections.clear();
-      });
+      if (label === "http-tunnel") {
+        setupControlChannel(dc, clientId);
+      } else if (label === "bulk-data") {
+        setupBulkChannel(dc, clientId);
+      } else {
+        console.warn(`[WebRTC] Unknown DataChannel label: ${label}, treating as control`);
+        setupControlChannel(dc, clientId);
+      }
     });
 
     pc.setRemoteDescription(sdp, "offer");
     peers.set(clientId, pc);
+  }
+
+  const GATEWAY_FEATURES = ["bulk-channel", "binary-ws"];
+
+  function sendCapabilities(state: PeerState): void {
+    enqueueControl(state, Buffer.from(JSON.stringify({
+      type: "capabilities",
+      version: 2,
+      features: GATEWAY_FEATURES,
+    })));
+  }
+
+  function setupControlChannel(dc: DataChannel, clientId: string): void {
+    const state = getPeerState(clientId);
+    state.controlDc = dc;
+
+    setupFlowControl(dc, state.controlQueue, CONTROL_MAX_BUFFER,
+      () => state.controlPaused, (v) => { state.controlPaused = v; }, state);
+
+    // Send capabilities proactively as soon as the channel is open —
+    // don't wait for the client to ask (message could be lost or delayed).
+    if (dc.isOpen()) {
+      console.log(`[WebRTC] Sending proactive capabilities to ${clientId}`);
+      sendCapabilities(state);
+    }
+    dc.onOpen(() => {
+      console.log(`[WebRTC] Control channel fully open for ${clientId}, sending capabilities`);
+      sendCapabilities(state);
+    });
+
+    dc.onMessage((msg) => {
+      try {
+        const parsed = JSON.parse(typeof msg === "string" ? msg : Buffer.from(msg as ArrayBuffer).toString());
+        if (parsed.type === "http_request") {
+          handleDataChannelRequest(state, parsed);
+        } else if (parsed.type === "ws_open") {
+          handleWsOpen(state, parsed);
+        } else if (parsed.type === "ws_message") {
+          const ws = state.wsConnections.get(parsed.id);
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(parsed.binary ? Buffer.from(parsed.data, "base64") : parsed.data);
+          }
+        } else if (parsed.type === "ws_close") {
+          const ws = state.wsConnections.get(parsed.id);
+          if (ws) ws.close(parsed.code || 1000, parsed.reason || "");
+        } else if (parsed.type === "capabilities") {
+          // Client capability handshake — respond with our supported features
+          const clientFeatures: string[] = parsed.features || [];
+          for (const f of clientFeatures) {
+            if (GATEWAY_FEATURES.includes(f)) state.capabilities.add(f);
+          }
+          console.log(`[WebRTC] Client ${clientId} capabilities: ${[...state.capabilities].join(", ")}`);
+          // Reply (client may have missed the proactive announcement)
+          sendCapabilities(state);
+        }
+      } catch {
+        console.error("[WebRTC] Failed to parse DataChannel message");
+      }
+    });
+
+    dc.onClosed(() => {
+      console.log(`[WebRTC] Control channel closed with client: ${clientId}`);
+      for (const [, ws] of state.wsConnections) {
+        try { ws.close(); } catch {}
+      }
+      state.wsConnections.clear();
+      state.controlDc = null;
+    });
+  }
+
+  function setupBulkChannel(dc: DataChannel, clientId: string): void {
+    const state = getPeerState(clientId);
+    state.bulkDc = dc;
+
+    setupFlowControl(dc, state.bulkQueue, BULK_MAX_BUFFER,
+      () => state.bulkPaused, (v) => { state.bulkPaused = v; }, state);
+
+    dc.onMessage((msg) => {
+      const buf = Buffer.isBuffer(msg) ? msg : Buffer.from(msg as ArrayBuffer);
+      if (buf.length < 1) return;
+
+      // Binary WS fast-path: [0x02][36-byte WS UUID][payload]
+      if (buf[0] === BINARY_WS_MAGIC && buf.length >= 37) {
+        const wsId = buf.toString("ascii", 1, 37);
+        const payload = buf.subarray(37);
+        const ws = state.wsConnections.get(wsId);
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(payload);
+        }
+        return;
+      }
+
+      // Other binary messages on bulk channel (shouldn't happen but handle gracefully)
+      try {
+        const parsed = JSON.parse(buf.toString());
+        if (parsed.type === "ws_message") {
+          const ws = state.wsConnections.get(parsed.id);
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(parsed.binary ? Buffer.from(parsed.data, "base64") : parsed.data);
+          }
+        }
+      } catch {
+        // Not JSON, ignore
+      }
+    });
+
+    dc.onClosed(() => {
+      console.log(`[WebRTC] Bulk channel closed with client: ${clientId}`);
+      state.bulkDc = null;
+    });
   }
 
   function handleCandidate(clientId: string, candidate: string, mid: string): void {
@@ -180,9 +409,22 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
       || (ct.includes("text/plain") && res.headers["transfer-encoding"] === "chunked");
   }
 
-  // Responses smaller than this are sent as a single DC message;
-  // larger responses are streamed progressively.
-  const MAX_SINGLE_MSG = 200_000;
+  /** Binary content types that should always stream (not buffer + base64) */
+  function isBinaryContent(res: import("http").IncomingMessage): boolean {
+    const ct = (res.headers["content-type"] || "").toLowerCase();
+    return ct.startsWith("image/")
+      || ct.startsWith("video/")
+      || ct.startsWith("audio/")
+      || ct.startsWith("font/")
+      || ct.includes("application/octet-stream")
+      || ct.includes("application/wasm")
+      || ct.includes("application/zip")
+      || ct.includes("application/pdf");
+  }
+
+  // Responses smaller than this are sent as a single DC message (base64 on control);
+  // larger responses are streamed progressively as binary via bulk channel.
+  const MAX_SINGLE_MSG = 32_000; // 32KB — API JSON fits; images stream
 
   /**
    * Handle an HTTP request received over DataChannel.
@@ -191,7 +433,7 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
    * are forwarded progressively as data arrives from the backend.
    */
   function handleDataChannelRequest(
-    dc: DataChannel,
+    state: PeerState,
     msg: { id: string; method?: string; url?: string; headers?: Record<string, string | string[]>; body?: string }
   ): void {
     const requestId = msg.id;
@@ -202,29 +444,25 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
 
     // Validate URL path — must start with / and contain no CRLF (header injection)
     if (!url.startsWith("/") || /[\r\n]/.test(url)) {
-      if (dc.isOpen()) {
-        dc.sendMessageBinary(Buffer.from(JSON.stringify({
-          type: "http_response",
-          id: requestId,
-          statusCode: 400,
-          headers: { "content-type": "application/json" },
-          body: Buffer.from(JSON.stringify({ error: "Invalid URL" })).toString("base64"),
-        })));
-      }
+      enqueueControl(state, Buffer.from(JSON.stringify({
+        type: "http_response",
+        id: requestId,
+        statusCode: 400,
+        headers: { "content-type": "application/json" },
+        body: Buffer.from(JSON.stringify({ error: "Invalid URL" })).toString("base64"),
+      })));
       return;
     }
 
     // Validate HTTP method
     if (!ALLOWED_METHODS.has(method.toUpperCase())) {
-      if (dc.isOpen()) {
-        dc.sendMessageBinary(Buffer.from(JSON.stringify({
-          type: "http_response",
-          id: requestId,
-          statusCode: 405,
-          headers: { "content-type": "application/json" },
-          body: Buffer.from(JSON.stringify({ error: "Method not allowed" })).toString("base64"),
-        })));
-      }
+      enqueueControl(state, Buffer.from(JSON.stringify({
+        type: "http_response",
+        id: requestId,
+        statusCode: 405,
+        headers: { "content-type": "application/json" },
+        body: Buffer.from(JSON.stringify({ error: "Method not allowed" })).toString("base64"),
+      })));
       return;
     }
 
@@ -233,15 +471,13 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
     // Limit decoded body size to 10MB to prevent OOM
     const MAX_BODY_SIZE = 10 * 1024 * 1024;
     if (bodyB64 && bodyB64.length > MAX_BODY_SIZE * 1.37) {
-      if (dc.isOpen()) {
-        dc.sendMessageBinary(Buffer.from(JSON.stringify({
-          type: "http_response",
-          id: requestId,
-          statusCode: 413,
-          headers: { "content-type": "application/json" },
-          body: Buffer.from(JSON.stringify({ error: "Request body too large" })).toString("base64"),
-        })));
-      }
+      enqueueControl(state, Buffer.from(JSON.stringify({
+        type: "http_response",
+        id: requestId,
+        statusCode: 413,
+        headers: { "content-type": "application/json" },
+        body: Buffer.from(JSON.stringify({ error: "Request body too large" })).toString("base64"),
+      })));
       return;
     }
     const bodyBuf = bodyB64 ? Buffer.from(bodyB64, "base64") : undefined;
@@ -251,6 +487,30 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
     // Don't forward accept-encoding — we send raw bytes over DC, compression
     // breaks Content-Range offsets and confuses browser media pipelines.
     delete (headers as Record<string, unknown>)["accept-encoding"];
+    // Strip conditional headers — DC responses bypass the browser's HTTP
+    // cache, so 304 responses produce null-body Responses in the Service
+    // Worker that the browser can't match to a cache entry.
+    delete (headers as Record<string, unknown>)["if-none-match"];
+    delete (headers as Record<string, unknown>)["if-modified-since"];
+
+    // Cap Range request size for DataChannel responses.
+    // Non-live responses (video) are buffered on the client before delivery
+    // (Chrome's <video> can't consume ReadableStream 206 from Service Workers).
+    // Without capping, a multi-GB video would be buffered entirely in memory.
+    // The browser naturally makes follow-up Range requests for remaining data.
+    const DC_MAX_RANGE = 5 * 1024 * 1024; // 5MB per range response
+    const rangeHeader = (headers as Record<string, string>).range;
+    if (typeof rangeHeader === "string") {
+      const rangeMatch = rangeHeader.match(/bytes=(\d+)-(\d*)/);
+      if (rangeMatch) {
+        const rangeStart = parseInt(rangeMatch[1]);
+        const rangeEnd = rangeMatch[2] ? parseInt(rangeMatch[2]) : Infinity;
+        if (rangeEnd - rangeStart + 1 > DC_MAX_RANGE || rangeEnd === Infinity) {
+          const cappedEnd = rangeStart + DC_MAX_RANGE - 1;
+          (headers as Record<string, string>).range = `bytes=${rangeStart}-${cappedEnd}`;
+        }
+      }
+    }
 
     const makeReq = options.useTls ? httpsRequest : httpRequest;
     const req = makeReq(
@@ -267,7 +527,14 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
         // meaningless for SW-constructed Responses and can confuse Chrome
         // (e.g. transfer-encoding: chunked would make Chrome try to
         // chunk-decode an already-decoded body).
-        const HOP_BY_HOP = new Set(["transfer-encoding", "connection", "keep-alive", "te", "trailer", "upgrade"]);
+        // Strip transport-layer headers that are meaningless for DC delivery.
+        // content-encoding: DC sends raw bytes, browser must not attempt decompression.
+        // content-length: SW constructs Response from actual bytes; a mismatched
+        //   header value can confuse the browser or truncate the body.
+        const HOP_BY_HOP = new Set([
+          "transfer-encoding", "connection", "keep-alive", "te", "trailer", "upgrade",
+          "content-encoding", "content-length",
+        ]);
         const responseHeaders: Record<string, string | string[]> = {};
         for (const [key, value] of Object.entries(res.headers)) {
           if (value !== undefined && !HOP_BY_HOP.has(key)) {
@@ -276,95 +543,117 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
         }
 
         // Determine response mode:
-        // - Small responses (< MAX_SINGLE_MSG): buffer and send as single message
-        // - Large or streaming: progressive streaming over DataChannel
+        // - Small text/JSON responses: buffer and send as single base64 message on control
+        // - Large, binary, or streaming: progressive binary streaming via bulk channel
+        // Key: binary content (images, video, etc.) ALWAYS streams — even without
+        // content-length (chunked transfer). This prevents oversized SCTP messages
+        // (256KB limit) and eliminates base64 overhead for binary data.
         const contentLength = parseInt(res.headers["content-length"] || "0", 10);
         const isLive = isStreamingResponse(res);
-        const useStreaming = isLive || contentLength > MAX_SINGLE_MSG / 2;
+        const isBinary = isBinaryContent(res);
+        const useStreaming = isLive || contentLength > MAX_SINGLE_MSG / 2 || isBinary;
 
         if (useStreaming) {
           // Stream response progressively — works for SSE, video, large files
           console.log(`[WebRTC] Streaming DC response: ${res.statusCode} for ${url} (${contentLength || "unknown"} bytes, live=${isLive})`);
-          if (!dc.isOpen()) return;
+          const controlDc = state.controlDc;
+          if (!controlDc || !controlDc.isOpen()) return;
 
-          // Queue-based sending with flow control.
-          // All messages sent as binary to avoid SCTP PPID confusion.
-          const DC_MAX_BUFFER = 512_000; // 512KB — higher buffer for video throughput
-          const queue: { binary: Buffer }[] = [];
-          let scheduled = false;
+          // Track this stream for backpressure pause/resume
+          state.pausedStreams.add(res);
 
-          const flush = (): void => {
-            scheduled = false;
-            while (queue.length > 0) {
-              if (!dc.isOpen()) { req.destroy(); return; }
-              if (dc.bufferedAmount() > DC_MAX_BUFFER) {
-                res.pause();
-                scheduled = true;
-                setTimeout(flush, 1);
-                return;
-              }
-              try {
-                const sent = dc.sendMessageBinary(queue[0].binary);
-                if (!sent) {
-                  res.pause();
-                  scheduled = true;
-                  setTimeout(flush, 2);
-                  return;
-                }
-              } catch {
-                req.destroy();
-                return;
-              }
-              queue.shift();
-            }
-            res.resume();
-          }
-
-          // All streaming messages are sent as binary to avoid SCTP PPID
-          // confusion when interleaving text (PPID 51) and binary (PPID 53).
-          // Control messages are JSON in a Buffer; chunk data uses requestId prefix.
-          // The browser detects JSON by checking if the first byte is '{'.
           let chunksSent = 0;
 
-          // Start message — JSON as binary
-          // live=true for SSE/NDJSON (client uses ReadableStream)
-          // live=false for large responses like video (client buffers then delivers complete)
-          queue.push({ binary: Buffer.from(JSON.stringify({
+          // Send a lightweight ack on the CONTROL channel so the client can
+          // extend its timeout immediately — the bulk queue may be congested
+          // with other streaming data, which could delay http_response_start
+          // past the client's 15-second initial timeout.
+          enqueueControl(state, Buffer.from(JSON.stringify({
+            type: "http_response_ack",
+            id: requestId,
+          })));
+
+          // Send start on BULK channel so it's ordered with data chunks and end marker.
+          // All three (start, data, end) must be on the same channel to prevent
+          // cross-channel race conditions. enqueueBulk falls back to control
+          // when no bulk channel is available (single-channel mode).
+          enqueueBulk(state, Buffer.from(JSON.stringify({
             type: "http_response_start",
             id: requestId,
             statusCode: res.statusCode || 200,
             headers: responseHeaders,
             streaming: true,
             live: isLive,
-          })) });
-          flush();
+          })));
 
-          res.on("data", (chunk: Buffer) => {
-            if (!dc.isOpen()) { req.destroy(); return; }
-            // Binary chunk: 36-byte requestId prefix + raw bytes (no base64)
+          if (isLive) {
+            // Live streams (SSE/NDJSON): send chunks immediately, no coalescing
+            res.on("data", (chunk: Buffer) => {
+              if (!controlDc.isOpen()) { req.destroy(); return; }
+              const idBuf = Buffer.from(requestId, "ascii");
+              enqueueBulk(state, Buffer.concat([idBuf, chunk]));
+              chunksSent++;
+            });
+          } else {
+            // Non-live (video, large files): coalesce small chunks into larger messages
             const idBuf = Buffer.from(requestId, "ascii");
-            queue.push({ binary: Buffer.concat([idBuf, chunk]) });
-            chunksSent++;
-            if (!scheduled) flush();
-          });
+            let coalesceBuffers: Buffer[] = [];
+            let coalesceSize = 0;
+            let coalesceTimer: ReturnType<typeof setTimeout> | null = null;
+
+            const flushCoalesce = (): void => {
+              if (coalesceTimer) { clearTimeout(coalesceTimer); coalesceTimer = null; }
+              if (coalesceBuffers.length === 0) return;
+              const payload = coalesceBuffers.length === 1
+                ? coalesceBuffers[0]
+                : Buffer.concat(coalesceBuffers);
+              enqueueBulk(state, Buffer.concat([idBuf, payload]));
+              coalesceBuffers = [];
+              coalesceSize = 0;
+              chunksSent++;
+            };
+
+            res.on("data", (chunk: Buffer) => {
+              if (!controlDc.isOpen()) { req.destroy(); return; }
+              coalesceBuffers.push(chunk);
+              coalesceSize += chunk.length;
+              if (coalesceSize >= COALESCE_TARGET) {
+                flushCoalesce();
+              } else if (!coalesceTimer) {
+                coalesceTimer = setTimeout(flushCoalesce, COALESCE_TIMEOUT);
+              }
+            });
+
+            res.on("end", () => {
+              flushCoalesce();
+            });
+
+            res.on("error", () => {
+              flushCoalesce();
+            });
+          }
 
           res.on("end", () => {
+            state.pausedStreams.delete(res);
             console.log(`[WebRTC] Streaming complete for ${url}: ${chunksSent} chunks sent`);
-            // End message — JSON as binary
-            queue.push({ binary: Buffer.from(JSON.stringify({ type: "http_response_end", id: requestId })) });
-            if (!scheduled) flush();
+            // Send end marker on BULK channel so it arrives AFTER all data chunks
+            // (control and bulk are independent SCTP streams with no cross-ordering).
+            // enqueueBulk falls back to control when no bulk channel is available.
+            enqueueBulk(state, Buffer.from(JSON.stringify({ type: "http_response_end", id: requestId })));
           });
 
           res.on("error", (err) => {
+            state.pausedStreams.delete(res);
             console.error(`[WebRTC] Streaming response error for ${url}: ${err.message}`);
-            queue.push({ binary: Buffer.from(JSON.stringify({ type: "http_response_end", id: requestId })) });
-            if (!scheduled) flush();
+            enqueueBulk(state, Buffer.from(JSON.stringify({ type: "http_response_end", id: requestId })));
           });
         } else {
-          // Small response: buffer and send as single message (binary to avoid PPID confusion)
+          // Small text/JSON response: buffer and send as single base64 message.
+          // Binary content always takes the streaming path above, so this
+          // branch only handles API responses, HTML fragments, etc.
           const chunks: Buffer[] = [];
           let totalResponseSize = 0;
-          const MAX_BUFFERED = 50 * 1024 * 1024; // 50MB
+          const MAX_BUFFERED = 10 * 1024 * 1024; // 10MB safety limit
           let aborted = false;
           res.on("data", (chunk: Buffer) => {
             totalResponseSize += chunk.length;
@@ -372,27 +661,25 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
               if (!aborted) {
                 aborted = true;
                 req.destroy();
-                if (dc.isOpen()) {
-                  dc.sendMessageBinary(Buffer.from(JSON.stringify({
-                    type: "http_response", id: requestId, statusCode: 502,
-                    headers: { "content-type": "application/json" },
-                    body: Buffer.from('{"error":"Response too large"}').toString("base64"),
-                  })));
-                }
+                enqueueControl(state, Buffer.from(JSON.stringify({
+                  type: "http_response", id: requestId, statusCode: 502,
+                  headers: { "content-type": "application/json" },
+                  body: Buffer.from('{"error":"Response too large"}').toString("base64"),
+                })));
               }
               return;
             }
             chunks.push(chunk);
           });
           res.on("end", () => {
-            if (aborted || !dc.isOpen()) return;
-            const responseBody = Buffer.concat(chunks).toString("base64");
-            dc.sendMessageBinary(Buffer.from(JSON.stringify({
+            if (aborted) return;
+            const body = Buffer.concat(chunks);
+            enqueueControl(state, Buffer.from(JSON.stringify({
               type: "http_response",
               id: requestId,
-              statusCode: res.statusCode || 500,
+              statusCode: res.statusCode || 200,
               headers: responseHeaders,
-              body: responseBody,
+              body: body.toString("base64"),
             })));
           });
         }
@@ -401,28 +688,24 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
 
     req.setTimeout(30000, () => {
       req.destroy();
-      if (dc.isOpen()) {
-        dc.sendMessageBinary(Buffer.from(JSON.stringify({
-          type: "http_response",
-          id: requestId,
-          statusCode: 504,
-          headers: { "content-type": "application/json" },
-          body: Buffer.from(JSON.stringify({ error: "Gateway timeout" })).toString("base64"),
-        })));
-      }
+      enqueueControl(state, Buffer.from(JSON.stringify({
+        type: "http_response",
+        id: requestId,
+        statusCode: 504,
+        headers: { "content-type": "application/json" },
+        body: Buffer.from(JSON.stringify({ error: "Gateway timeout" })).toString("base64"),
+      })));
     });
 
     req.on("error", (err) => {
       console.error(`[WebRTC] Local request failed: ${err.message}`);
-      if (dc.isOpen()) {
-        dc.sendMessageBinary(Buffer.from(JSON.stringify({
-          type: "http_response",
-          id: requestId,
-          statusCode: 502,
-          headers: { "content-type": "application/json" },
-          body: Buffer.from(JSON.stringify({ error: "Gateway internal error" })).toString("base64"),
-        })));
-      }
+      enqueueControl(state, Buffer.from(JSON.stringify({
+        type: "http_response",
+        id: requestId,
+        statusCode: 502,
+        headers: { "content-type": "application/json" },
+        body: Buffer.from(JSON.stringify({ error: "Gateway internal error" })).toString("base64"),
+      })));
     });
 
     if (bodyBuf && bodyBuf.length > 0) {
@@ -435,22 +718,17 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
   const MAX_WS_PER_DC = 50;
 
   function handleWsOpen(
-    dc: DataChannel,
-    msg: { id: string; url?: string; protocols?: string[]; headers?: Record<string, string> },
-    wsConnections: Map<string, WebSocket>
+    state: PeerState,
+    msg: { id: string; url?: string; protocols?: string[]; headers?: Record<string, string> }
   ): void {
-    if (wsConnections.size >= MAX_WS_PER_DC) {
-      if (dc.isOpen()) {
-        dc.sendMessageBinary(Buffer.from(JSON.stringify({ type: "ws_error", id: msg.id, message: "Too many WebSocket connections" })));
-      }
+    if (state.wsConnections.size >= MAX_WS_PER_DC) {
+      enqueueControl(state, Buffer.from(JSON.stringify({ type: "ws_error", id: msg.id, message: "Too many WebSocket connections" })));
       return;
     }
 
     const wsPath = msg.url || "/";
     if (!wsPath.startsWith("/") || /[\r\n]/.test(wsPath)) {
-      if (dc.isOpen()) {
-        dc.sendMessageBinary(Buffer.from(JSON.stringify({ type: "ws_error", id: msg.id, message: "Invalid URL" })));
-      }
+      enqueueControl(state, Buffer.from(JSON.stringify({ type: "ws_error", id: msg.id, message: "Invalid URL" })));
       return;
     }
 
@@ -465,36 +743,40 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
     });
 
     ws.on("open", () => {
-      if (dc.isOpen()) {
-        dc.sendMessageBinary(Buffer.from(JSON.stringify({ type: "ws_opened", id: msg.id, protocol: ws.protocol || "" })));
-      }
+      enqueueControl(state, Buffer.from(JSON.stringify({ type: "ws_opened", id: msg.id, protocol: ws.protocol || "" })));
     });
 
     ws.on("message", (data: Buffer, isBinary: boolean) => {
-      if (!dc.isOpen()) { ws.close(); return; }
-      dc.sendMessageBinary(Buffer.from(JSON.stringify({
-        type: "ws_message",
-        id: msg.id,
-        data: isBinary ? data.toString("base64") : data.toString("utf-8"),
-        binary: isBinary,
-      })));
+      if (!state.controlDc?.isOpen()) { ws.close(); return; }
+
+      // Binary WS fast-path: send raw binary on bulk channel (no base64/JSON)
+      if (isBinary && state.capabilities.has("binary-ws") && state.bulkDc?.isOpen()) {
+        const header = Buffer.alloc(37);
+        header[0] = BINARY_WS_MAGIC;
+        header.write(msg.id, 1, "ascii");
+        enqueueBulk(state, Buffer.concat([header, data]));
+      } else {
+        // JSON path (text messages, or no bulk channel / binary-ws capability)
+        enqueueControl(state, Buffer.from(JSON.stringify({
+          type: "ws_message",
+          id: msg.id,
+          data: isBinary ? data.toString("base64") : data.toString("utf-8"),
+          binary: isBinary,
+        })));
+      }
     });
 
     ws.on("close", (code: number, reason: Buffer) => {
-      wsConnections.delete(msg.id);
-      if (dc.isOpen()) {
-        dc.sendMessageBinary(Buffer.from(JSON.stringify({ type: "ws_close", id: msg.id, code, reason: reason.toString() })));
-      }
+      state.wsConnections.delete(msg.id);
+      enqueueControl(state, Buffer.from(JSON.stringify({ type: "ws_close", id: msg.id, code, reason: reason.toString() })));
     });
 
     ws.on("error", (err: Error) => {
-      wsConnections.delete(msg.id);
-      if (dc.isOpen()) {
-        dc.sendMessageBinary(Buffer.from(JSON.stringify({ type: "ws_error", id: msg.id, message: err.message })));
-      }
+      state.wsConnections.delete(msg.id);
+      enqueueControl(state, Buffer.from(JSON.stringify({ type: "ws_error", id: msg.id, message: err.message })));
     });
 
-    wsConnections.set(msg.id, ws);
+    state.wsConnections.set(msg.id, ws);
     console.log(`[WebRTC] WS tunnel opened: ${msg.url} (id: ${msg.id})`);
   }
 
@@ -503,6 +785,7 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
       pc.close();
     }
     peers.clear();
+    peerStates.clear();
   }
 
   return { handleSdpOffer, handleCandidate, cleanup };
