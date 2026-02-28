@@ -160,6 +160,19 @@ function isBrowserRequest(req: IncomingMessage): boolean {
   return accept.includes("text/html");
 }
 
+/** Browser-initiated resource requests that don't contain sensitive data.
+ *  Without this exemption they 401 before the session token is refreshed. */
+function isPublicResource(path: string): boolean {
+  const basename = path.split("/").pop() || "";
+  return (
+    basename === "manifest.json" ||
+    basename.endsWith(".webmanifest") ||
+    basename === "browserconfig.xml" ||
+    basename === "robots.txt" ||
+    basename.endsWith(".ico")
+  );
+}
+
 function getCallbackUrl(req: IncomingMessage, isTls: boolean): string {
   const proto = isTls ? "https" : "http";
   const host = req.headers.host || `localhost`;
@@ -1008,9 +1021,9 @@ export function createProxy(options: ProxyOptions): {
       stats.totalRequests++;
 
       // Check if this backend skips gateway-side JWT validation
-      const isNoAuth = activeBackend
+      const isNoAuth = isPublicResource(path) || (activeBackend
         ? noAuthBackends.has(activeBackend)
-        : false; // default backend always requires JWT
+        : false); // default backend always requires JWT
 
       let payload: any = null;
 
