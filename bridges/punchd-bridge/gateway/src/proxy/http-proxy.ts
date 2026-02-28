@@ -469,6 +469,59 @@ export function createProxy(options: ProxyOptions): {
   // Server-side endpoints (token exchange, refresh) always use internal URL
   const serverEndpoints: OidcEndpoints = getOidcEndpoints(options.tcConfig, tcInternalUrl);
   const clientId = options.tcConfig.resource;
+
+  // ── Refresh token dedup cache ─────────────────────────────────
+  // When the access token expires, multiple concurrent requests (manifest.json,
+  // DC requests, session-token refresh) may all try to use the same refresh
+  // token simultaneously. TideCloak rotates refresh tokens on use, so the
+  // second concurrent refresh fails (old token consumed). Fix: deduplicate
+  // concurrent refreshes and cache the result briefly.
+  interface RefreshResult {
+    accessToken: string;
+    expiresIn: number;
+    refreshToken?: string;
+    refreshExpiresIn?: number;
+    timestamp: number;
+  }
+  let lastRefreshResult: RefreshResult | null = null;
+  let refreshInFlight: Promise<RefreshResult | null> | null = null;
+
+  async function deduplicatedRefresh(refreshToken: string): Promise<RefreshResult | null> {
+    // Reuse a recent result (< 60 seconds) — prevents hammering TideCloak
+    // when multiple requests trigger refresh simultaneously or in quick succession
+    if (lastRefreshResult && Date.now() - lastRefreshResult.timestamp < 60_000) {
+      return lastRefreshResult;
+    }
+    // If a refresh is already in flight, wait for it
+    if (refreshInFlight) {
+      return refreshInFlight;
+    }
+    refreshInFlight = (async () => {
+      try {
+        const tokens = await refreshAccessToken(
+          serverEndpoints,
+          clientId,
+          refreshToken
+        );
+        const result: RefreshResult = {
+          accessToken: tokens.access_token,
+          expiresIn: tokens.expires_in,
+          refreshToken: tokens.refresh_token,
+          refreshExpiresIn: tokens.refresh_expires_in,
+          timestamp: Date.now(),
+        };
+        lastRefreshResult = result;
+        return result;
+      } catch (err) {
+        console.log("[Gateway] Deduplicated refresh failed:", err);
+        return null;
+      } finally {
+        refreshInFlight = null;
+      }
+    })();
+    return refreshInFlight;
+  }
+
   const isTls = !!options.tls;
   _useSecureCookies = isTls;
 
@@ -561,6 +614,7 @@ export function createProxy(options: ProxyOptions): {
           stunServer: options.iceServers?.[0]
             ? `stun:${options.iceServers[0].replace("stun:", "")}`
             : null,
+          targetGatewayId: options.gatewayId || undefined,
         };
         if (options.turnServer && options.turnSecret) {
           // Only serve TURN credentials to authenticated users
@@ -705,36 +759,34 @@ export function createProxy(options: ProxyOptions): {
             accessToken = authHeader.slice(7);
           }
         }
-        if (!accessToken) {
-          res.writeHead(401, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: "No session" }));
-          return;
-        }
-        let payload = await options.auth.verifyToken(accessToken);
 
-        // If access token expired, try refreshing with refresh token
+        let payload = accessToken
+          ? await options.auth.verifyToken(accessToken)
+          : null;
+
+        // Always refresh when the session-token endpoint is called.
+        // This endpoint is only called by the client's periodic refresh
+        // (every 2 min), so it's not excessive. It ensures the client
+        // always gets a token with full lifetime and the browser's
+        // gateway_access cookie is renewed (preventing expiry-based 401s
+        // on non-DC requests like manifest.json).
         const setCookies: string[] = [];
-        if (!payload && cookies["gateway_refresh"]) {
-          try {
-            const tokens = await refreshAccessToken(
-              serverEndpoints,
-              clientId,
-              cookies["gateway_refresh"]
-            );
-            payload = await options.auth.verifyToken(tokens.access_token);
-            if (payload) {
-              accessToken = tokens.access_token;
+        if (cookies["gateway_refresh"]) {
+          const refreshResult = await deduplicatedRefresh(cookies["gateway_refresh"]);
+          if (refreshResult) {
+            const refreshedPayload = await options.auth.verifyToken(refreshResult.accessToken);
+            if (refreshedPayload) {
+              payload = refreshedPayload;
+              accessToken = refreshResult.accessToken;
               setCookies.push(
-                buildCookieHeader("gateway_access", tokens.access_token, tokens.expires_in)
+                buildCookieHeader("gateway_access", refreshResult.accessToken, refreshResult.expiresIn)
               );
-              if (tokens.refresh_token) {
+              if (refreshResult.refreshToken) {
                 setCookies.push(
-                  buildCookieHeader("gateway_refresh", tokens.refresh_token, tokens.refresh_expires_in || 1800, "Strict")
+                  buildCookieHeader("gateway_refresh", refreshResult.refreshToken, refreshResult.refreshExpiresIn || 1800, "Strict")
                 );
               }
             }
-          } catch (err) {
-            console.log("[Gateway] Session token refresh failed:", err);
           }
         }
 
@@ -982,46 +1034,41 @@ export function createProxy(options: ProxyOptions): {
 
         // If access token expired, try refreshing with refresh token
         if (!payload && cookies["gateway_refresh"]) {
-          try {
-            const tokens = await refreshAccessToken(
-              serverEndpoints,
-              clientId,
-              cookies["gateway_refresh"]
-            );
-
-            payload = await options.auth.verifyToken(tokens.access_token);
-
+          const refreshResult = await deduplicatedRefresh(cookies["gateway_refresh"]);
+          if (refreshResult) {
+            payload = await options.auth.verifyToken(refreshResult.accessToken);
             if (payload) {
-              // Set updated cookies on the response
-              token = tokens.access_token;
+              token = refreshResult.accessToken;
               const refreshCookies: string[] = [
                 buildCookieHeader(
                   "gateway_access",
-                  tokens.access_token,
-                  tokens.expires_in
+                  refreshResult.accessToken,
+                  refreshResult.expiresIn
                 ),
               ];
-              if (tokens.refresh_token) {
+              if (refreshResult.refreshToken) {
                 refreshCookies.push(
                   buildCookieHeader(
                     "gateway_refresh",
-                    tokens.refresh_token,
-                    tokens.refresh_expires_in || 1800,
+                    refreshResult.refreshToken,
+                    refreshResult.refreshExpiresIn || 1800,
                     "Strict"
                   )
                 );
               }
-              // Store cookies to set on the proxied response
               (res as any).__refreshCookies = refreshCookies;
             }
-          } catch (err) {
-            console.log("[Gateway] Token refresh failed:", err);
           }
         }
 
         // No valid token — redirect browser or 401 for API
         if (!payload) {
           stats.rejectedRequests++;
+          // Diagnostic: log why auth failed for DC requests
+          if (req.headers["x-dc-request"]) {
+            const tokenSnippet = token ? `${token.slice(0, 20)}...` : "null";
+            console.log(`[Gateway] DC auth failed: url=${url} token=${tokenSnippet} hasRefreshCookie=${!!cookies["gateway_refresh"]}`);
+          }
 
           if (isBrowserRequest(req)) {
             const fullUrl = backendPrefix + url;
@@ -1209,7 +1256,7 @@ export function createProxy(options: ProxyOptions): {
                 // /__b/<name> prefix prepended automatically.
                 // Gateway-internal paths (/auth/*, /js/*, /realms/*, etc.) are
                 // skipped — they work without the prefix.
-                // Escape backendPrefix for safe JS string interpolation (prevents XSS if name contains quotes/backslashes)
+                // Escape backendPrefix for safe JS string interpolation (prevents XSS if name contains quotes/backslashes).
                 const safePrefix = backendPrefix.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/</g, "\\x3c");
                 const patchScript = `<script>(function(){` +
                   `var P="${safePrefix}";` +
@@ -1232,6 +1279,26 @@ export function createProxy(options: ProxyOptions): {
                   `var SA=Element.prototype.setAttribute;Element.prototype.setAttribute=function(a,v){` +
                     `if((a==="src"||a==="href")&&typeof v==="string"&&n(v))v=P+v;` +
                     `return SA.call(this,a,v)};` +
+                  // Fix CSS url() breakage when /__b/<name> contains apostrophes or spaces:
+                  // strip quotes from url('…') / url("…") and percent-encode chars that
+                  // are invalid in unquoted CSS url() (spaces, quotes, parens, tabs).
+                  // Uses a Proxy on HTMLElement.style for reliable interception.
+                  `function q(v){if(typeof v!=="string"||v.indexOf("url(")===-1)return v;` +
+                    `return v.replace(/url\\(([^)]*)\\)/g,function(m,i){` +
+                      `var u=i.trim();` +
+                      `if(u.length>1&&(u[0]==="'"||u[0]==='"')&&u[u.length-1]===u[0])u=u.slice(1,-1);` +
+                      `return"url("+u.replace(/ /g,"%20").replace(/'/g,"%27").replace(/"/g,"%22").replace(/\\t/g,"%09")+")"` +
+                    `})}` +
+                  `var _sd=Object.getOwnPropertyDescriptor(HTMLElement.prototype,"style");` +
+                  `if(_sd&&_sd.get){var _wm=new WeakMap();Object.defineProperty(HTMLElement.prototype,"style",{` +
+                    `get:function(){var r=_sd.get.call(this),p=_wm.get(r);if(!p){p=new Proxy(r,{` +
+                      `set:function(t,k,v){t[k]=q(v);return true},` +
+                      `get:function(t,k){var v=t[k];if(typeof v!=="function")return v;` +
+                        `if(k==="setProperty")return function(){if(arguments.length>1)arguments[1]=q(arguments[1]);return t.setProperty.apply(t,arguments)};` +
+                        `return v.bind(t)}` +
+                    `});_wm.set(r,p)}return p},` +
+                    `set:_sd.set?function(v){_sd.set.call(this,q(v))}:void 0,` +
+                    `configurable:true})}` +
                   `})()</script>`;
                 if (html.includes("<head>")) {
                   html = html.replace("<head>", `<head>${patchScript}`);

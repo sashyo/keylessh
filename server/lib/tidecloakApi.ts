@@ -18,6 +18,37 @@ const getNonAdminTcUrl = () => `${getKeycloakAuthServer()}/realms/${getRealm_()}
 
 const REALM_MGMT = "realm-management";
 
+// Sync a committed policy to TideCloak's SSH policies table
+export const syncPolicyToTideCloak = async (
+  token: string,
+  policy: {
+    roleId: string;
+    contractCode?: string;
+    approvalType: string;
+    executionType: string;
+    threshold: number;
+    policyData: string;
+  }
+): Promise<void> => {
+  const url = `${getTcUrl()}/tide-admin/ssh-policies`;
+  console.log(`[PolicySync] PUT ${url}`, JSON.stringify(policy).substring(0, 200));
+  const response = await fetch(url, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify(policy),
+  });
+
+  const responseBody = await response.text();
+  console.log(`[PolicySync] Response: ${response.status} ${responseBody}`);
+
+  if (!response.ok) {
+    throw new Error(`Error syncing policy to TideCloak: ${response.status} ${responseBody}`);
+  }
+};
+
 // Fetch the admin policy from TideCloak (used to authorize policy commits)
 export const getAdminPolicy = async (): Promise<string> => {
   const response = await fetch(`${getNonAdminTcUrl()}/tide-policy-resources/admin-policy`);
