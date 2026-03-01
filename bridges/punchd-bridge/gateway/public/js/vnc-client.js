@@ -83,7 +83,6 @@
   var fbUpdateRect = null;
   var fbUpdatePixelsLeft = 0;
   var fbUpdateBusy = false; // true while processing a FramebufferUpdate
-  var justCompletedFbUpdate = false; // true after fbUpdate completes, for trailing-data detection
 
   // Server pixel format (populated from ServerInit, updated by SetPixelFormat)
   var serverBpp = 32; // bytes per pixel component (bits)
@@ -406,11 +405,10 @@
       recvBuf = newBuf;
     }
 
-    // Log periodically
+    // Log periodically (debug level to avoid console spam)
     if (rfbState === RFB_CONNECTED && tcpBytesReceived % 500000 < data.length) {
-      console.log("[VNC] TCP bytes received:", (tcpBytesReceived / 1048576).toFixed(1) + "MB",
-        "recvBuf:", recvBuf.length, "fbUpdateRemaining:", fbUpdateRemaining,
-        "pixelsLeft:", fbUpdatePixelsLeft);
+      console.debug("[VNC] TCP bytes received:", (tcpBytesReceived / 1048576).toFixed(1) + "MB",
+        "recvBuf:", recvBuf.length, "pixelsLeft:", fbUpdatePixelsLeft);
     }
 
     // Process as much of the buffer as possible
@@ -652,35 +650,14 @@
     if (recvBuf.length < 1) return 0;
     var msgType = recvBuf[0];
 
-    // Valid message type — clear trailing-data flag
-    if (msgType >= 0 && msgType <= 3) {
-      justCompletedFbUpdate = false;
-    }
-
     switch (msgType) {
       case 0: return handleFbUpdate();
       case 1: return handleSetColourMap();
       case 2: return handleBell();
       case 3: return handleServerCutText();
       default:
-        // Some VNC servers (TightVNC) send trailing bytes after FramebufferUpdate
-        // data — typically height bytes of scanline padding. Skip them gracefully.
-        if (justCompletedFbUpdate) {
-          console.warn("[VNC] Skipping", recvBuf.length,
-            "trailing bytes after FramebufferUpdate (server quirk, first byte: 0x" +
-            msgType.toString(16) + ")");
-          return recvBuf.length;
-        }
-        // Genuine unknown message — hex dump and disconnect
-        var dumpEnd = Math.min(32, recvBuf.length);
-        var dumpBytes = [];
-        for (var d = 0; d < dumpEnd; d++) {
-          dumpBytes.push('0x' + recvBuf[d].toString(16).padStart(2, '0'));
-        }
         console.warn("[VNC] Unknown server message type:", msgType,
-          "bufLen:", recvBuf.length,
-          "fbUpdateRemaining:", fbUpdateRemaining,
-          "hex:", dumpBytes.join(' '));
+          "bufLen:", recvBuf.length);
         disconnectVnc("Unknown server message: " + msgType);
         return 0;
     }
@@ -693,15 +670,12 @@
     fbUpdateRect = null;
     fbUpdatePixelsLeft = 0;
     fbUpdateBusy = true;
-    console.log("[VNC] FramebufferUpdate:", fbUpdateRemaining, "rects",
-      "header:", '0x' + recvBuf[0].toString(16), '0x' + recvBuf[1].toString(16),
-      '0x' + recvBuf[2].toString(16), '0x' + recvBuf[3].toString(16));
+    console.debug("[VNC] FramebufferUpdate:", fbUpdateRemaining, "rects");
     return 4;
   }
 
   function onFbUpdateComplete() {
     fbUpdateBusy = false;
-    justCompletedFbUpdate = true;
     // Restore connected status (clears "Loading..." text)
     if (rfbState === RFB_CONNECTED) {
       setStatus("connected", "Connected to " + serverName);
@@ -796,9 +770,6 @@
 
       // Raw encoding — need w*h*bpp bytes of pixel data
       fbUpdatePixelsLeft = fbUpdateRect.w * fbUpdateRect.h * serverBytesPerPixel;
-      console.log("[VNC] Raw rect:", fbUpdateRect.w, "x", fbUpdateRect.h,
-        "at", fbUpdateRect.x + "," + fbUpdateRect.y,
-        "bytes:", fbUpdatePixelsLeft);
 
       // Zero-size rect: nothing to render, finish immediately
       if (fbUpdatePixelsLeft <= 0) {
@@ -889,20 +860,21 @@
       }
 
       if (fbUpdatePixelsLeft <= 0) {
-        // Diagnostic: hex dump of bytes right after the pixel data
-        var nextStart = available;
-        var nextEnd = Math.min(nextStart + 32, recvBuf.length);
-        if (nextEnd > nextStart) {
-          var nextBytes = [];
-          for (var nb = nextStart; nb < nextEnd; nb++) {
-            nextBytes.push('0x' + recvBuf[nb].toString(16).padStart(2, '0'));
+        // Some VNC servers (TightVNC) send trailing per-scanline padding
+        // bytes after the pixel data. Skip them inline by scanning for
+        // 4-byte BGRX pixel patterns (byte[3] == 0xFF, byte[0] > 3).
+        // Only applies to the last rect in the update.
+        if (fbUpdateRemaining <= 1) {
+          var padStart = available;
+          while (available + 4 <= recvBuf.length &&
+                 recvBuf[available + 3] === 0xFF &&
+                 recvBuf[available] > 3) {
+            available += 4;
           }
-          console.log("[VNC] Rect boundary - next " + (nextEnd - nextStart) + " bytes:", nextBytes.join(' '));
+          if (available > padStart) {
+            console.warn("[VNC] Skipped", available - padStart, "trailing padding bytes");
+          }
         }
-        console.log("[VNC] Rect complete:", fbUpdateRect.w, "x", fbUpdateRect.h,
-          "at", fbUpdateRect.x + "," + fbUpdateRect.y,
-          "rectsRemaining:", fbUpdateRemaining - 1,
-          "bufRemaining:", recvBuf.length - available);
         finishRect();
       }
 
@@ -1303,7 +1275,6 @@
     fbUpdateRect = null;
     fbUpdatePixelsLeft = 0;
     fbUpdateBusy = false;
-    justCompletedFbUpdate = false;
     buttonMask = 0;
 
     controlChannel.send(JSON.stringify({
