@@ -83,6 +83,7 @@
   var fbUpdateRect = null;
   var fbUpdatePixelsLeft = 0;
   var fbUpdateBusy = false; // true while processing a FramebufferUpdate
+  var resyncSkipped = 0; // bytes skipped while resyncing after unknown message type
 
   // Server pixel format (populated from ServerInit, updated by SetPixelFormat)
   var serverBpp = 32; // bytes per pixel component (bits)
@@ -651,15 +652,26 @@
     var msgType = recvBuf[0];
 
     switch (msgType) {
-      case 0: return handleFbUpdate();
-      case 1: return handleSetColourMap();
-      case 2: return handleBell();
-      case 3: return handleServerCutText();
+      case 0: resyncSkipped = 0; return handleFbUpdate();
+      case 1: resyncSkipped = 0; return handleSetColourMap();
+      case 2: resyncSkipped = 0; return handleBell();
+      case 3: resyncSkipped = 0; return handleServerCutText();
       default:
-        console.error("[VNC] Unknown server message type:", msgType,
-          "buffer[0..3]:", Array.from(recvBuf.subarray(0, 4)));
-        disconnectVnc("Unknown server message type: " + msgType);
-        return 0;
+        // Unknown message type — parser misalignment or unsupported server extension.
+        // Skip forward to next 0x00 byte (potential FramebufferUpdate start) to resync.
+        if (resyncSkipped === 0) {
+          console.warn("[VNC] Unknown message type:", msgType,
+            "hex:", Array.from(recvBuf.subarray(0, Math.min(20, recvBuf.length)))
+              .map(function(b) { return ("0" + b.toString(16)).slice(-2); }).join(" "));
+        }
+        var skip = 1;
+        while (skip < recvBuf.length && recvBuf[skip] !== 0x00) skip++;
+        resyncSkipped += skip;
+        if (resyncSkipped > 1048576) {
+          disconnectVnc("Parser cannot resync after 1MB of unknown data");
+          return 0;
+        }
+        return skip;
     }
   }
 
@@ -818,8 +830,19 @@
       }
 
       if (encoding !== 0) {
-        console.warn("[VNC] Unsupported encoding:", encoding);
-        disconnectVnc("Unsupported encoding: " + encoding);
+        // Unknown encoding — can't determine data length, so abandon this
+        // FramebufferUpdate entirely and request a clean full update.
+        console.warn("[VNC] Unsupported encoding:", encoding,
+          "(0x" + (encoding >>> 0).toString(16) + ")",
+          "rect:", fbUpdateRect.x + "," + fbUpdateRect.y,
+          fbUpdateRect.w + "x" + fbUpdateRect.h,
+          "- flushing buffer, requesting fresh update");
+        fbUpdateRect = null;
+        fbUpdateRemaining = 0;
+        fbUpdatePixelsLeft = 0;
+        fbUpdateBusy = false;
+        recvBuf = new Uint8Array(0);
+        requestFramebufferUpdate(false);
         return 0;
       }
 
