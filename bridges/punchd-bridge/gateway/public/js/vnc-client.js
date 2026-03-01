@@ -87,6 +87,8 @@
 
   // Recovery timers
   var lastFrameComplete = 0;      // timestamp of last successful frame completion
+  var lastTcpActivity = 0;        // timestamp of last TCP data received
+  var lastFullRefreshTime = 0;    // throttle full-refresh requests
   var updatePollTimer = null;     // periodic incremental update request timer
   var stallWatchdogTimer = null;  // stall detection and recovery timer
 
@@ -413,6 +415,7 @@
   var tcpBytesReceived = 0;
   function onTcpData(data) {
     tcpBytesReceived += data.length;
+    lastTcpActivity = Date.now();
     // Append to receive buffer (avoid copy when recvBuf is empty)
     if (recvBuf.length === 0) {
       recvBuf = data;
@@ -635,28 +638,31 @@
     // Set up input handlers
     setupInputHandlers();
 
-    // Continuous incremental update requests — keeps data flowing even when
-    // onFbUpdateComplete is never called (e.g. after a parser desync).
+    // Conservative safety-net: send an incremental update request every 2s
+    // in case onFbUpdateComplete was never called (parser desync, server not
+    // responding, etc.).  2s is slow enough to avoid flooding the pipeline.
     lastFrameComplete = Date.now();
+    lastTcpActivity = Date.now();
     if (updatePollTimer) clearInterval(updatePollTimer);
     updatePollTimer = setInterval(function () {
       if (rfbState !== RFB_CONNECTED) { clearInterval(updatePollTimer); updatePollTimer = null; return; }
       requestFramebufferUpdate(true);
-    }, 50);
+    }, 2000);
 
     // Stall watchdog: detect stuck parser states and recover.
-    // Two conditions trigger a reset:
+    // Triggers when:
     //  1) The current rect claims more pixel data than 2× the framebuffer
-    //     (sign of parser desync reading garbage as rect dimensions).
-    //  2) No frame has completed in 15 seconds (slow but sustained stall).
+    //     (sign of parser desync reading garbage as rect dimensions), OR
+    //  2) No TCP data has arrived for 5+ seconds while an update is in
+    //     progress (connection stall — NOT just slow transfer).
     if (stallWatchdogTimer) clearInterval(stallWatchdogTimer);
     stallWatchdogTimer = setInterval(function () {
       if (rfbState !== RFB_CONNECTED) { clearInterval(stallWatchdogTimer); stallWatchdogTimer = null; return; }
       if (!fbUpdateBusy) return;
       var fbSize = fbWidth * fbHeight * serverBytesPerPixel;
-      var elapsed = Date.now() - lastFrameComplete;
-      if (fbUpdatePixelsLeft > fbSize * 2 || elapsed > 15000) {
-        console.warn("[VNC] Stall detected (elapsed=" + (elapsed / 1000).toFixed(1) + "s" +
+      var dataSilence = Date.now() - lastTcpActivity;
+      if (fbUpdatePixelsLeft > fbSize * 2 || dataSilence > 5000) {
+        console.warn("[VNC] Stall detected (silence=" + (dataSilence / 1000).toFixed(1) + "s" +
           " pixelsLeft=" + fbUpdatePixelsLeft + ") — resetting parser");
         resetParserState();
         lastFrameComplete = Date.now();
@@ -668,6 +674,13 @@
   }
 
   function requestFramebufferUpdate(incremental) {
+    // Throttle non-incremental (full) refreshes — each generates ~fbW×fbH×4
+    // bytes of server response.  Allow at most one per second.
+    if (!incremental) {
+      var now = Date.now();
+      if (now - lastFullRefreshTime < 1000) return;
+      lastFullRefreshTime = now;
+    }
     var msg = new Uint8Array(10);
     msg[0] = 3; // FramebufferUpdateRequest
     msg[1] = incremental ? 1 : 0;

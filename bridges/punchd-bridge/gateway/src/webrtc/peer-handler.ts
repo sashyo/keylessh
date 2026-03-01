@@ -170,6 +170,11 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
         const sent = dc.sendMessageBinary(queue[0]);
         if (!sent) {
           setPaused(true);
+          // SCTP rejected the message (congestion / remote window full) —
+          // apply backpressure to TCP sockets so they stop enqueuing data.
+          for (const stream of state.pausedStreams) {
+            stream.pause();
+          }
           return;
         }
       } catch {
