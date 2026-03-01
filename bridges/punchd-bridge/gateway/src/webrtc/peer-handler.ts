@@ -98,7 +98,7 @@ interface PeerState {
   bulkQueue: Buffer[];
   controlPaused: boolean;
   bulkPaused: boolean;
-  pausedStreams: Set<import("http").IncomingMessage>;
+  pausedStreams: Set<import("http").IncomingMessage | import("net").Socket>;
 }
 
 export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
@@ -830,13 +830,20 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
       enqueueBulk(state, Buffer.concat([header, data]));
     });
 
+    // Register for backpressure — when the bulk DataChannel buffer fills,
+    // drainQueue pauses all streams in pausedStreams. Without this, TCP
+    // sockets flood the queue faster than WebRTC can drain it.
+    state.pausedStreams.add(sock);
+
     sock.on("close", () => {
+      state.pausedStreams.delete(sock);
       state.tcpConnections.delete(msg.id);
       enqueueControl(state, Buffer.from(JSON.stringify({ type: "tcp_close", id: msg.id })));
     });
 
     sock.on("error", (err: Error) => {
       console.error(`[WebRTC] TCP tunnel error (${msg.id}): ${err.message}`);
+      state.pausedStreams.delete(sock);
       state.tcpConnections.delete(msg.id);
       enqueueControl(state, Buffer.from(JSON.stringify({ type: "tcp_error", id: msg.id, message: err.message })));
     });

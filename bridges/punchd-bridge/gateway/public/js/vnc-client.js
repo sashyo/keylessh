@@ -612,8 +612,19 @@
     // Set up input handlers
     setupInputHandlers();
 
-    // Note: incremental updates are requested after each FramebufferUpdate completes
-    // (see handleFbUpdate / handleFbUpdateRect completion logic)
+    // Diagnostic: periodic status check to detect stalls
+    var lastTcpCheck = 0;
+    var stallTimer = setInterval(function () {
+      if (rfbState !== RFB_CONNECTED) { clearInterval(stallTimer); return; }
+      var stalled = (tcpBytesReceived === lastTcpCheck && fbUpdatePixelsLeft > 0);
+      var rateMBs = ((tcpBytesReceived - lastTcpCheck) / 1048576 / 5).toFixed(2);
+      if (fbUpdatePixelsLeft > 0 || stalled) {
+        console.log("[VNC] Status: pixelsLeft=" + fbUpdatePixelsLeft +
+          " TCP=" + (tcpBytesReceived / 1048576).toFixed(1) + "MB" +
+          " rate=" + rateMBs + "MB/s" + (stalled ? " STALLED" : ""));
+      }
+      lastTcpCheck = tcpBytesReceived;
+    }, 5000);
 
     return 24 + nameLen;
   }
@@ -665,8 +676,12 @@
 
   function onFbUpdateComplete() {
     fbUpdateBusy = false;
-    // Request next incremental update now that we've finished processing
+    // Restore connected status (clears "Loading..." text)
     if (rfbState === RFB_CONNECTED) {
+      setStatus("connected", "Connected to " + serverName);
+      statusBar.classList.add("connected");
+      disconnectBtn.classList.remove("hidden");
+      // Request next incremental update
       requestFramebufferUpdate(true);
     }
   }
@@ -823,6 +838,12 @@
           if (paintH > 0) {
             ctx.putImageData(imageData, 0, 0, rect.x, paintY, rect.w, paintH);
             rect.lastPaintRow = fbUpdatePixelsLeft <= 0 ? rect.h : currentRow;
+            // Show loading progress for large rects
+            if (fbUpdatePixelsLeft > 0) {
+              var totalBytes = rect.w * rect.h * serverBytesPerPixel;
+              var pct = Math.round(((totalBytes - fbUpdatePixelsLeft) / totalBytes) * 100);
+              statusText.textContent = "Loading desktop... " + pct + "%";
+            }
           }
         }
       }
@@ -1051,20 +1072,25 @@
   function applyScaleMode() {
     var mode = scaleSelect ? scaleSelect.value : "fit";
     if (mode === "fit") {
-      vncCanvas.style.width = "100vw";
-      vncCanvas.style.height = "100vh";
-      vncCanvas.style.objectFit = "contain";
+      // Scale to fit viewport while preserving aspect ratio
+      var winW = window.innerWidth;
+      var winH = window.innerHeight;
+      var scale = Math.min(winW / fbWidth, winH / fbHeight);
+      vncCanvas.style.width = Math.floor(fbWidth * scale) + "px";
+      vncCanvas.style.height = Math.floor(fbHeight * scale) + "px";
     } else if (mode === "stretch") {
-      vncCanvas.style.width = "100vw";
-      vncCanvas.style.height = "100vh";
-      vncCanvas.style.objectFit = "fill";
+      vncCanvas.style.width = window.innerWidth + "px";
+      vncCanvas.style.height = window.innerHeight + "px";
     } else {
       // actual — 1:1 pixels
       vncCanvas.style.width = fbWidth + "px";
       vncCanvas.style.height = fbHeight + "px";
-      vncCanvas.style.objectFit = "";
     }
   }
+
+  window.addEventListener("resize", function () {
+    if (fbWidth > 0 && fbHeight > 0) applyScaleMode();
+  });
 
   // ── Input Handling ────────────────────────────────────────────
 
