@@ -83,6 +83,7 @@
   var fbUpdateRect = null;
   var fbUpdatePixelsLeft = 0;
   var fbUpdateBusy = false; // true while processing a FramebufferUpdate
+  var justCompletedFbUpdate = false; // true after fbUpdate completes, for trailing-data detection
 
   // Server pixel format (populated from ServerInit, updated by SetPixelFormat)
   var serverBpp = 32; // bytes per pixel component (bits)
@@ -651,13 +652,26 @@
     if (recvBuf.length < 1) return 0;
     var msgType = recvBuf[0];
 
+    // Valid message type — clear trailing-data flag
+    if (msgType >= 0 && msgType <= 3) {
+      justCompletedFbUpdate = false;
+    }
+
     switch (msgType) {
       case 0: return handleFbUpdate();
       case 1: return handleSetColourMap();
       case 2: return handleBell();
       case 3: return handleServerCutText();
       default:
-        // Hex dump for diagnosis — likely a framing error (pixel data leak)
+        // Some VNC servers (TightVNC) send trailing bytes after FramebufferUpdate
+        // data — typically height bytes of scanline padding. Skip them gracefully.
+        if (justCompletedFbUpdate) {
+          console.warn("[VNC] Skipping", recvBuf.length,
+            "trailing bytes after FramebufferUpdate (server quirk, first byte: 0x" +
+            msgType.toString(16) + ")");
+          return recvBuf.length;
+        }
+        // Genuine unknown message — hex dump and disconnect
         var dumpEnd = Math.min(32, recvBuf.length);
         var dumpBytes = [];
         for (var d = 0; d < dumpEnd; d++) {
@@ -666,7 +680,6 @@
         console.warn("[VNC] Unknown server message type:", msgType,
           "bufLen:", recvBuf.length,
           "fbUpdateRemaining:", fbUpdateRemaining,
-          "fbUpdateBusy:", fbUpdateBusy,
           "hex:", dumpBytes.join(' '));
         disconnectVnc("Unknown server message: " + msgType);
         return 0;
@@ -688,6 +701,7 @@
 
   function onFbUpdateComplete() {
     fbUpdateBusy = false;
+    justCompletedFbUpdate = true;
     // Restore connected status (clears "Loading..." text)
     if (rfbState === RFB_CONNECTED) {
       setStatus("connected", "Connected to " + serverName);
@@ -1288,6 +1302,8 @@
     fbUpdateRemaining = 0;
     fbUpdateRect = null;
     fbUpdatePixelsLeft = 0;
+    fbUpdateBusy = false;
+    justCompletedFbUpdate = false;
     buttonMask = 0;
 
     controlChannel.send(JSON.stringify({
