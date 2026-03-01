@@ -482,9 +482,10 @@
   function handleVncAuthChallenge() {
     // Server sends 16-byte challenge
     if (recvBuf.length < 16) return 0;
-    var challenge = recvBuf.subarray(0, 16);
-    console.log("[VNC] Got VNC auth challenge");
+    var challenge = new Uint8Array(recvBuf.subarray(0, 16));
+    console.log("[VNC] Got VNC auth challenge, computing response...");
     var response = vncAuthResponse(challenge, vncPassword);
+    console.log("[VNC] Sending auth response");
     sendTcpData(response);
     rfbState = RFB_SECURITY_RESULT;
     return 16;
@@ -774,209 +775,170 @@
     return 8 + textLen;
   }
 
-  // ── VNC DES Authentication ────────────────────────────────────
+  // ── VNC DES Authentication ───────────────────────────────────
   //
   // VNC uses a non-standard DES: each byte of the 8-byte key is
-  // bit-reversed before encryption. We implement minimal single-block
-  // DES (only encrypt, no CBC/padding needed — challenge is exactly 16 bytes
-  // encrypted as two 8-byte blocks).
+  // bit-reversed before encryption. The 16-byte challenge is
+  // encrypted as two 8-byte DES-ECB blocks.
+  //
+  // This DES implementation is ported from noVNC (which itself is
+  // ported from Flashlight VNC). The key schedule has VNC's
+  // bit-reversal baked into its PC1 permutation, so raw password
+  // bytes are passed directly — no external reverseBits() needed.
 
   function vncAuthResponse(challenge, password) {
     // Pad/truncate password to 8 bytes
-    var key = new Uint8Array(8);
+    var rawKey = new Uint8Array(8);
     for (var i = 0; i < 8 && i < password.length; i++) {
-      key[i] = password.charCodeAt(i);
+      rawKey[i] = password.charCodeAt(i);
     }
-    // Bit-reverse each byte (VNC's non-standard DES key schedule)
-    for (var i = 0; i < 8; i++) {
-      key[i] = reverseBits(key[i]);
-    }
-
-    // Encrypt two 8-byte blocks
+    // noVNC DES handles VNC bit-reversal internally via PC1
+    var keys = desKeySchedule(rawKey);
     var response = new Uint8Array(16);
-    var block1 = desEncrypt(key, challenge.subarray(0, 8));
-    var block2 = desEncrypt(key, challenge.subarray(8, 16));
-    response.set(block1, 0);
-    response.set(block2, 8);
+    response.set(desEncryptBlock(keys, challenge.subarray(0, 8)), 0);
+    response.set(desEncryptBlock(keys, challenge.subarray(8, 16)), 8);
     return response;
   }
 
-  function reverseBits(b) {
-    var r = 0;
-    for (var i = 0; i < 8; i++) {
-      r = (r << 1) | (b & 1);
-      b >>= 1;
-    }
-    return r;
-  }
+  // ── DES Implementation (ported from noVNC) ─────────────────────
+  //
+  // Ported from noVNC (https://github.com/novnc/noVNC)
+  // core/crypto/des.js — MPL-2.0 license
+  //
+  // Originally ported from Flashlight VNC ActionScript implementation:
+  //   http://www.wizhelp.com/flashlight-vnc/
+  //
+  // DES class extracted from package Acme.Crypto for use in VNC.
+  // Copyright (C) 1999 AT&T Laboratories Cambridge. All Rights Reserved.
+  // DesCipher by Dave Zimmerman <dzimm@widget.com>
+  // Copyright (c) 1996 Widget Workshop, Inc. All Rights Reserved.
+  // Copyright (C) 1996 by Jef Poskanzer <jef@acme.com>. All rights reserved.
+  //
+  // SP-boxes combine S-box lookup + P permutation for speed.
 
-  // ── Minimal DES Implementation ────────────────────────────────
-  // Single-block DES encrypt only (no decrypt, no modes).
+  var PC2 = [13,16,10,23, 0, 4, 2,27,14, 5,20, 9,22,18,11, 3,
+             25, 7,15, 6,26,19,12, 1,40,51,30,36,46,54,29,39,
+             50,44,32,47,43,48,38,55,33,52,45,41,49,35,28,31];
+  var TOTROT = [1, 2, 4, 6, 8, 10, 12, 14, 15, 17, 19, 21, 23, 25, 27, 28];
 
-  // Initial Permutation
-  var IP = [
-    58,50,42,34,26,18,10,2, 60,52,44,36,28,20,12,4,
-    62,54,46,38,30,22,14,6, 64,56,48,40,32,24,16,8,
-    57,49,41,33,25,17,9,1,  59,51,43,35,27,19,11,3,
-    61,53,45,37,29,21,13,5, 63,55,47,39,31,23,15,7
-  ];
+  var SP1=[0x01010400,0x00000000,0x00010000,0x01010404,0x01010004,0x00010404,0x00000004,0x00010000,0x00000400,0x01010400,0x01010404,0x00000400,0x01000404,0x01010004,0x01000000,0x00000004,0x00000404,0x01000400,0x01000400,0x00010400,0x00010400,0x01010000,0x01010000,0x01000404,0x00010004,0x01000004,0x01000004,0x00010004,0x00000000,0x00000404,0x00010404,0x01000000,0x00010000,0x01010404,0x00000004,0x01010000,0x01010400,0x01000000,0x01000000,0x00000400,0x01010004,0x00010000,0x00010400,0x01000004,0x00000400,0x00000004,0x01000404,0x00010404,0x01010404,0x00010004,0x01010000,0x01000404,0x01000004,0x00000404,0x00010404,0x01010400,0x00000404,0x01000400,0x01000400,0x00000000,0x00010004,0x00010400,0x00000000,0x01010004];
+  var SP2=[0x80108020,0x80008000,0x00008000,0x00108020,0x00100000,0x00000020,0x80100020,0x80008020,0x80000020,0x80108020,0x80108000,0x80000000,0x80008000,0x00100000,0x00000020,0x80100020,0x00108000,0x00100020,0x80008020,0x00000000,0x80000000,0x00008000,0x00108020,0x80100000,0x00100020,0x80000020,0x00000000,0x00108000,0x00008020,0x80108000,0x80100000,0x00008020,0x00000000,0x00108020,0x80100020,0x00100000,0x80008020,0x80100000,0x80108000,0x00008000,0x80100000,0x80008000,0x00000020,0x80108020,0x00108020,0x00000020,0x00008000,0x80000000,0x00008020,0x80108000,0x00100000,0x80000020,0x00100020,0x80008020,0x80000020,0x00100020,0x00108000,0x00000000,0x80008000,0x00008020,0x80000000,0x80100020,0x80108020,0x00108000];
+  var SP3=[0x00000208,0x08020200,0x00000000,0x08020008,0x08000200,0x00000000,0x00020208,0x08000200,0x00020008,0x08000008,0x08000008,0x00020000,0x08020208,0x00020008,0x08020000,0x00000208,0x08000000,0x00000008,0x08020200,0x00000200,0x00020200,0x08020000,0x08020008,0x00020208,0x08000208,0x00020200,0x00020000,0x08000208,0x00000008,0x08020208,0x00000200,0x08000000,0x08020200,0x08000000,0x00020008,0x00000208,0x00020000,0x08020200,0x08000200,0x00000000,0x00000200,0x00020008,0x08020208,0x08000200,0x08000008,0x00000200,0x00000000,0x08020008,0x08000208,0x00020000,0x08000000,0x08020208,0x00000008,0x00020208,0x00020200,0x08000008,0x08020000,0x08000208,0x00000208,0x08020000,0x00020208,0x00000008,0x08020008,0x00020200];
+  var SP4=[0x00802001,0x00002081,0x00002081,0x00000080,0x00802080,0x00800081,0x00800001,0x00002001,0x00000000,0x00802000,0x00802000,0x00802081,0x00000081,0x00000000,0x00800080,0x00800001,0x00000001,0x00002000,0x00800000,0x00802001,0x00000080,0x00800000,0x00002001,0x00002080,0x00800081,0x00000001,0x00002080,0x00800080,0x00002000,0x00802080,0x00802081,0x00000081,0x00800080,0x00800001,0x00802000,0x00802081,0x00000081,0x00000000,0x00000000,0x00802000,0x00002080,0x00800080,0x00800081,0x00000001,0x00802001,0x00002081,0x00002081,0x00000080,0x00802081,0x00000081,0x00000001,0x00002000,0x00800001,0x00002001,0x00802080,0x00800081,0x00002001,0x00002080,0x00800000,0x00802001,0x00000080,0x00800000,0x00002000,0x00802080];
+  var SP5=[0x00000100,0x02080100,0x02080000,0x42000100,0x00080000,0x00000100,0x40000000,0x02080000,0x40080100,0x00080000,0x02000100,0x40080100,0x42000100,0x42080000,0x00080100,0x40000000,0x02000000,0x40080000,0x40080000,0x00000000,0x40000100,0x42080100,0x42080100,0x02000100,0x42080000,0x40000100,0x00000000,0x42000000,0x02080100,0x02000000,0x42000000,0x00080100,0x00080000,0x42000100,0x00000100,0x02000000,0x40000000,0x02080000,0x42000100,0x40080100,0x02000100,0x40000000,0x42080000,0x02080100,0x40080100,0x00000100,0x02000000,0x42080000,0x42080100,0x00080100,0x42000000,0x42080100,0x02080000,0x00000000,0x40080000,0x42000000,0x00080100,0x02000100,0x40000100,0x00080000,0x00000000,0x40080000,0x02080100,0x40000100];
+  var SP6=[0x20000010,0x20400000,0x00004000,0x20404010,0x20400000,0x00000010,0x20404010,0x00400000,0x20004000,0x00404010,0x00400000,0x20000010,0x00400010,0x20004000,0x20000000,0x00004010,0x00000000,0x00400010,0x20004010,0x00004000,0x00404000,0x20004010,0x00000010,0x20400010,0x20400010,0x00000000,0x00404010,0x20404000,0x00004010,0x00404000,0x20404000,0x20000000,0x20004000,0x00000010,0x20400010,0x00404000,0x20404010,0x00400000,0x00004010,0x20000010,0x00400000,0x20004000,0x20000000,0x00004010,0x20000010,0x20404010,0x00404000,0x20400000,0x00404010,0x20404000,0x00000000,0x20400010,0x00000010,0x00004000,0x20400000,0x00404010,0x00004000,0x00400010,0x20004010,0x00000000,0x20404000,0x20000000,0x00400010,0x20004010];
+  var SP7=[0x00200000,0x04200002,0x04000802,0x00000000,0x00000800,0x04000802,0x00200802,0x04200800,0x04200802,0x00200000,0x00000000,0x04000002,0x00000002,0x04000000,0x04200002,0x00000802,0x04000800,0x00200802,0x00200002,0x04000800,0x04000002,0x04200000,0x04200800,0x00200002,0x04200000,0x00000800,0x00000802,0x04200802,0x00200800,0x00000002,0x04000000,0x00200800,0x04000000,0x00200800,0x00200000,0x04000802,0x04000802,0x04200002,0x04200002,0x00000002,0x00200002,0x04000000,0x04000800,0x00200000,0x04200800,0x00000802,0x00200802,0x04200800,0x00000802,0x04000002,0x04200802,0x04200000,0x00200800,0x00000000,0x00000002,0x04200802,0x00000000,0x00200802,0x04200000,0x00000800,0x04000002,0x04000800,0x00000800,0x00200002];
+  var SP8=[0x10001040,0x00001000,0x00040000,0x10041040,0x10000000,0x10001040,0x00000040,0x10000000,0x00040040,0x10040000,0x10041040,0x00041000,0x10041000,0x00041040,0x00001000,0x00000040,0x10040000,0x10000040,0x10001000,0x00001040,0x00041000,0x00040040,0x10040040,0x10041000,0x00001040,0x00000000,0x00000000,0x10040040,0x10000040,0x10001000,0x00041040,0x00040000,0x00041040,0x00040000,0x10041000,0x00001000,0x00000040,0x10040040,0x00001000,0x00041040,0x10001000,0x00000040,0x10000040,0x10040000,0x10040040,0x10000000,0x00040000,0x10001040,0x00000000,0x10041040,0x00040040,0x10000040,0x10040000,0x10001000,0x10001040,0x00000000,0x10041040,0x00041000,0x00041000,0x00001040,0x00001040,0x00040040,0x10000000,0x10041000];
 
-  // Final Permutation (IP inverse)
-  var FP = [
-    40,8,48,16,56,24,64,32, 39,7,47,15,55,23,63,31,
-    38,6,46,14,54,22,62,30, 37,5,45,13,53,21,61,29,
-    36,4,44,12,52,20,60,28, 35,3,43,11,51,19,59,27,
-    34,2,42,10,50,18,58,26, 33,1,41,9,49,17,57,25
-  ];
+  /** Generate 32-entry key schedule from 8-byte password (VNC bit-reversal is built into PC1) */
+  function desKeySchedule(password) {
+    var pc1m = new Array(56);
+    var pcr = new Array(56);
+    var kn = new Array(32);
+    var keys = new Array(32);
+    var j, l, m, n, o, i;
 
-  // Expansion
-  var E = [
-    32,1,2,3,4,5, 4,5,6,7,8,9, 8,9,10,11,12,13, 12,13,14,15,16,17,
-    16,17,18,19,20,21, 20,21,22,23,24,25, 24,25,26,27,28,29, 28,29,30,31,32,1
-  ];
-
-  // Permutation
-  var P = [
-    16,7,20,21,29,12,28,17, 1,15,23,26,5,18,31,10,
-    2,8,24,14,32,27,3,9, 19,13,30,6,22,11,4,25
-  ];
-
-  // S-boxes
-  var S = [
-    [14,4,13,1,2,15,11,8,3,10,6,12,5,9,0,7, 0,15,7,4,14,2,13,1,10,6,12,11,9,5,3,8, 4,1,14,8,13,6,2,11,15,12,9,7,3,10,5,0, 15,12,8,2,4,9,1,7,5,11,3,14,10,0,6,13],
-    [15,1,8,14,6,11,3,4,9,7,2,13,12,0,5,10, 3,13,4,7,15,2,8,14,12,0,1,10,6,9,11,5, 0,14,7,11,10,4,13,1,5,8,12,6,9,3,2,15, 13,8,10,1,3,15,4,2,11,6,7,12,0,5,14,9],
-    [10,0,9,14,6,3,15,5,1,13,12,7,11,4,2,8, 13,7,0,9,3,4,6,10,2,8,5,14,12,11,15,1, 13,6,4,9,8,15,3,0,11,1,2,12,5,10,14,7, 1,10,13,0,6,9,8,7,4,15,14,3,11,5,2,12],
-    [7,13,14,3,0,6,9,10,1,2,8,5,11,12,4,15, 13,8,11,5,6,15,0,3,4,7,2,12,1,10,14,9, 10,6,9,0,12,11,7,13,15,1,3,14,5,2,8,4, 3,15,0,6,10,1,13,8,9,4,5,11,12,7,2,14],
-    [2,12,4,1,7,10,11,6,8,5,3,15,13,0,14,9, 14,11,2,12,4,7,13,1,5,0,15,10,3,9,8,6, 4,2,1,11,10,13,7,8,15,9,12,5,6,3,0,14, 11,8,12,7,1,14,2,13,6,15,0,9,10,4,5,3],
-    [12,1,10,15,9,2,6,8,0,13,3,4,14,7,5,11, 10,15,4,2,7,12,9,5,6,1,13,14,0,11,3,8, 9,14,15,5,2,8,12,3,7,0,4,10,1,13,11,6, 4,3,2,12,9,5,15,10,11,14,1,7,6,0,8,13],
-    [4,11,2,14,15,0,8,13,3,12,9,7,5,10,6,1, 13,0,11,7,4,9,1,10,14,3,5,12,2,15,8,6, 1,4,11,13,12,3,7,14,10,15,6,8,0,5,9,2, 6,11,13,8,1,4,10,7,9,5,0,15,14,2,3,12],
-    [13,2,8,4,6,15,11,1,10,9,3,14,5,0,12,7, 1,15,13,8,10,3,7,4,12,5,6,2,0,14,9,11, 7,0,1,13,11,4,14,8,6,2,10,15,3,9,12,5, 2,1,14,7,4,10,8,13,15,12,9,0,3,5,6,11]
-  ];
-
-  // PC-1 (key schedule)
-  var PC1 = [
-    57,49,41,33,25,17,9, 1,58,50,42,34,26,18,
-    10,2,59,51,43,35,27, 19,11,3,60,52,44,36,
-    63,55,47,39,31,23,15, 7,62,54,46,38,30,22,
-    14,6,61,53,45,37,29, 21,13,5,28,20,12,4
-  ];
-
-  // PC-2
-  var PC2 = [
-    14,17,11,24,1,5, 3,28,15,6,21,10,
-    23,19,12,4,26,8, 16,7,27,20,13,2,
-    41,52,31,37,47,55, 30,40,51,45,33,48,
-    44,49,39,56,34,53, 46,42,50,36,29,32
-  ];
-
-  var SHIFTS = [1,1,2,2,2,2,2,2,1,2,2,2,2,2,2,1];
-
-  function getBit(data, bitPos) {
-    var byteIdx = (bitPos - 1) >> 3;
-    var bitIdx = 7 - ((bitPos - 1) & 7);
-    return (data[byteIdx] >> bitIdx) & 1;
-  }
-
-  function setBit(data, bitPos, val) {
-    var byteIdx = (bitPos - 1) >> 3;
-    var bitIdx = 7 - ((bitPos - 1) & 7);
-    if (val) data[byteIdx] |= (1 << bitIdx);
-    else data[byteIdx] &= ~(1 << bitIdx);
-  }
-
-  function permute(input, table, outBits) {
-    var out = new Uint8Array(Math.ceil(outBits / 8));
-    for (var i = 0; i < table.length; i++) {
-      setBit(out, i + 1, getBit(input, table[i]));
-    }
-    return out;
-  }
-
-  function leftShift28(half, count) {
-    // half is stored in 4 bytes, but only bits 1-28 matter
-    var val = ((half[0] << 20) | (half[1] << 12) | (half[2] << 4) | (half[3] >> 4)) & 0x0FFFFFFF;
-    val = ((val << count) | (val >>> (28 - count))) & 0x0FFFFFFF;
-    half[0] = (val >> 20) & 0xFF;
-    half[1] = (val >> 12) & 0xFF;
-    half[2] = (val >> 4) & 0xFF;
-    half[3] = ((val & 0xF) << 4);
-  }
-
-  function xorBytes(a, b, len) {
-    var out = new Uint8Array(len);
-    for (var i = 0; i < len; i++) out[i] = a[i] ^ b[i];
-    return out;
-  }
-
-  function desEncrypt(key, block) {
-    // Generate 16 subkeys
-    var cd = permute(key, PC1, 56);
-    var c = new Uint8Array(4);
-    var d = new Uint8Array(4);
-    // C = bits 1-28, D = bits 29-56
-    c[0] = cd[0]; c[1] = cd[1]; c[2] = cd[2]; c[3] = cd[3] & 0xF0;
-    d[0] = ((cd[3] & 0x0F) << 4) | (cd[4] >> 4);
-    d[1] = ((cd[4] & 0x0F) << 4) | (cd[5] >> 4);
-    d[2] = ((cd[5] & 0x0F) << 4) | (cd[6] >> 4);
-    d[3] = ((cd[6] & 0x0F) << 4);
-
-    var subkeys = [];
-    for (var round = 0; round < 16; round++) {
-      leftShift28(c, SHIFTS[round]);
-      leftShift28(d, SHIFTS[round]);
-      // Combine C and D
-      var combined = new Uint8Array(7);
-      combined[0] = c[0]; combined[1] = c[1]; combined[2] = c[2];
-      combined[3] = (c[3] & 0xF0) | ((d[0] >> 4) & 0x0F);
-      combined[4] = ((d[0] & 0x0F) << 4) | ((d[1] >> 4) & 0x0F);
-      combined[5] = ((d[1] & 0x0F) << 4) | ((d[2] >> 4) & 0x0F);
-      combined[6] = ((d[2] & 0x0F) << 4) | ((d[3] >> 4) & 0x0F);
-      subkeys.push(permute(combined, PC2, 48));
+    // PC1 permutation (with VNC bit-reversal baked in)
+    for (j = 0, l = 56; j < 56; ++j, l -= 8) {
+      l += l < -5 ? 65 : l < -3 ? 31 : l < -1 ? 63 : l === 27 ? 35 : 0;
+      m = l & 0x7;
+      pc1m[j] = ((password[l >>> 3] & (1 << m)) !== 0) ? 1 : 0;
     }
 
-    // Initial permutation
-    var data = permute(block, IP, 64);
-
-    // Split into L and R (each 32 bits = 4 bytes)
-    var L = data.subarray(0, 4).slice();
-    var R = data.subarray(4, 8).slice();
-
-    // 16 rounds
-    for (var round = 0; round < 16; round++) {
-      var expanded = permute(R, E, 48);
-      var xored = xorBytes(expanded, subkeys[round], 6);
-
-      // S-box substitution
-      var sOut = new Uint8Array(4);
-      for (var s = 0; s < 8; s++) {
-        var bitOff = s * 6;
-        var b0 = (xored[bitOff >> 3] >> (7 - (bitOff & 7))) & 1;
-        var b1 = (xored[(bitOff+1) >> 3] >> (7 - ((bitOff+1) & 7))) & 1;
-        var b2 = (xored[(bitOff+2) >> 3] >> (7 - ((bitOff+2) & 7))) & 1;
-        var b3 = (xored[(bitOff+3) >> 3] >> (7 - ((bitOff+3) & 7))) & 1;
-        var b4 = (xored[(bitOff+4) >> 3] >> (7 - ((bitOff+4) & 7))) & 1;
-        var b5 = (xored[(bitOff+5) >> 3] >> (7 - ((bitOff+5) & 7))) & 1;
-        var row = (b0 << 1) | b5;
-        var col = (b1 << 3) | (b2 << 2) | (b3 << 1) | b4;
-        var val = S[s][row * 16 + col];
-        // Pack 4-bit value into sOut
-        var outBit = s * 4;
-        for (var bi = 0; bi < 4; bi++) {
-          setBit(sOut, outBit + bi + 1, (val >> (3 - bi)) & 1);
+    for (i = 0; i < 16; ++i) {
+      m = i << 1;
+      n = m + 1;
+      kn[m] = kn[n] = 0;
+      for (o = 28; o < 59; o += 28) {
+        for (j = o - 28; j < o; ++j) {
+          l = j + TOTROT[i];
+          pcr[j] = l < o ? pc1m[l] : pc1m[l - 28];
         }
       }
-
-      var pOut = permute(sOut, P, 32);
-      var newR = xorBytes(L, pOut, 4);
-      L = R;
-      R = newR;
+      for (j = 0; j < 24; ++j) {
+        if (pcr[PC2[j]] !== 0) { kn[m] |= 1 << (23 - j); }
+        if (pcr[PC2[j + 24]] !== 0) { kn[n] |= 1 << (23 - j); }
+      }
     }
 
-    // Combine R + L (note: reversed) and apply final permutation
-    var preOutput = new Uint8Array(8);
-    preOutput.set(R, 0);
-    preOutput.set(L, 4);
-    return permute(preOutput, FP, 64);
+    // cookey: cook the raw key schedule into the format the cipher uses
+    for (i = 0; i < 32; i += 2) {
+      var raw0 = kn[i];
+      var raw1 = kn[i + 1];
+      keys[i] = (raw0 & 0x00fc0000) << 6;
+      keys[i] |= (raw0 & 0x00000fc0) << 10;
+      keys[i] |= (raw1 & 0x00fc0000) >>> 10;
+      keys[i] |= (raw1 & 0x00000fc0) >>> 6;
+      keys[i + 1] = (raw0 & 0x0003f000) << 12;
+      keys[i + 1] |= (raw0 & 0x0000003f) << 16;
+      keys[i + 1] |= (raw1 & 0x0003f000) >>> 4;
+      keys[i + 1] |= (raw1 & 0x0000003f);
+    }
+    return keys;
+  }
+
+  /** Encrypt 8 bytes using precomputed key schedule */
+  function desEncryptBlock(keys, blockBytes) {
+    var b = new Uint8Array(blockBytes);
+    var l, r, x, i;
+
+    // Squash 8 bytes to 2 ints
+    l = b[0] << 24 | b[1] << 16 | b[2] << 8 | b[3];
+    r = b[4] << 24 | b[5] << 16 | b[6] << 8 | b[7];
+
+    // Initial permutation
+    x = ((l >>> 4) ^ r) & 0x0f0f0f0f; r ^= x; l ^= (x << 4);
+    x = ((l >>> 16) ^ r) & 0x0000ffff; r ^= x; l ^= (x << 16);
+    x = ((r >>> 2) ^ l) & 0x33333333; l ^= x; r ^= (x << 2);
+    x = ((r >>> 8) ^ l) & 0x00ff00ff; l ^= x; r ^= (x << 8);
+    r = (r << 1) | ((r >>> 31) & 1);
+    x = (l ^ r) & 0xaaaaaaaa; l ^= x; r ^= x;
+    l = (l << 1) | ((l >>> 31) & 1);
+
+    // 16 rounds (8 iterations of 2 rounds each)
+    for (i = 0; i < 32; i += 4) {
+      x = (r << 28) | (r >>> 4);
+      x ^= keys[i];
+      var fval = SP7[x & 0x3f];
+      fval |= SP5[(x >>> 8) & 0x3f];
+      fval |= SP3[(x >>> 16) & 0x3f];
+      fval |= SP1[(x >>> 24) & 0x3f];
+      x = r ^ keys[i + 1];
+      fval |= SP8[x & 0x3f];
+      fval |= SP6[(x >>> 8) & 0x3f];
+      fval |= SP4[(x >>> 16) & 0x3f];
+      fval |= SP2[(x >>> 24) & 0x3f];
+      l ^= fval;
+      x = (l << 28) | (l >>> 4);
+      x ^= keys[i + 2];
+      fval = SP7[x & 0x3f];
+      fval |= SP5[(x >>> 8) & 0x3f];
+      fval |= SP3[(x >>> 16) & 0x3f];
+      fval |= SP1[(x >>> 24) & 0x3f];
+      x = l ^ keys[i + 3];
+      fval |= SP8[x & 0x3f];
+      fval |= SP6[(x >>> 8) & 0x3f];
+      fval |= SP4[(x >>> 16) & 0x3f];
+      fval |= SP2[(x >>> 24) & 0x3f];
+      r ^= fval;
+    }
+
+    // Final permutation (inverse of IP)
+    r = (r << 31) | (r >>> 1);
+    x = (l ^ r) & 0xaaaaaaaa; l ^= x; r ^= x;
+    l = (l << 31) | (l >>> 1);
+    x = ((l >>> 8) ^ r) & 0x00ff00ff; r ^= x; l ^= (x << 8);
+    x = ((l >>> 2) ^ r) & 0x33333333; r ^= x; l ^= (x << 2);
+    x = ((r >>> 16) ^ l) & 0x0000ffff; l ^= x; r ^= (x << 16);
+    x = ((r >>> 4) ^ l) & 0x0f0f0f0f; l ^= x; r ^= (x << 4);
+
+    // Spread ints to bytes
+    var out = new Uint8Array(8);
+    var rl = [r, l];
+    for (i = 0; i < 8; i++) {
+      out[i] = (rl[i >>> 2] >>> (8 * (3 - (i % 4)))) & 0xff;
+    }
+    return out;
   }
 
   // ── Canvas Setup ──────────────────────────────────────────────
