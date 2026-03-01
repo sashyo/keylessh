@@ -91,6 +91,8 @@
   var lastFullRefreshTime = 0;    // throttle full-refresh requests
   var updatePollTimer = null;     // periodic incremental update request timer
   var stallWatchdogTimer = null;  // stall detection and recovery timer
+  var lastResetTime = 0;          // timestamp of last parser reset (drain period)
+  var RESET_DRAIN_MS = 1200;      // discard incoming data for this long after a reset
 
   // Server pixel format (populated from ServerInit, updated by SetPixelFormat)
   var serverBpp = 32; // bytes per pixel component (bits)
@@ -100,16 +102,29 @@
   var serverBShift = 16;
   var serverBigEndian = false;
 
-  /** Reset the RFB parser state — clears the receive buffer and all
-   *  in-progress framebuffer update tracking so the parser can start
-   *  fresh from the next incoming data. */
-  function resetParserState() {
+  /** Recover from a parser desync.
+   *  1. Clears all in-progress state and the receive buffer.
+   *  2. Enters a "drain" period where all incoming TCP data is discarded
+   *     so that stale pipeline data doesn't immediately re-desync.
+   *  3. After the drain period, requests ONE full refresh to restore
+   *     the display.  No flooding — just one request per desync event. */
+  function recoverFromDesync(reason) {
+    console.warn("[VNC] Parser desync: " + reason + " — draining pipeline for " + RESET_DRAIN_MS + "ms");
     recvBuf = new Uint8Array(0);
     fbUpdateRemaining = 0;
     fbUpdateRect = null;
     fbUpdatePixelsLeft = 0;
     fbUpdateBusy = false;
     resyncSkipped = 0;
+    lastResetTime = Date.now();
+    // After the drain period, request exactly one full refresh
+    setTimeout(function () {
+      if (rfbState === RFB_CONNECTED && lastResetTime > 0) {
+        lastResetTime = 0; // end drain period
+        console.log("[VNC] Drain complete — requesting full refresh");
+        requestFramebufferUpdate(false);
+      }
+    }, RESET_DRAIN_MS + 100);
   }
 
   // ── Initialization ────────────────────────────────────────────
@@ -416,6 +431,14 @@
   function onTcpData(data) {
     tcpBytesReceived += data.length;
     lastTcpActivity = Date.now();
+
+    // During the drain period after a parser reset, discard all incoming
+    // data so stale pipeline bytes don't cause an immediate re-desync.
+    if (lastResetTime > 0) {
+      if (Date.now() - lastResetTime < RESET_DRAIN_MS) return;
+      lastResetTime = 0; // drain period over
+    }
+
     // Append to receive buffer (avoid copy when recvBuf is empty)
     if (recvBuf.length === 0) {
       recvBuf = data;
@@ -646,6 +669,8 @@
     if (updatePollTimer) clearInterval(updatePollTimer);
     updatePollTimer = setInterval(function () {
       if (rfbState !== RFB_CONNECTED) { clearInterval(updatePollTimer); updatePollTimer = null; return; }
+      // Don't send requests during drain period — recoverFromDesync handles it
+      if (lastResetTime > 0) return;
       requestFramebufferUpdate(true);
     }, 2000);
 
@@ -658,15 +683,13 @@
     if (stallWatchdogTimer) clearInterval(stallWatchdogTimer);
     stallWatchdogTimer = setInterval(function () {
       if (rfbState !== RFB_CONNECTED) { clearInterval(stallWatchdogTimer); stallWatchdogTimer = null; return; }
-      if (!fbUpdateBusy) return;
+      if (!fbUpdateBusy || lastResetTime > 0) return;
       var fbSize = fbWidth * fbHeight * serverBytesPerPixel;
       var dataSilence = Date.now() - lastTcpActivity;
       if (fbUpdatePixelsLeft > fbSize * 2 || dataSilence > 5000) {
-        console.warn("[VNC] Stall detected (silence=" + (dataSilence / 1000).toFixed(1) + "s" +
-          " pixelsLeft=" + fbUpdatePixelsLeft + ") — resetting parser");
-        resetParserState();
+        recoverFromDesync("Stall (silence=" + (dataSilence / 1000).toFixed(1) + "s" +
+          " pixelsLeft=" + fbUpdatePixelsLeft + ")");
         lastFrameComplete = Date.now();
-        requestFramebufferUpdate(false);
       }
     }, 2000);
 
@@ -709,16 +732,10 @@
       case 3: return handleServerCutText();
       default:
         // Unknown message type — parser has lost sync with the data stream.
-        // Rather than scanning forward (which can false-positive on pixel data),
-        // discard the buffer entirely and request a fresh full framebuffer update.
-        // The continuous update poll timer ensures the server will respond with
-        // a clean FramebufferUpdate that the parser can handle from byte 0.
-        console.warn("[VNC] Unknown message type:", msgType,
-          "hex:", Array.from(recvBuf.subarray(0, Math.min(20, recvBuf.length)))
-            .map(function(b) { return ("0" + b.toString(16)).slice(-2); }).join(" "),
-          "— resetting parser");
-        resetParserState();
-        requestFramebufferUpdate(false);
+        // Drain stale pipeline data, then request one fresh full frame.
+        recoverFromDesync("Unknown message type " + msgType +
+          " hex:" + Array.from(recvBuf.subarray(0, Math.min(20, recvBuf.length)))
+            .map(function(b) { return ("0" + b.toString(16)).slice(-2); }).join(" "));
         return 0; // buffer is empty; stops the processRfb loop
     }
   }
@@ -795,10 +812,8 @@
       // If the rect extends beyond the framebuffer, the parser is desynced.
       if (encoding >= 0 && fbWidth > 0 && fbHeight > 0) {
         if (_rx + _rw > fbWidth || _ry + _rh > fbHeight || _rw === 0 || _rh === 0) {
-          console.warn("[VNC] Bogus rect dims:", _rx + "," + _ry, _rw + "x" + _rh,
-            "in", fbWidth + "x" + fbHeight, "enc=" + encoding, "— resetting parser");
-          resetParserState();
-          requestFramebufferUpdate(false);
+          recoverFromDesync("Bogus rect " + _rx + "," + _ry + " " + _rw + "x" + _rh +
+            " in " + fbWidth + "x" + fbHeight + " enc=" + encoding);
           return 0;
         }
       }
@@ -902,16 +917,11 @@
       }
 
       if (encoding !== 0) {
-        // Unknown encoding — can't determine data length.  Reset the parser
-        // entirely and request a fresh full frame rather than attempting an
-        // unreliable in-stream resync.
-        console.warn("[VNC] Unsupported encoding:", encoding,
-          "(0x" + (encoding >>> 0).toString(16) + ")",
-          "rect:", fbUpdateRect.x + "," + fbUpdateRect.y,
-          fbUpdateRect.w + "x" + fbUpdateRect.h,
-          "— resetting parser");
-        resetParserState();
-        requestFramebufferUpdate(false);
+        // Unknown encoding — can't determine data length.
+        recoverFromDesync("Unsupported encoding " + encoding +
+          " (0x" + (encoding >>> 0).toString(16) + ")" +
+          " rect:" + fbUpdateRect.x + "," + fbUpdateRect.y +
+          " " + fbUpdateRect.w + "x" + fbUpdateRect.h);
         return 0;
       }
 
