@@ -84,7 +84,10 @@
 
   async function fetchSessionToken() {
     try {
-      var res = await fetch(SESSION_TOKEN_ENDPOINT, { credentials: "same-origin" });
+      var res = await fetch(SESSION_TOKEN_ENDPOINT, {
+        credentials: "same-origin",
+        headers: { "X-Requested-With": "XMLHttpRequest" },
+      });
       if (res.status === 401) {
         // Not authenticated — redirect to login
         location.href = LOGIN_ENDPOINT + "?redirect=" + encodeURIComponent(location.pathname + location.search);
