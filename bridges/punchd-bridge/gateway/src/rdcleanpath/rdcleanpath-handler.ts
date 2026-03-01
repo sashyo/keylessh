@@ -67,6 +67,8 @@ export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCle
   let state = State.AWAITING_REQUEST;
   let tcpSocket: Socket | null = null;
   let tlsSocket: TLSSocket | null = null;
+  let relayBytesToClient = 0;
+  let relayBytesFromClient = 0;
 
   function sendError(errorCode: number, httpStatus?: number, wsaError?: number, tlsAlert?: number): void {
     try {
@@ -188,6 +190,7 @@ export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCle
         serverCertChain: certChain,
         serverAddr: host,
       });
+      console.log(`[RDCleanPath] Sending response PDU: ${responsePdu.length} bytes`);
       opts.sendBinary(responsePdu);
 
       // Step 7: Enter relay mode
@@ -197,19 +200,21 @@ export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCle
       // TLS socket → client
       tlsSocket.on("data", (data: Buffer) => {
         if (state !== State.RELAY) return;
+        relayBytesToClient += data.length;
+        console.log(`[RDCleanPath] Relay RDP→client: ${data.length} bytes (total: ${relayBytesToClient})`);
         opts.sendBinary(data);
       });
 
       tlsSocket.on("close", () => {
+        console.log(`[RDCleanPath] TLS socket closed for "${backendName}" (state=${state}, toClient=${relayBytesToClient}, fromClient=${relayBytesFromClient})`);
         if (state !== State.RELAY) return;
-        console.log(`[RDCleanPath] TLS socket closed for "${backendName}"`);
         cleanup();
         opts.sendClose(1000, "RDP connection closed");
       });
 
       tlsSocket.on("error", (err: Error) => {
+        console.error(`[RDCleanPath] TLS socket error for "${backendName}" (state=${state}): ${err.message}`);
         if (state !== State.RELAY) return;
-        console.error(`[RDCleanPath] TLS socket error: ${err.message}`);
         cleanup();
         opts.sendClose(1006, "RDP connection error");
       });
@@ -238,6 +243,8 @@ export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCle
         case State.RELAY:
           // Forward client data to TLS socket
           if (tlsSocket && !tlsSocket.destroyed) {
+            relayBytesFromClient += data.length;
+            console.log(`[RDCleanPath] Relay client→RDP: ${data.length} bytes (total: ${relayBytesFromClient})`);
             tlsSocket.write(data);
           }
           break;

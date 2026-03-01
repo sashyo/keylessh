@@ -501,7 +501,9 @@
         var wsId = new TextDecoder().decode(buf.subarray(1, 37));
         var ws = dcWebSockets.get(wsId);
         if (ws) {
-          ws._fireMessageBinary(buf.subarray(37).buffer);
+          // IMPORTANT: slice() (not subarray) creates a NEW ArrayBuffer copy.
+          // subarray().buffer returns the FULL original buffer including the header.
+          ws._fireMessageBinary(buf.slice(37).buffer);
         }
       }
     };
