@@ -656,28 +656,10 @@
       case 2: return handleBell();
       case 3: return handleServerCutText();
       default:
-        // TightVNC sends trailing padding bytes after FramebufferUpdate.
-        // Scan forward to find a valid FramebufferUpdate start by checking:
-        // 1. Header: [type=0x00][pad=0x00][nRects:u16] with 0 < nRects < 500
-        // 2. First rect header encoding field must be 0 (Raw), 1 (CopyRect),
-        //    or 0xFFFFFF21 (DesktopSize) — this makes false positives near-impossible
-        //    since random BGRX pixel data almost never forms these exact big-endian values.
-        for (var skip = 1; skip < recvBuf.length - 3; skip++) {
-          if (recvBuf[skip] !== 0x00 || recvBuf[skip + 1] !== 0x00) continue;
-          var nRects = (recvBuf[skip + 2] << 8) | recvBuf[skip + 3];
-          if (nRects < 1 || nRects > 500) continue;
-          // Validate first rect header if we have enough data (12 bytes after the 4-byte header)
-          if (skip + 16 <= recvBuf.length) {
-            var enc = (recvBuf[skip + 12] << 24) | (recvBuf[skip + 13] << 16) |
-                      (recvBuf[skip + 14] << 8) | recvBuf[skip + 15];
-            if (enc !== 0 && enc !== 1 && enc !== -223) continue;
-          }
-          console.debug("[VNC] Skipped", skip, "trailing padding bytes");
-          return skip;
-        }
-        // Could not find a valid message start — skip all and wait for more data
-        console.debug("[VNC] Skipped", recvBuf.length, "bytes (no valid message found yet)");
-        return recvBuf.length;
+        console.error("[VNC] Unknown server message type:", msgType,
+          "buffer[0..3]:", Array.from(recvBuf.subarray(0, 4)));
+        disconnectVnc("Unknown server message type: " + msgType);
+        return 0;
     }
   }
 
@@ -722,6 +704,22 @@
       // to avoid stuck-state when we have 12-15 bytes
       if (encoding === 1 && recvBuf.length < 16) return 0;
 
+      // Pre-check buffer for variable-length pseudo-encodings before committing
+      if (encoding === -239) { // Cursor: pixels + bitmask
+        var _cw = (recvBuf[4] << 8) | recvBuf[5];
+        var _ch = (recvBuf[6] << 8) | recvBuf[7];
+        var _cursorNeed = 12 + _cw * _ch * serverBytesPerPixel + Math.ceil(_cw / 8) * _ch;
+        if (recvBuf.length < _cursorNeed) return 0;
+      }
+      if (encoding === -240) { // XCursor: fg/bg RGB + bitmap + mask
+        var _xw = (recvBuf[4] << 8) | recvBuf[5];
+        var _xh = (recvBuf[6] << 8) | recvBuf[7];
+        if (_xw > 0 && _xh > 0) {
+          var _xcursorNeed = 12 + 6 + Math.ceil(_xw / 8) * _xh * 2;
+          if (recvBuf.length < _xcursorNeed) return 0;
+        }
+      }
+
       fbUpdateRect = {
         x: (recvBuf[0] << 8) | recvBuf[1],
         y: (recvBuf[2] << 8) | recvBuf[3],
@@ -745,6 +743,45 @@
         if (fbUpdateRemaining <= 0) {
           requestFramebufferUpdate(false);
         }
+        return 12;
+      }
+
+      // Cursor pseudo-encoding (-239 = 0xFFFFFF11) — skip pixel + mask data
+      if (encoding === -239) {
+        var pxBytes = fbUpdateRect.w * fbUpdateRect.h * serverBytesPerPixel;
+        var maskBytes = Math.ceil(fbUpdateRect.w / 8) * fbUpdateRect.h;
+        var cursorSkip = 12 + pxBytes + maskBytes;
+        console.debug("[VNC] Cursor pseudo-encoding:", fbUpdateRect.w + "x" + fbUpdateRect.h,
+          "skipping", cursorSkip, "bytes");
+        finishRect();
+        return cursorSkip;
+      }
+
+      // XCursor pseudo-encoding (-240 = 0xFFFFFF10) — skip fg/bg + bitmaps
+      if (encoding === -240) {
+        var xcSkip = 12;
+        if (fbUpdateRect.w > 0 && fbUpdateRect.h > 0) {
+          var bitmapBytes = Math.ceil(fbUpdateRect.w / 8) * fbUpdateRect.h;
+          xcSkip += 6 + bitmapBytes * 2;
+        }
+        console.debug("[VNC] XCursor pseudo-encoding:", fbUpdateRect.w + "x" + fbUpdateRect.h);
+        finishRect();
+        return xcSkip;
+      }
+
+      // LastRect pseudo-encoding (-224 = 0xFFFFFF20) — no more rects follow
+      if (encoding === -224) {
+        console.debug("[VNC] LastRect pseudo-encoding");
+        fbUpdateRect = null;
+        fbUpdateRemaining = 0;
+        onFbUpdateComplete();
+        return 12;
+      }
+
+      // CursorPos pseudo-encoding (-232 = 0xFFFFFF18) — no extra data
+      if (encoding === -232) {
+        console.debug("[VNC] CursorPos:", fbUpdateRect.x + "," + fbUpdateRect.y);
+        finishRect();
         return 12;
       }
 
