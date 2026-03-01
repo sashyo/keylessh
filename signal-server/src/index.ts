@@ -511,9 +511,12 @@ const requestHandler = async (req: import("http").IncomingMessage, res: import("
         cookies.push(`gateway_access=${token}; Path=/; HttpOnly; SameSite=None; Secure`);
       }
     }
-    const location = backend
-      ? `/__b/${encodeURIComponent(backend)}/`
-      : "/";
+    const redirect = params.get("redirect");
+    const location = redirect
+      ? redirect
+      : backend
+        ? `/__b/${encodeURIComponent(backend)}/`
+        : "/";
     res.writeHead(302, {
       Location: location,
       "Set-Cookie": cookies,
