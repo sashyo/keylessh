@@ -141,7 +141,7 @@ The gateway also handles an `/_idp/` prefix: TideCloak URLs are rewritten to `{p
 **Token validation:**
 1. `gateway_access` cookie (HttpOnly, `Lax`)
 2. `Authorization: Bearer <jwt>` header
-3. If expired, transparent refresh via `gateway_refresh` cookie (`Strict`)
+3. If expired, transparent refresh via `gateway_refresh` cookie (`Strict`). Refresh is deduplicated per refresh token — concurrent requests sharing the same token reuse a single in-flight refresh call, and results are cached for 60 seconds (bounded to 100 entries).
 4. Proxied requests include `x-forwarded-user` header with the subject claim
 
 ### Portal/Admin TideCloak Auth
@@ -182,6 +182,7 @@ BACKENDS="App=http://localhost:3000,AuthServer=http://localhost:8080;noauth"
 
 - **Auth backends** (no `;noauth`): Requests without a valid JWT are redirected to the TideCloak login flow. The gateway sets `x-forwarded-user` from the verified token.
 - **No-auth backends** (`;noauth`): Requests are forwarded as-is. No JWT extraction, validation, refresh, or login redirect. No `x-forwarded-user` header is set.
+- **Public resources**: Certain browser-initiated resource requests (`manifest.json`, `*.webmanifest`, `browserconfig.xml`, `robots.txt`, `*.ico`) are always proxied without auth, regardless of backend auth settings. These are fetched by the browser before any session is established and would otherwise return 401.
 
 ### Path Prefix System
 
@@ -295,17 +296,28 @@ Both servers set on every response:
 
 The signal server sets `X-Frame-Options: DENY`. The gateway sets `X-Frame-Options: SAMEORIGIN` (Tide SDK enclave uses iframes).
 
+**CSP is intentionally not set** on proxied backend responses. The gateway proxies third-party backend HTML and injects scripts (fetch/XHR patch, WebRTC upgrade); a nonce-based CSP would break the backend's own inline scripts, and `unsafe-inline` provides no real protection since the whole point is injecting scripts. Backends should set their own CSP in their responses.
+
 ### Request Validation
 
 - **HTTP method whitelist:** Only `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, `OPTIONS` are allowed. Other methods return 405. Applied at all three request entry points (relay, DataChannel, backend proxy).
 - **Open redirect prevention:** Auth redirect parameters only accept relative paths starting with `/`.
 - **Body size limits:** 10 MB for relay requests, 64 KB for API POST bodies, 50 MB for proxied response buffering.
 
+### CORS
+
+The signal server validates the `Origin` header on every request. If `ALLOWED_ORIGINS` is set, only listed origins receive CORS headers. If unset, only same-origin requests (where `Origin` matches the `Host` header) are allowed. Credentials (`Access-Control-Allow-Credentials: true`) are only sent with validated origins.
+
+### IP Trust
+
+The signal server only reads `X-Forwarded-For` when the direct socket IP is in the `TRUSTED_PROXIES` set. When no trusted proxies are configured, the socket address is always used for rate limiting and logging.
+
 ### Authentication & Secrets
 
 - **API_SECRET:** Gateway registration with the signal server uses timing-safe comparison (`crypto.timingSafeEqual`).
 - **TURN_SECRET:** Shared secret for HMAC-SHA256 ephemeral TURN credentials.
 - **Gateway ID:** Generated with `crypto.randomBytes(8).toString("hex")` (16 hex chars) for cryptographic uniqueness.
+- **Client ID:** Generated with `crypto.randomUUID()` (cryptographically random) to prevent guessing or collision.
 
 ### Rate Limiting & Capacity
 
@@ -320,6 +332,7 @@ The signal server sets `X-Frame-Options: DENY`. The gateway sets `X-Frame-Option
 | WebRTC peer connections per gateway | 200 | New offers rejected |
 | Admin WebSocket subscribers | 50 | Subscription rejected |
 | TC cookie jar sessions | 10,000 | LRU eviction |
+| `/auth/session-token` requests per IP | 6 per minute | HTTP 429 |
 
 ### Proxy Timeouts
 
@@ -375,6 +388,11 @@ See [turnserver.conf](../signal-server/turnserver.conf) for the full configurati
 | `TIDECLOAK_CONFIG_B64` | (none) | Base64 TideCloak adapter config (enables admin JWT auth) |
 | `TLS_CERT_PATH` | (none) | TLS cert for signaling port (enables HTTPS/WSS) |
 | `TLS_KEY_PATH` | (none) | TLS key for signaling port |
+| `ALLOWED_ORIGINS` | (none) | Comma-separated origins for CORS (`null` = same-origin only) |
+| `TRUSTED_PROXIES` | (none) | Comma-separated proxy IPs trusted for `X-Forwarded-For` |
+| `ICE_SERVERS` | (none) | STUN server URL for gateway WebRTC config, e.g. `stun:host:3478` |
+| `TURN_SERVER` | (none) | TURN server URL for gateway WebRTC config, e.g. `turn:host:3478` |
+| `TURN_SECRET` | (none) | Shared secret for TURN ephemeral credentials (HMAC-SHA256) |
 
 ### Gateway
 
