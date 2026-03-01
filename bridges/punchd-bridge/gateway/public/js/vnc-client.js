@@ -722,43 +722,72 @@
       var available = Math.min(recvBuf.length, fbUpdatePixelsLeft);
       if (available <= 0) return 0;
 
-      // Write pixels to canvas ImageData
+      // Write pixels to canvas ImageData with progressive rendering.
+      // Wire format is BGRX (b-shift=0, g-shift=8, r-shift=16, little-endian).
+      // Canvas ImageData is RGBA. Swap: wire[B,G,R,X] → canvas[R,G,B,A=255].
       if (imageData && ctx) {
         var rect = fbUpdateRect;
         var bytesPerRow = rect.w * serverBytesPerPixel;
         var bytesDone = rect.bytesDone;
-
-        // Copy pixel data from recvBuf into imageData.
-        // Wire format is BGRX (little-endian, b-shift=0, g-shift=8, r-shift=16).
-        // Canvas ImageData is RGBA. So: wire byte 0=B→canvas[2], byte 1=G→canvas[1],
-        // byte 2=R→canvas[0], byte 3=X→canvas[3]=255.
         var imgPixels = imageData.data;
-        for (var i = 0; i < available; i++) {
-          var bytePos = bytesDone + i;
-          var row = Math.floor(bytePos / bytesPerRow);
-          var col = bytePos % bytesPerRow;
-          var px = Math.floor(col / serverBytesPerPixel);
-          var component = col % serverBytesPerPixel;
-          var imgOffset = ((rect.y + row) * fbWidth + rect.x + px) * 4;
+        var rowBefore = Math.floor(bytesDone / bytesPerRow);
 
-          if (component === 0) {
-            imgPixels[imgOffset + 2] = recvBuf[i]; // B → canvas Blue
-          } else if (component === 1) {
-            imgPixels[imgOffset + 1] = recvBuf[i]; // G → canvas Green
-          } else if (component === 2) {
-            imgPixels[imgOffset] = recvBuf[i];     // R → canvas Red
-          } else {
-            imgPixels[imgOffset + 3] = 255;         // X → canvas Alpha (opaque)
+        // Copy pixels — process 4 bytes (1 pixel) at a time
+        var i = 0;
+        while (i + 3 < available) {
+          var bp = bytesDone + i;
+          var row = (bp / bytesPerRow) | 0;
+          var col = bp - row * bytesPerRow;
+          // Only enter fast path if we're at a pixel boundary
+          if ((col & 3) !== 0) {
+            // Unaligned — handle one byte
+            var px = (col / 4) | 0;
+            var comp = col & 3;
+            var off = ((rect.y + row) * fbWidth + rect.x + px) * 4;
+            if (comp === 0) imgPixels[off + 2] = recvBuf[i];
+            else if (comp === 1) imgPixels[off + 1] = recvBuf[i];
+            else if (comp === 2) imgPixels[off] = recvBuf[i];
+            else imgPixels[off + 3] = 255;
+            i++;
+            continue;
           }
+          var px = (col / 4) | 0;
+          var off = ((rect.y + row) * fbWidth + rect.x + px) * 4;
+          imgPixels[off + 2] = recvBuf[i];     // B → Blue
+          imgPixels[off + 1] = recvBuf[i + 1]; // G → Green
+          imgPixels[off]     = recvBuf[i + 2]; // R → Red
+          imgPixels[off + 3] = 255;             // A
+          i += 4;
+        }
+        // Handle remaining bytes
+        while (i < available) {
+          var bp = bytesDone + i;
+          var row = (bp / bytesPerRow) | 0;
+          var col = bp - row * bytesPerRow;
+          var px = (col / 4) | 0;
+          var comp = col & 3;
+          var off = ((rect.y + row) * fbWidth + rect.x + px) * 4;
+          if (comp === 0) imgPixels[off + 2] = recvBuf[i];
+          else if (comp === 1) imgPixels[off + 1] = recvBuf[i];
+          else if (comp === 2) imgPixels[off] = recvBuf[i];
+          else imgPixels[off + 3] = 255;
+          i++;
         }
 
         rect.bytesDone += available;
         fbUpdatePixelsLeft -= available;
 
-        // Paint when rect is complete
+        // Progressive rendering: paint completed rows immediately
+        var rowAfter = Math.floor(rect.bytesDone / bytesPerRow);
+        if (rowAfter > rowBefore || fbUpdatePixelsLeft <= 0) {
+          var paintY = rect.y + rowBefore;
+          var paintRows = (fbUpdatePixelsLeft <= 0 ? rect.h : rowAfter) - rowBefore;
+          if (paintRows > 0) {
+            ctx.putImageData(imageData, 0, 0, rect.x, paintY, rect.w, paintRows);
+          }
+        }
+
         if (fbUpdatePixelsLeft <= 0) {
-          console.log("[VNC] Painting rect:", rect.x, rect.y, rect.w + "x" + rect.h);
-          ctx.putImageData(imageData, 0, 0, rect.x, rect.y, rect.w, rect.h);
           fbUpdateRect = null;
           fbUpdateRemaining--;
         }
