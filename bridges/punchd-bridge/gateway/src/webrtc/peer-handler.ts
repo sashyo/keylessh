@@ -778,9 +778,17 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
 
     console.log(`[WebRTC] TCP tunnel opening: ${backendName} → ${host}:${port} (id: ${msg.id})`);
 
-    const sock = netConnect({ host, port });
+    const sock = netConnect({ host, port, timeout: 10000 });
+
+    sock.on("timeout", () => {
+      console.error(`[WebRTC] TCP tunnel connect timeout (${msg.id}): ${host}:${port}`);
+      sock.destroy();
+      state.tcpConnections.delete(msg.id);
+      enqueueControl(state, Buffer.from(JSON.stringify({ type: "tcp_error", id: msg.id, message: "Connection timed out" })));
+    });
 
     sock.on("connect", () => {
+      sock.setTimeout(0); // clear timeout once connected
       console.log(`[WebRTC] TCP tunnel connected: ${msg.id} → ${host}:${port}`);
       enqueueControl(state, Buffer.from(JSON.stringify({ type: "tcp_opened", id: msg.id })));
     });

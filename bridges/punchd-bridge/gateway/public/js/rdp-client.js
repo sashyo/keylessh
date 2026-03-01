@@ -60,7 +60,7 @@
   function init() {
     // Extract backend name from URL query param
     var params = new URLSearchParams(location.search);
-    backendName = params.get("backend");
+    backendName = (params.get("backend") || "").replace(/\/+$/, "");
     if (!backendName) {
       setStatus("error", "No backend specified. Use ?backend=<name>");
       return;
