@@ -448,7 +448,7 @@ export interface GatewayEndpoint {
   id: string;
   displayName: string;
   description: string;
-  backends: { name: string; accessible: boolean }[];
+  backends: { name: string; protocol?: string; accessible: boolean }[];
   online: boolean;
   clientCount: number;
   signalServerId: string;

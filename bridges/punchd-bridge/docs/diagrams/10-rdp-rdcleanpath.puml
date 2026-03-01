@@ -1,0 +1,106 @@
+@startuml rdp-rdcleanpath
+!theme plain
+title RDP via IronRDP WASM + RDCleanPath
+skinparam {
+  backgroundColor #0f172a
+  defaultFontColor #f8fafc
+  defaultFontName "Segoe UI"
+  defaultFontSize 12
+  SequenceLifeLineBorderColor #334155
+  SequenceLifeLineBackgroundColor #1e293b
+  ParticipantBackgroundColor #1e293b
+  ParticipantBorderColor #3b82f6
+  ParticipantFontColor #f8fafc
+  ArrowColor #94a3b8
+  ArrowFontColor #94a3b8
+  NoteBackgroundColor #1e293b
+  NoteBorderColor #334155
+  NoteFontColor #f8fafc
+  SequenceGroupBackgroundColor #1e293b
+  SequenceGroupBorderColor #334155
+  SequenceDividerBackgroundColor #334155
+  SequenceDividerFontColor #f8fafc
+}
+
+participant "IronRDP\nWASM" as wasm #1e293b
+participant "DCWebSocket\nShim" as shim #1e293b
+participant "DataChannel\n(control+bulk)" as dc #1e293b
+participant "Gateway\n(peer handler)" as gw #1e293b
+participant "RDCleanPath\nHandler" as rdc #1e293b
+participant "RDP Server\n(port 3389)" as rdp #1e293b
+
+== Phase 1: WebSocket Open (via DataChannel) ==
+
+wasm -> shim : new WebSocket(\n  "wss://host/ws/rdcleanpath")
+shim -> shim : Intercept same-origin WS\n(override window.WebSocket)
+shim -> dc : control: ws_open\n{ id: uuid, path: "/ws/rdcleanpath" }
+dc -> gw : DataChannel message
+gw -> gw : Path is /ws/rdcleanpath\n→ create virtual WS session
+gw -> rdc : createRDCleanPathSession()
+gw -> dc : control: ws_open_ack { id: uuid }
+dc -> shim : onmessage
+shim -> wasm : WebSocket.onopen()
+
+== Phase 2: RDCleanPath Handshake ==
+
+wasm -> wasm : Build RDCleanPath Request\n(ASN.1 DER encoded)
+wasm -> shim : ws.send(requestPdu)
+shim -> dc : bulk: [0x02][uuid][pdu bytes]
+dc -> gw : binary fast-path
+gw -> rdc : handleMessage(pdu)
+activate rdc
+
+rdc -> rdc : Parse ASN.1 DER:\n  version: 3390\n  destination: "My PC"\n  proxyAuth: JWT\n  x224ConnectionPdu: bytes
+
+rdc -> rdc : Validate JWT\n+ enforce dest: role
+
+rdc -> rdc : Resolve backend name\n→ rdp://host:3389
+
+rdc -> rdp : TCP connect
+rdc -> rdp : Send X.224\nConnection Request
+rdp --> rdc : X.224 Connection\nConfirm (TPKT)
+
+rdc -> rdp : TLS handshake\n(rejectUnauthorized: false)
+rdp --> rdc : TLS established
+rdc -> rdc : Extract server cert chain\n(DER X.509, leaf first)
+
+rdc -> rdc : Build RDCleanPath Response\n(ASN.1 DER):\n  version: 3390\n  x224Confirm\n  serverCertChain\n  serverAddr
+
+rdc -> gw : sendBinary(responsePdu)
+deactivate rdc
+gw -> dc : bulk: [0x02][uuid][response]
+dc -> shim : onmessage
+shim -> wasm : ws.onmessage(responsePdu)
+
+wasm -> wasm : Verify server cert\nvia CredSSP/NLA\n(username + password)
+
+== Phase 3: Relay (bidirectional pipe) ==
+
+note over wasm, rdp #334155
+  All subsequent traffic is relayed bidirectionally:
+  IronRDP WASM ↔ DCWebSocket ↔ DataChannel ↔ Gateway ↔ TLS socket ↔ RDP Server
+  Binary WS fast-path (0x02 magic byte) on bulk DataChannel
+  for low-overhead streaming. Gateway handles TLS termination.
+end note
+
+wasm -> shim : ws.send(rdpData)
+shim -> dc : bulk: [0x02][uuid][data]
+dc -> gw : binary fast-path
+gw -> rdc : handleMessage(data)
+rdc -> rdp : tlsSocket.write(data)
+
+rdp --> rdc : TLS data (graphics,\ncursor, audio)
+rdc -> gw : sendBinary(data)
+gw -> dc : bulk: [0x02][uuid][data]
+dc -> shim : onmessage
+shim -> wasm : ws.onmessage(data)
+
+wasm -> wasm : Decode RDP graphics\n→ render to <canvas>
+
+note over wasm #334155
+  Input: mouse/keyboard events on canvas
+  → IronRDP InputTransaction
+  → sent as RDP PDUs via relay
+end note
+
+@enduml
