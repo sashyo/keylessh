@@ -138,6 +138,21 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
         drainQueue(dc, queue, maxBuffer, getPaused, setPaused, state);
       }
     });
+
+    // Watchdog: onBufferedAmountLow may not fire reliably in node-datachannel.
+    // Poll every 200ms to unstick the queue when bufferedAmount has drained
+    // but the callback was missed.
+    const watchdog = setInterval(() => {
+      if (!dc.isOpen()) { clearInterval(watchdog); return; }
+      if (getPaused() && queue.length > 0) {
+        const ba = dc.bufferedAmount();
+        if (ba <= maxBuffer / 4) {
+          console.log(`[WebRTC] Watchdog: unsticking queue (bufferedAmount=${ba}, queueLen=${queue.length})`);
+          setPaused(false);
+          drainQueue(dc, queue, maxBuffer, getPaused, setPaused, state);
+        }
+      }
+    }, 200);
   }
 
   function drainQueue(dc: DataChannel, queue: Buffer[], maxBuffer: number, getPaused: () => boolean, setPaused: (v: boolean) => void, state: PeerState): void {
