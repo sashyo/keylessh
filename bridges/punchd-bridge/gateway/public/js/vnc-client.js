@@ -85,6 +85,11 @@
   var fbUpdateBusy = false; // true while processing a FramebufferUpdate
   var resyncSkipped = 0; // bytes skipped while resyncing after unknown message type
 
+  // Recovery timers
+  var lastFrameComplete = 0;      // timestamp of last successful frame completion
+  var updatePollTimer = null;     // periodic incremental update request timer
+  var stallWatchdogTimer = null;  // stall detection and recovery timer
+
   // Server pixel format (populated from ServerInit, updated by SetPixelFormat)
   var serverBpp = 32; // bytes per pixel component (bits)
   var serverBytesPerPixel = 4;
@@ -92,6 +97,18 @@
   var serverGShift = 8;
   var serverBShift = 16;
   var serverBigEndian = false;
+
+  /** Reset the RFB parser state — clears the receive buffer and all
+   *  in-progress framebuffer update tracking so the parser can start
+   *  fresh from the next incoming data. */
+  function resetParserState() {
+    recvBuf = new Uint8Array(0);
+    fbUpdateRemaining = 0;
+    fbUpdateRect = null;
+    fbUpdatePixelsLeft = 0;
+    fbUpdateBusy = false;
+    resyncSkipped = 0;
+  }
 
   // ── Initialization ────────────────────────────────────────────
 
@@ -618,19 +635,34 @@
     // Set up input handlers
     setupInputHandlers();
 
-    // Diagnostic: periodic status check to detect stalls
-    var lastTcpCheck = 0;
-    var stallTimer = setInterval(function () {
-      if (rfbState !== RFB_CONNECTED) { clearInterval(stallTimer); return; }
-      var stalled = (tcpBytesReceived === lastTcpCheck && fbUpdatePixelsLeft > 0);
-      var rateMBs = ((tcpBytesReceived - lastTcpCheck) / 1048576 / 5).toFixed(2);
-      if (fbUpdatePixelsLeft > 0 || stalled) {
-        console.log("[VNC] Status: pixelsLeft=" + fbUpdatePixelsLeft +
-          " TCP=" + (tcpBytesReceived / 1048576).toFixed(1) + "MB" +
-          " rate=" + rateMBs + "MB/s" + (stalled ? " STALLED" : ""));
+    // Continuous incremental update requests — keeps data flowing even when
+    // onFbUpdateComplete is never called (e.g. after a parser desync).
+    lastFrameComplete = Date.now();
+    if (updatePollTimer) clearInterval(updatePollTimer);
+    updatePollTimer = setInterval(function () {
+      if (rfbState !== RFB_CONNECTED) { clearInterval(updatePollTimer); updatePollTimer = null; return; }
+      requestFramebufferUpdate(true);
+    }, 50);
+
+    // Stall watchdog: detect stuck parser states and recover.
+    // Two conditions trigger a reset:
+    //  1) The current rect claims more pixel data than 2× the framebuffer
+    //     (sign of parser desync reading garbage as rect dimensions).
+    //  2) No frame has completed in 15 seconds (slow but sustained stall).
+    if (stallWatchdogTimer) clearInterval(stallWatchdogTimer);
+    stallWatchdogTimer = setInterval(function () {
+      if (rfbState !== RFB_CONNECTED) { clearInterval(stallWatchdogTimer); stallWatchdogTimer = null; return; }
+      if (!fbUpdateBusy) return;
+      var fbSize = fbWidth * fbHeight * serverBytesPerPixel;
+      var elapsed = Date.now() - lastFrameComplete;
+      if (fbUpdatePixelsLeft > fbSize * 2 || elapsed > 15000) {
+        console.warn("[VNC] Stall detected (elapsed=" + (elapsed / 1000).toFixed(1) + "s" +
+          " pixelsLeft=" + fbUpdatePixelsLeft + ") — resetting parser");
+        resetParserState();
+        lastFrameComplete = Date.now();
+        requestFramebufferUpdate(false);
       }
-      lastTcpCheck = tcpBytesReceived;
-    }, 5000);
+    }, 2000);
 
     return 24 + nameLen;
   }
@@ -658,48 +690,23 @@
     var msgType = recvBuf[0];
 
     switch (msgType) {
-      case 0: resyncSkipped = 0; return handleFbUpdate();
-      case 1: resyncSkipped = 0; return handleSetColourMap();
-      case 2: resyncSkipped = 0; return handleBell();
-      case 3: resyncSkipped = 0; return handleServerCutText();
+      case 0: return handleFbUpdate();
+      case 1: return handleSetColourMap();
+      case 2: return handleBell();
+      case 3: return handleServerCutText();
       default:
-        // Unknown message type — parser misalignment or unsupported server extension.
-        // Scan forward for a valid FramebufferUpdate header by checking:
-        //   [type=0x00][pad=0x00][nRects:u16] with 1 <= nRects <= 1000
-        //   + first rect encoding must be a known value
-        if (resyncSkipped === 0) {
-          console.warn("[VNC] Unknown message type:", msgType,
-            "hex:", Array.from(recvBuf.subarray(0, Math.min(20, recvBuf.length)))
-              .map(function(b) { return ("0" + b.toString(16)).slice(-2); }).join(" "));
-        }
-        for (var skip = 1; skip < recvBuf.length - 15; skip++) {
-          if (recvBuf[skip] !== 0x00 || recvBuf[skip + 1] !== 0x00) continue;
-          var nRects = (recvBuf[skip + 2] << 8) | recvBuf[skip + 3];
-          if (nRects < 1 || nRects > 1000) continue;
-          // Validate first rect header: encoding must be known
-          var enc = (recvBuf[skip + 12] << 24) | (recvBuf[skip + 13] << 16) |
-                    (recvBuf[skip + 14] << 8) | recvBuf[skip + 15];
-          if (enc !== 0 && enc !== 1 && enc !== -223 && enc !== -224 &&
-              enc !== -232 && enc !== -239 && enc !== -240) continue;
-          // For real encodings (Raw/CopyRect), validate dimensions are sane
-          if (enc >= 0) {
-            var rw = (recvBuf[skip + 8] << 8) | recvBuf[skip + 9];
-            var rh = (recvBuf[skip + 10] << 8) | recvBuf[skip + 11];
-            if (rw === 0 || rh === 0 ||
-                (fbWidth > 0 && rw > fbWidth) ||
-                (fbHeight > 0 && rh > fbHeight)) continue;
-          }
-          console.warn("[VNC] Resynced after skipping", skip, "bytes");
-          resyncSkipped += skip;
-          return skip;
-        }
-        // Could not resync in current buffer — discard and wait for more data
-        resyncSkipped += recvBuf.length;
-        if (resyncSkipped > 1048576) {
-          disconnectVnc("Parser cannot resync after 1MB of unknown data");
-          return 0;
-        }
-        return recvBuf.length;
+        // Unknown message type — parser has lost sync with the data stream.
+        // Rather than scanning forward (which can false-positive on pixel data),
+        // discard the buffer entirely and request a fresh full framebuffer update.
+        // The continuous update poll timer ensures the server will respond with
+        // a clean FramebufferUpdate that the parser can handle from byte 0.
+        console.warn("[VNC] Unknown message type:", msgType,
+          "hex:", Array.from(recvBuf.subarray(0, Math.min(20, recvBuf.length)))
+            .map(function(b) { return ("0" + b.toString(16)).slice(-2); }).join(" "),
+          "— resetting parser");
+        resetParserState();
+        requestFramebufferUpdate(false);
+        return 0; // buffer is empty; stops the processRfb loop
     }
   }
 
@@ -710,18 +717,24 @@
     fbUpdateRect = null;
     fbUpdatePixelsLeft = 0;
     fbUpdateBusy = true;
-    console.log("[VNC] FramebufferUpdate:", fbUpdateRemaining, "rects");
+    if (fbUpdateRemaining === 0) {
+      // Server sent an update with no rects — mark as complete so we
+      // continue requesting incremental updates.
+      onFbUpdateComplete();
+    }
     return 4;
   }
 
   function onFbUpdateComplete() {
     fbUpdateBusy = false;
+    lastFrameComplete = Date.now();
     // Restore connected status (clears "Loading..." text)
     if (rfbState === RFB_CONNECTED) {
       setStatus("connected", "Connected to " + serverName);
       statusBar.classList.add("connected");
       disconnectBtn.classList.remove("hidden");
-      // Request next incremental update
+      // Request next incremental update immediately for responsiveness.
+      // The poll timer also sends requests as a safety net.
       requestFramebufferUpdate(true);
     }
   }
@@ -760,11 +773,25 @@
         }
       }
 
+      var _rx = (recvBuf[0] << 8) | recvBuf[1];
+      var _ry = (recvBuf[2] << 8) | recvBuf[3];
+      var _rw = (recvBuf[4] << 8) | recvBuf[5];
+      var _rh = (recvBuf[6] << 8) | recvBuf[7];
+
+      // Sanity-check rect dimensions for non-pseudo-encodings.
+      // If the rect extends beyond the framebuffer, the parser is desynced.
+      if (encoding >= 0 && fbWidth > 0 && fbHeight > 0) {
+        if (_rx + _rw > fbWidth || _ry + _rh > fbHeight || _rw === 0 || _rh === 0) {
+          console.warn("[VNC] Bogus rect dims:", _rx + "," + _ry, _rw + "x" + _rh,
+            "in", fbWidth + "x" + fbHeight, "enc=" + encoding, "— resetting parser");
+          resetParserState();
+          requestFramebufferUpdate(false);
+          return 0;
+        }
+      }
+
       fbUpdateRect = {
-        x: (recvBuf[0] << 8) | recvBuf[1],
-        y: (recvBuf[2] << 8) | recvBuf[3],
-        w: (recvBuf[4] << 8) | recvBuf[5],
-        h: (recvBuf[6] << 8) | recvBuf[7],
+        x: _rx, y: _ry, w: _rw, h: _rh,
         encoding: encoding,
         pixelRow: 0,
         pixelCol: 0,
@@ -782,6 +809,9 @@
         fbUpdateRect = null;
         fbUpdateRemaining--;
         if (fbUpdateRemaining <= 0) {
+          // Mark update as complete (resets fbUpdateBusy) and immediately
+          // request a fresh full frame for the new desktop size.
+          onFbUpdateComplete();
           requestFramebufferUpdate(false);
         }
         return 12;
@@ -859,20 +889,17 @@
       }
 
       if (encoding !== 0) {
-        // Unknown encoding — can't determine data length, so abandon this
-        // FramebufferUpdate and let the resync scanner find the next valid one.
+        // Unknown encoding — can't determine data length.  Reset the parser
+        // entirely and request a fresh full frame rather than attempting an
+        // unreliable in-stream resync.
         console.warn("[VNC] Unsupported encoding:", encoding,
           "(0x" + (encoding >>> 0).toString(16) + ")",
           "rect:", fbUpdateRect.x + "," + fbUpdateRect.y,
-          fbUpdateRect.w + "x" + fbUpdateRect.h);
-        fbUpdateRect = null;
-        fbUpdateRemaining = 0;
-        fbUpdatePixelsLeft = 0;
-        fbUpdateBusy = false;
-        // Skip just the 12-byte rect header; remaining data will be handled
-        // by the resync scanner in handleServerMessage which validates
-        // FramebufferUpdate headers properly before resyncing.
-        return 12;
+          fbUpdateRect.w + "x" + fbUpdateRect.h,
+          "— resetting parser");
+        resetParserState();
+        requestFramebufferUpdate(false);
+        return 0;
       }
 
       // Raw encoding — need w*h*bpp bytes of pixel data
@@ -997,9 +1024,13 @@
     var textLen = (recvBuf[4] << 24) | (recvBuf[5] << 16) | (recvBuf[6] << 8) | recvBuf[7];
     if (recvBuf.length < 8 + textLen) return 0;
     var text = new TextDecoder("latin1").decode(recvBuf.subarray(8, 8 + textLen));
-    navigator.clipboard.writeText(text).catch(function(e) {
+    try {
+      navigator.clipboard.writeText(text).catch(function(e) {
+        console.debug("[VNC] Clipboard write failed:", e);
+      });
+    } catch (e) {
       console.debug("[VNC] Clipboard write failed:", e);
-    });
+    }
     return 8 + textLen;
   }
 
@@ -1379,6 +1410,8 @@
       clearInterval(updateTimer);
       updateTimer = null;
     }
+    if (updatePollTimer) { clearInterval(updatePollTimer); updatePollTimer = null; }
+    if (stallWatchdogTimer) { clearInterval(stallWatchdogTimer); stallWatchdogTimer = null; }
 
     if (tunnelId && controlChannel && controlChannel.readyState === "open") {
       try {
@@ -1405,6 +1438,8 @@
       clearInterval(updateTimer);
       updateTimer = null;
     }
+    if (updatePollTimer) { clearInterval(updatePollTimer); updatePollTimer = null; }
+    if (stallWatchdogTimer) { clearInterval(stallWatchdogTimer); stallWatchdogTimer = null; }
     tunnelOpen = false;
     tunnelId = null;
     rfbState = RFB_VERSION;
