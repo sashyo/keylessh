@@ -70,7 +70,7 @@ function addAffinityCookie(
   gatewayId: string,
 ): Record<string, string | string[]> {
   const setCookies: string[] = [];
-  setCookies.push(`gateway_relay=${gatewayId}; Path=/; HttpOnly; SameSite=None; Secure`);
+  setCookies.push(`gateway_relay=${encodeURIComponent(gatewayId)}; Path=/; HttpOnly; SameSite=None; Secure`);
 
   const gatewaySetCookie = headers["set-cookie"];
   if (gatewaySetCookie) {
@@ -119,7 +119,8 @@ export function createHttpRelay(registry: Registry, useTls = false) {
     res: ServerResponse
   ): Promise<void> {
     // Find target gateway (session affinity via cookie, then realm-based, then load-balance)
-    const gatewayId = parseCookie(req.headers.cookie, "gateway_relay");
+    const gatewayIdRaw = parseCookie(req.headers.cookie, "gateway_relay");
+    const gatewayId = gatewayIdRaw ? decodeURIComponent(gatewayIdRaw) : null;
     let gateway = gatewayId ? registry.getGateway(gatewayId) : undefined;
 
     if (!gateway) {

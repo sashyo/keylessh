@@ -14,7 +14,7 @@
 #  tideorg/tidecloak-stg-dev:latest
 
 export SCRIPT_DIR=$(dirname "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)")
-export TIDECLOAK_LOCAL_URL=https://login.dauth.me
+export TIDECLOAK_LOCAL_URL=http://localhost:8080
 mkdir ../../data
 bash ./init-tidecloak.sh
 

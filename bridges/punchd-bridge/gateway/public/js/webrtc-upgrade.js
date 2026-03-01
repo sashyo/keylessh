@@ -8,6 +8,11 @@
  *
  * Falls back gracefully — if WebRTC fails, HTTP relay continues working.
  * Automatically reconnects when the DataChannel or signaling drops.
+ *
+ * Supports dual DataChannels for high-throughput scenarios (4K video, gaming):
+ *   - "http-tunnel" (control): JSON control messages, small responses
+ *   - "bulk-data" (bulk): binary streaming chunks, binary WebSocket frames
+ * Falls back to single-channel mode for older gateways.
  */
 
 (function () {
@@ -24,10 +29,32 @@
   const RECONNECT_DELAY = 5000;
   const MAX_RECONNECT_DELAY = 60000;
 
+  // Block other Service Worker registrations (e.g. Jellyfin's serviceworker.js)
+  // that would steal our scope and prevent DataChannel routing.
+  // Must be done early, before any other code can register a SW.
+  const _origSWRegister = navigator.serviceWorker
+    ? navigator.serviceWorker.register.bind(navigator.serviceWorker)
+    : null;
+  if (navigator.serviceWorker) {
+    navigator.serviceWorker.register = function (scriptURL, options) {
+      var url = new URL(scriptURL, location.href);
+      if (url.pathname.endsWith("/sw.js")) {
+        return _origSWRegister(scriptURL, options);
+      }
+      console.log("[WebRTC] Blocking conflicting SW registration:", scriptURL);
+      return navigator.serviceWorker.ready;
+    };
+  }
+
+  // Binary WebSocket fast-path magic byte (must match gateway's BINARY_WS_MAGIC)
+  const BINARY_WS_MAGIC = 0x02;
+
   let signalingWs = null;
   let peerConnection = null;
-  let dataChannel = null;
-  let clientId = "client-" + Math.random().toString(36).slice(2, 10);
+  let dataChannel = null;      // Control channel ("http-tunnel")
+  let bulkChannel = null;      // Bulk data channel ("bulk-data")
+  let bulkEnabled = false;     // True after capability handshake confirms bulk support
+  let clientId = "client-" + crypto.randomUUID().replace(/-/g, "").slice(0, 8);
   let pairedGatewayId = null;
   let config = null;
   let sessionToken = null;
@@ -36,6 +63,8 @@
   let reconnectTimer = null;
   let swRegistered = false;
   let dcReadySignaled = false;
+  let capabilityTimer = null;
+  let gatewayFeatures = [];    // Features confirmed by gateway capabilities response
 
   // Pending requests waiting for DataChannel responses
   const pendingRequests = new Map();
@@ -45,6 +74,10 @@
   const streamingPorts = new Map();
   // Active WebSocket connections tunneled through DataChannel
   const dcWebSockets = new Map();
+  // Early chunks buffer: binary chunks that arrive on the bulk channel
+  // before their http_response_start message arrives on the control channel.
+  // (Dual DataChannels have independent ordering — bulk can deliver faster.)
+  const earlyChunks = new Map();
 
   async function init() {
     try {
@@ -69,6 +102,13 @@
       try { dataChannel.onclose = null; dataChannel.onerror = null; dataChannel.close(); } catch {}
       dataChannel = null;
     }
+    if (bulkChannel) {
+      try { bulkChannel.onclose = null; bulkChannel.onerror = null; bulkChannel.close(); } catch {}
+      bulkChannel = null;
+    }
+    bulkEnabled = false;
+    gatewayFeatures = [];
+    if (capabilityTimer) { clearTimeout(capabilityTimer); capabilityTimer = null; }
     if (peerConnection) {
       try { peerConnection.onicecandidate = null; peerConnection.onconnectionstatechange = null; peerConnection.close(); } catch {}
       peerConnection = null;
@@ -81,6 +121,7 @@
     }
     pendingRequests.clear();
     chunkedResponses.clear();
+    earlyChunks.clear();
     // End any in-flight streaming responses so SW promises don't hang
     for (var [id, port] of streamingPorts) {
       port.postMessage({ type: "end" });
@@ -237,6 +278,16 @@
     }
   }
 
+  function sendCapabilities() {
+    if (dataChannel && dataChannel.readyState === "open") {
+      dataChannel.send(JSON.stringify({
+        type: "capabilities",
+        version: 2,
+        features: ["bulk-channel", "binary-ws"],
+      }));
+    }
+  }
+
   function startWebRTC() {
     if (!pairedGatewayId) return;
 
@@ -264,21 +315,50 @@
       iceServers: iceServers.length > 0 ? iceServers : undefined,
     });
 
+    // --- Control channel: JSON messages, small responses ---
     dataChannel = peerConnection.createDataChannel("http-tunnel", {
       ordered: true,
     });
     dataChannel.binaryType = "arraybuffer";
 
+    // --- Bulk channel: binary streaming chunks, binary WS frames ---
+    bulkChannel = peerConnection.createDataChannel("bulk-data", {
+      ordered: true,
+    });
+    bulkChannel.binaryType = "arraybuffer";
+
     dataChannel.onopen = async () => {
-      console.log("[WebRTC] DataChannel OPEN — direct connection established!");
+      console.log("[WebRTC] Control DataChannel OPEN — direct connection established!");
       reconnectAttempts = 0; // Reset backoff on success
       // Refresh session token before DC requests start (token may have expired since page load)
       await fetchSessionToken();
-      // Refresh token every 4 minutes to stay ahead of 5-minute expiry
+      // Refresh token every 2 minutes — the server proactively refreshes
+      // tokens within 2 min of expiry, so this ensures we always have a
+      // fresh token with ~3+ min remaining lifetime.
       if (tokenRefreshTimer) clearInterval(tokenRefreshTimer);
-      tokenRefreshTimer = setInterval(fetchSessionToken, 4 * 60 * 1000);
+      tokenRefreshTimer = setInterval(fetchSessionToken, 2 * 60 * 1000);
       installWebSocketShim();
       await registerServiceWorker();
+
+      // Send capability handshake to negotiate bulk channel + binary WS.
+      // The gateway also sends capabilities proactively on channel open,
+      // so we may receive them before we even send — that's fine.
+      sendCapabilities();
+      // Retry once after 2s if no response yet (message could be lost)
+      capabilityTimer = setTimeout(function () {
+        capabilityTimer = null;
+        if (!bulkEnabled) {
+          console.log("[WebRTC] No capabilities response yet — retrying...");
+          sendCapabilities();
+          // Final fallback after another 3s
+          capabilityTimer = setTimeout(function () {
+            capabilityTimer = null;
+            if (!bulkEnabled) {
+              console.log("[WebRTC] Gateway did not respond to capabilities — single-channel mode");
+            }
+          }, 3000);
+        }
+      }, 2000);
 
       // Only signal dc_ready if we have a valid session token — without it,
       // DC requests would 401 and fall back to relay anyway (wasted round-trip)
@@ -300,6 +380,7 @@
       signalDcReady();
     };
 
+    // --- Control channel message handler ---
     dataChannel.onmessage = (event) => {
       // Binary message — could be a streaming chunk OR a JSON control message
       // sent as binary (to avoid SCTP PPID confusion when interleaving).
@@ -320,22 +401,9 @@
           return;
         }
 
-        // Binary streaming chunk: 36-byte requestId prefix + raw bytes
-        if (buf.length < 36) return;
-        const requestId = new TextDecoder().decode(buf.subarray(0, 36));
-        const entry = chunkedResponses.get(requestId);
-        if (!entry || !entry.streaming) return;
-        if (entry.live) {
-          // Live stream (SSE/NDJSON) — forward chunk to SW immediately
-          const port = streamingPorts.get(requestId);
-          if (port) {
-            const chunkBytes = buf.slice(36).buffer;
-            port.postMessage({ type: "chunk", data: chunkBytes }, [chunkBytes]);
-          }
-        } else {
-          // Finite response (video, etc) — buffer chunk on page side
-          entry.chunks.push(buf.slice(36));
-        }
+        // Binary streaming chunk on control channel (single-channel fallback):
+        // 36-byte requestId prefix + raw bytes
+        handleBinaryChunk(buf);
         return;
       }
 
@@ -348,7 +416,125 @@
       }
     };
 
+    // --- Bulk channel message handler ---
+    bulkChannel.onmessage = function (event) {
+      if (typeof event.data !== "string") {
+        var buf = new Uint8Array(event.data);
+        if (buf.length === 0) return;
+
+        // Binary WS fast-path: [0x02][36-byte WS UUID][payload]
+        if (buf[0] === BINARY_WS_MAGIC && buf.length >= 37) {
+          var wsId = new TextDecoder().decode(buf.subarray(1, 37));
+          var payload = buf.slice(37);
+          var ws = dcWebSockets.get(wsId);
+          if (ws) ws._fireMessageBinary(payload.buffer);
+          return;
+        }
+
+        // JSON control message on bulk channel
+        if (buf[0] === 0x7B) {
+          try {
+            var msg = JSON.parse(new TextDecoder().decode(buf));
+            handleDcMessage(msg);
+          } catch (parseErr) {
+            console.error("[WebRTC] Failed to parse bulk JSON message:", parseErr.message, "len:", buf.length);
+          }
+          return;
+        }
+
+        // Binary streaming chunk: 36-byte requestId prefix + raw bytes
+        handleBinaryChunk(buf);
+      }
+    };
+
+    bulkChannel.onopen = function () {
+      console.log("[WebRTC] Bulk channel OPEN");
+      // If gateway already confirmed bulk-channel support, enable now
+      if (gatewayFeatures.indexOf("bulk-channel") !== -1) {
+        bulkEnabled = true;
+        console.log("[WebRTC] Bulk channel enabled — dual-channel mode active");
+      }
+    };
+
+    bulkChannel.onclose = function () {
+      console.log("[WebRTC] Bulk channel closed");
+      bulkChannel = null;
+      bulkEnabled = false;
+    };
+
+    bulkChannel.onerror = function () {
+      console.log("[WebRTC] Bulk channel error");
+    };
+
+    /** Handle a binary streaming chunk (shared between control and bulk channels). */
+    function handleBinaryChunk(buf) {
+      if (buf.length < 36) return;
+      var requestId = new TextDecoder().decode(buf.subarray(0, 36));
+      var entry = chunkedResponses.get(requestId);
+      if (!entry || !entry.streaming) {
+        // Chunk arrived before http_response_start (cross-channel race) — buffer it
+        var pending = earlyChunks.get(requestId);
+        if (!pending) {
+          pending = [];
+          earlyChunks.set(requestId, pending);
+        }
+        pending.push(buf.slice(36));
+        if (pending.length % 100 === 0) {
+          console.log("[WebRTC] Early chunks buffered:", pending.length, "for", requestId);
+        }
+        return;
+      }
+      if (entry.live) {
+        // Live stream (SSE/NDJSON) — forward chunk to SW immediately
+        var port = streamingPorts.get(requestId);
+        if (port) {
+          var chunkBytes = buf.slice(36).buffer;
+          port.postMessage({ type: "chunk", data: chunkBytes }, [chunkBytes]);
+        }
+      } else {
+        // Finite response (video, etc) — buffer chunk on page side
+        entry.chunks.push(buf.slice(36));
+        if (entry.chunks.length % 100 === 0) {
+          var totalSoFar = entry.chunks.reduce(function (s, c) { return s + c.length; }, 0);
+          console.log("[WebRTC] Streaming chunks:", entry.chunks.length, "received for", requestId, "(" + totalSoFar + " bytes)");
+        }
+      }
+    }
+
     function handleDcMessage(msg) {
+      if (msg.type === "capabilities") {
+        // Gateway capability response — store features for deferred activation
+        if (capabilityTimer) { clearTimeout(capabilityTimer); capabilityTimer = null; }
+        gatewayFeatures = msg.features || [];
+        console.log("[WebRTC] Gateway capabilities:", gatewayFeatures.join(", "));
+        // Enable bulk channel if it's already open
+        if (gatewayFeatures.indexOf("bulk-channel") !== -1 && bulkChannel && bulkChannel.readyState === "open") {
+          bulkEnabled = true;
+          console.log("[WebRTC] Bulk channel enabled — dual-channel mode active");
+        }
+        return;
+      }
+
+      if (msg.type === "http_response_ack" && msg.id) {
+        // Gateway acknowledged a streaming response — extend our timeout
+        // so the full http_response_start (on the potentially congested bulk
+        // channel) has time to arrive.
+        var ackPending = pendingRequests.get(msg.id);
+        if (ackPending) {
+          clearTimeout(ackPending.timeout);
+          ackPending.timeout = setTimeout(function () {
+            console.warn("[WebRTC] Streaming request timed out after ack:", msg.id);
+            pendingRequests.delete(msg.id);
+            streamingPorts.delete(msg.id);
+            ackPending.port.postMessage({ error: "Timeout" });
+          }, 300000); // 5 minutes for large streaming responses
+          // Tell SW to extend its timeout too
+          ackPending.port.postMessage({ type: "progress" });
+          console.log("[WebRTC] Extended timeout for streaming response:", msg.id);
+        }
+        return;
+      }
+
       if (msg.type === "http_response" && msg.id) {
         // Single buffered response
         const pending = pendingRequests.get(msg.id);
@@ -359,6 +545,7 @@
       } else if (msg.type === "http_response_start" && msg.id) {
         if (msg.streaming) {
           var isLive = !!msg.live;
+          console.log("[WebRTC] Streaming start received:", msg.id, "status:", msg.statusCode, "live:", isLive);
           if (isLive) {
             // Live stream (SSE, NDJSON) — resolve immediately with ReadableStream.
             // Client consumes data progressively as it arrives.
@@ -374,7 +561,7 @@
           } else {
             // Buffered streaming (video, large files) — extend timeouts since
             // the full response must be received before we can deliver it.
-            // A 50MB 4K segment over DataChannel can take minutes.
+            // Range capping on the gateway keeps each response small (~5MB).
             var pending = pendingRequests.get(msg.id);
             if (pending) {
               clearTimeout(pending.timeout);
@@ -388,7 +575,7 @@
           }
           // live=true: forward chunks to SW via ReadableStream
           // live=false: buffer chunks page-side, deliver complete Response on end
-          //   (Chrome's media pipeline doesn't handle ReadableStream 206 from SW)
+          //   (Chrome's media pipeline can't consume ReadableStream 206 from SW)
           chunkedResponses.set(msg.id, {
             streaming: true,
             live: isLive,
@@ -396,6 +583,26 @@
             headers: msg.headers,
             chunks: isLive ? undefined : [],
           });
+          // Apply any chunks that arrived on the bulk channel before this start message
+          var early = earlyChunks.get(msg.id);
+          if (early) {
+            earlyChunks.delete(msg.id);
+            var createdEntry = chunkedResponses.get(msg.id);
+            for (var ei = 0; ei < early.length; ei++) {
+              if (isLive) {
+                var livePort = streamingPorts.get(msg.id);
+                if (livePort) {
+                  var earlyBuf = early[ei].buffer;
+                  livePort.postMessage({ type: "chunk", data: earlyBuf }, [earlyBuf]);
+                }
+              } else {
+                createdEntry.chunks.push(early[ei]);
+              }
+            }
+            if (early.length > 0) {
+              console.log("[WebRTC] Applied " + early.length + " early chunks for " + msg.id);
+            }
+          }
         } else {
           // Size-chunked reassembly (large buffered responses)
           chunkedResponses.set(msg.id, {
@@ -437,11 +644,12 @@
         }
       } else if (msg.type === "http_response_end" && msg.id) {
         const entry = chunkedResponses.get(msg.id);
+        console.log("[WebRTC] Streaming end received:", msg.id, "entry:", entry ? ("chunks=" + (entry.chunks ? entry.chunks.length : "none") + " live=" + entry.live) : "MISSING");
         chunkedResponses.delete(msg.id);
+        earlyChunks.delete(msg.id); // Clean up any orphaned early chunks
 
         if (entry && !entry.live && entry.chunks) {
-          // Buffered finite response — concatenate chunks and encode as base64.
-          // Uses the same proven path as small responses (body field).
+          // Buffered finite response — concatenate chunks and deliver.
           const totalLength = entry.chunks.reduce((sum, c) => sum + c.length, 0);
           const merged = new Uint8Array(totalLength);
           let offset = 0;
@@ -449,7 +657,7 @@
             merged.set(chunk, offset);
             offset += chunk.length;
           }
-          console.log(`[WebRTC] Buffered response complete: ${msg.id} (${totalLength} bytes)`);
+          console.log(`[WebRTC] Buffered response complete: ${msg.id} (${totalLength} bytes, ${entry.chunks.length} chunks)`);
           const pending = pendingRequests.get(msg.id);
           if (pending) {
             pendingRequests.delete(msg.id);
@@ -458,6 +666,8 @@
               headers: entry.headers,
               binaryBody: merged.buffer,
             });
+          } else {
+            console.warn("[WebRTC] Buffered response complete but no pending request (timeout already fired?):", msg.id);
           }
         } else {
           // Live stream — close the ReadableStream
@@ -552,13 +762,40 @@
   }
 
   async function registerServiceWorker() {
-    if (swRegistered || !("serviceWorker" in navigator)) {
+    if (swRegistered || !("serviceWorker" in navigator) || !_origSWRegister) {
       return;
     }
 
     try {
-      await navigator.serviceWorker.register("/js/sw.js", { scope: "/", updateViaCache: "none" });
-      console.log("[WebRTC] Service Worker registered");
+      // Use the backend prefix scope so our SW controls the page.
+      // Without this, Jellyfin's serviceworker.js at web/ scope would
+      // take priority and our SW would never see any fetch events.
+      var swScope = BACKEND_PREFIX ? BACKEND_PREFIX + "/web/" : "/";
+
+      // Unregister any conflicting SWs:
+      // - Jellyfin's own serviceworker.js at the same scope
+      // - Stale registrations of our sw.js at "/" scope (from before scope migration)
+      var existingRegs = await navigator.serviceWorker.getRegistrations();
+      for (var i = 0; i < existingRegs.length; i++) {
+        var reg = existingRegs[i];
+        var regScopePath = new URL(reg.scope).pathname;
+        var isOurSw = reg.active && reg.active.scriptURL.endsWith("/sw.js");
+        // Unregister conflicting SWs at our target scope
+        if (regScopePath === swScope || regScopePath.startsWith(BACKEND_PREFIX + "/web")) {
+          if (!isOurSw) {
+            console.log("[WebRTC] Unregistering conflicting SW:", reg.scope);
+            await reg.unregister();
+          }
+        }
+        // Unregister stale sw.js at root scope when we've migrated to a prefix scope
+        if (isOurSw && regScopePath === "/" && swScope !== "/") {
+          console.log("[WebRTC] Unregistering stale root-scope SW:", reg.scope);
+          await reg.unregister();
+        }
+      }
+
+      await _origSWRegister("/js/sw.js", { scope: swScope, updateViaCache: "none" });
+      console.log("[WebRTC] Service Worker registered at scope:", swScope);
       swRegistered = true;
 
       // When a new SW takes control mid-session (e.g., after SW update),
@@ -600,7 +837,23 @@
     console.log("[WebRTC] Signaled dc_ready to Service Worker");
   }
 
+  // Serialize fetchSessionToken calls — multiple 401 retries must not
+  // trigger concurrent refresh requests (causes refresh token rotation races).
+  var _tokenRefreshPromise = null;
+
   async function fetchSessionToken() {
+    if (_tokenRefreshPromise) {
+      return _tokenRefreshPromise;
+    }
+    _tokenRefreshPromise = _doFetchSessionToken();
+    try {
+      return await _tokenRefreshPromise;
+    } finally {
+      _tokenRefreshPromise = null;
+    }
+  }
+
+  async function _doFetchSessionToken() {
     try {
       const res = await fetch(BACKEND_PREFIX + "/auth/session-token", {
         headers: { "X-Requested-With": "XMLHttpRequest" },
@@ -624,12 +877,7 @@
     }
   }
 
-  function handleSwFetch(request, responsePort) {
-    if (!dataChannel || dataChannel.readyState !== "open") {
-      responsePort.postMessage({ error: "DataChannel not open" });
-      return;
-    }
-
+  function sendDcRequest(request, responsePort, isRetry) {
     const requestId = crypto.randomUUID();
 
     // Inject session cookie that the SW can't read (HttpOnly).
@@ -656,6 +904,7 @@
     );
 
     var timeout = setTimeout(() => {
+      console.warn("[WebRTC] DC request timed out (15s initial):", request.method, request.url, "id:", requestId);
       pendingRequests.delete(requestId);
       streamingPorts.delete(requestId);
       responsePort.postMessage({ error: "Timeout" });
@@ -666,6 +915,19 @@
       port: responsePort,
       resolve: (msg) => {
         clearTimeout(timeout);
+        // On 401, refresh token and retry once (token may have expired
+        // between our 4-minute refresh intervals)
+        if (msg.statusCode === 401 && !isRetry) {
+          console.log("[WebRTC] Got 401 — refreshing token and retrying");
+          fetchSessionToken().then(function () {
+            if (sessionToken) {
+              sendDcRequest(request, responsePort, true);
+            } else {
+              responsePort.postMessage({ statusCode: 401, headers: msg.headers, body: msg.body });
+            }
+          });
+          return;
+        }
         if (msg.streaming) {
           // Live streaming response (SSE, NDJSON) — keep the port open for chunks
           streamingPorts.set(requestId, responsePort);
@@ -692,12 +954,31 @@
     });
   }
 
+  function handleSwFetch(request, responsePort) {
+    if (!dataChannel || dataChannel.readyState !== "open") {
+      responsePort.postMessage({ error: "DataChannel not open" });
+      return;
+    }
+    sendDcRequest(request, responsePort, false);
+  }
+
   // --- WebSocket shim: tunnels same-origin WS connections through DataChannel ---
 
   function bufToBase64(bytes) {
     let binary = "";
     for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
     return btoa(binary);
+  }
+
+  /** Send a binary WebSocket frame via the bulk channel fast-path. */
+  function sendBinaryWsFrame(wsId, payload) {
+    // [0x02][36-byte UUID][raw payload]
+    var frame = new Uint8Array(37 + payload.length);
+    frame[0] = BINARY_WS_MAGIC;
+    var encoder = new TextEncoder();
+    frame.set(encoder.encode(wsId), 1);
+    frame.set(payload, 37);
+    bulkChannel.send(frame);
   }
 
   class DCWebSocket {
@@ -759,18 +1040,36 @@
     send(data) {
       if (this.readyState !== 1) throw new DOMException("WebSocket not open", "InvalidStateError");
       if (typeof data === "string") {
+        // Text messages always go via JSON on control channel
         dataChannel.send(JSON.stringify({ type: "ws_message", id: this._id, data: data, binary: false }));
-      } else if (data instanceof ArrayBuffer) {
-        dataChannel.send(JSON.stringify({ type: "ws_message", id: this._id, data: bufToBase64(new Uint8Array(data)), binary: true }));
-      } else if (ArrayBuffer.isView(data)) {
-        dataChannel.send(JSON.stringify({ type: "ws_message", id: this._id, data: bufToBase64(new Uint8Array(data.buffer, data.byteOffset, data.byteLength)), binary: true }));
-      } else if (data instanceof Blob) {
-        const wsId = this._id;
-        const ws = this;
-        data.arrayBuffer().then(function (buf) {
-          if (ws.readyState !== 1) return;
-          dataChannel.send(JSON.stringify({ type: "ws_message", id: wsId, data: bufToBase64(new Uint8Array(buf)), binary: true }));
-        });
+      } else if (bulkEnabled && bulkChannel && bulkChannel.readyState === "open") {
+        // Binary fast-path: send raw binary on bulk channel (no base64/JSON)
+        if (data instanceof ArrayBuffer) {
+          sendBinaryWsFrame(this._id, new Uint8Array(data));
+        } else if (ArrayBuffer.isView(data)) {
+          sendBinaryWsFrame(this._id, new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+        } else if (data instanceof Blob) {
+          var wsId = this._id;
+          var ws = this;
+          data.arrayBuffer().then(function (buf) {
+            if (ws.readyState !== 1 || !bulkChannel || bulkChannel.readyState !== "open") return;
+            sendBinaryWsFrame(wsId, new Uint8Array(buf));
+          });
+        }
+      } else {
+        // Fallback: JSON+base64 path (single-channel mode or bulk not ready)
+        if (data instanceof ArrayBuffer) {
+          dataChannel.send(JSON.stringify({ type: "ws_message", id: this._id, data: bufToBase64(new Uint8Array(data)), binary: true }));
+        } else if (ArrayBuffer.isView(data)) {
+          dataChannel.send(JSON.stringify({ type: "ws_message", id: this._id, data: bufToBase64(new Uint8Array(data.buffer, data.byteOffset, data.byteLength)), binary: true }));
+        } else if (data instanceof Blob) {
+          const wsId = this._id;
+          const ws = this;
+          data.arrayBuffer().then(function (buf) {
+            if (ws.readyState !== 1) return;
+            dataChannel.send(JSON.stringify({ type: "ws_message", id: wsId, data: bufToBase64(new Uint8Array(buf)), binary: true }));
+          });
+        }
       }
     }
 
@@ -798,6 +1097,12 @@
       } else {
         payload = data;
       }
+      this._dispatch("message", new MessageEvent("message", { data: payload }));
+    }
+
+    /** Receive binary data directly from bulk channel (no base64 decode needed). */
+    _fireMessageBinary(arrayBuffer) {
+      var payload = this.binaryType === "arraybuffer" ? arrayBuffer : new Blob([arrayBuffer]);
       this._dispatch("message", new MessageEvent("message", { data: payload }));
     }
 
