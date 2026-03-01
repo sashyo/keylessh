@@ -256,6 +256,8 @@
   }
 
   function setupControlChannel() {
+    controlChannel.binaryType = "arraybuffer";
+
     controlChannel.onopen = function () {
       console.log("[RDP] Control channel open");
       // Send capabilities
@@ -270,7 +272,11 @@
 
     controlChannel.onmessage = function (event) {
       try {
-        var msg = JSON.parse(event.data);
+        var data = event.data;
+        if (data instanceof ArrayBuffer) {
+          data = new TextDecoder().decode(data);
+        }
+        var msg = JSON.parse(data);
         handleControlMessage(msg);
       } catch (e) {
         // ignore
