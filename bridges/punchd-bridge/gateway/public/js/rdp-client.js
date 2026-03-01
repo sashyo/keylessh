@@ -98,6 +98,7 @@
       headers.cookie = "gateway_access=" + sessionToken;
     }
 
+    console.log("[RDP] DCWebSocket sending ws_open:", wsPath, "id:", this._id);
     controlChannel.send(JSON.stringify({
       type: "ws_open",
       id: this._id,
@@ -125,6 +126,7 @@
 
   DCWebSocket.prototype.send = function (data) {
     if (this.readyState !== 1) throw new DOMException("WebSocket not open", "InvalidStateError");
+    console.log("[RDP] DCWebSocket send, id:", this._id, "type:", typeof data, "isArrayBuffer:", data instanceof ArrayBuffer, "isView:", ArrayBuffer.isView(data), "size:", data.byteLength || data.length || 0);
     if (typeof data === "string") {
       controlChannel.send(JSON.stringify({ type: "ws_message", id: this._id, data: data, binary: false }));
     } else if (bulkEnabled && bulkChannel && bulkChannel.readyState === "open") {
@@ -165,6 +167,7 @@
   };
 
   DCWebSocket.prototype._fireOpen = function (protocol) {
+    console.log("[RDP] DCWebSocket _fireOpen, id:", this._id);
     this.readyState = 1;
     this.protocol = protocol || "";
     this._dispatch("open", new Event("open"));
@@ -184,11 +187,13 @@
   };
 
   DCWebSocket.prototype._fireMessageBinary = function (arrayBuffer) {
+    console.log("[RDP] DCWebSocket _fireMessageBinary, id:", this._id, "bytes:", arrayBuffer.byteLength);
     var payload = this.binaryType === "arraybuffer" ? arrayBuffer : new Blob([arrayBuffer]);
     this._dispatch("message", new MessageEvent("message", { data: payload }));
   };
 
   DCWebSocket.prototype._fireClose = function (code, reason) {
+    console.log("[RDP] DCWebSocket _fireClose, id:", this._id, "code:", code, "reason:", reason);
     if (this.readyState === 3) return;
     this.readyState = 3;
     dcWebSockets.delete(this._id);
@@ -196,6 +201,7 @@
   };
 
   DCWebSocket.prototype._fireError = function (message) {
+    console.error("[RDP] DCWebSocket _fireError, id:", this._id, "message:", message);
     dcWebSockets.delete(this._id);
     this._dispatch("error", new Event("error"));
     this._fireClose(1006, message || "Connection failed");
@@ -210,9 +216,15 @@
   function installWebSocketShim() {
     window.WebSocket = function (url, protocols) {
       var parsed = new URL(url, window.location.origin);
-      if (parsed.origin !== window.location.origin || !controlChannel || controlChannel.readyState !== "open") {
+      // Compare hostname+port only — wss:// vs https:// have different scheme
+      // but should be treated as same-origin for our DataChannel tunnel
+      var parsedPort = parsed.port || (parsed.protocol === "wss:" ? "443" : parsed.protocol === "ws:" ? "80" : "");
+      var locPort = window.location.port || (window.location.protocol === "https:" ? "443" : "80");
+      var sameHost = parsed.hostname === window.location.hostname && parsedPort === locPort;
+      if (!sameHost || !controlChannel || controlChannel.readyState !== "open") {
         return new NativeWebSocket(url, protocols);
       }
+      console.log("[RDP] DCWebSocket shim intercepting:", url);
       return new DCWebSocket(url, protocols);
     };
     window.WebSocket.CONNECTING = 0;
