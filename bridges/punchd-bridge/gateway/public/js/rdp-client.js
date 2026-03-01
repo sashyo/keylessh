@@ -610,6 +610,14 @@
       console.log("[RDP] Proxy address:", proxyAddress);
       console.log("[RDP] Destination:", backendName);
 
+      // Use device pixels for crisp rendering on HiDPI/Retina displays
+      var dpr = window.devicePixelRatio || 1;
+      var canvasWidth = Math.floor(window.innerWidth * dpr);
+      var canvasHeight = Math.floor(window.innerHeight * dpr);
+      rdpCanvas.width = canvasWidth;
+      rdpCanvas.height = canvasHeight;
+      console.log("[RDP] Canvas size:", canvasWidth, "x", canvasHeight, "dpr:", dpr);
+
       var builder = new wasm.SessionBuilder();
       builder = builder.username(username);
       builder = builder.password(password);
@@ -617,10 +625,7 @@
       builder = builder.proxyAddress(proxyAddress);
       builder = builder.authToken(sessionToken);
       builder = builder.renderCanvas(rdpCanvas);
-      builder = builder.desktopSize(new wasm.DesktopSize(
-        Math.floor(window.innerWidth),
-        Math.floor(window.innerHeight)
-      ));
+      builder = builder.desktopSize(new wasm.DesktopSize(canvasWidth, canvasHeight));
       builder = builder.setCursorStyleCallback(function (kind, data, hotspotX, hotspotY) {
         if (kind === "default") {
           rdpCanvas.style.cursor = "default";
@@ -690,8 +695,8 @@
         var rect = rdpCanvas.getBoundingClientRect();
         var scaleX = rdpCanvas.width / rect.width;
         var scaleY = rdpCanvas.height / rect.height;
-        var x = Math.round(e.clientX * scaleX);
-        var y = Math.round(e.clientY * scaleY);
+        var x = Math.round((e.clientX - rect.left) * scaleX);
+        var y = Math.round((e.clientY - rect.top) * scaleY);
         var tx = new InputTransaction();
         tx.addEvent(DeviceEvent.mouseMove(x, y));
         rdpSession.applyInputs(tx);
@@ -866,10 +871,12 @@
   window.addEventListener("resize", function () {
     if (rdpSession && !rdpCanvas.classList.contains("hidden")) {
       try {
-        rdpSession.resize(
-          Math.floor(window.innerWidth),
-          Math.floor(window.innerHeight)
-        );
+        var dpr = window.devicePixelRatio || 1;
+        var w = Math.floor(window.innerWidth * dpr);
+        var h = Math.floor(window.innerHeight * dpr);
+        rdpCanvas.width = w;
+        rdpCanvas.height = h;
+        rdpSession.resize(w, h);
       } catch (e) { /* ignore */ }
     }
   });
