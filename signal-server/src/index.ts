@@ -22,7 +22,7 @@ import { createHttpRelay, handleHttpResponse, handleHttpResponseStart, handleHtt
  * - API_SECRET: Shared secret for gateway registration authentication
  * - ICE_SERVERS: Comma-separated STUN server URLs (e.g. "stun:relay.example.com:3478")
  * - TURN_SERVER: TURN server URL for WebRTC relay fallback (e.g. "turn:relay.example.com:3478")
- * - TURN_SECRET: Shared secret for TURN REST API ephemeral credentials (HMAC-SHA256)
+ * - TURN_SECRET: Shared secret for TURN REST API ephemeral credentials (HMAC-SHA1)
  * - TLS_CERT_PATH: Path to TLS certificate file (enables HTTPS/WSS)
  * - TLS_KEY_PATH: Path to TLS private key file
  */
@@ -408,7 +408,7 @@ const requestHandler = async (req: import("http").IncomingMessage, res: import("
       // Generate ephemeral TURN credentials (valid for 1 hour)
       const expiry = Math.floor(Date.now() / 1000) + 3600;
       const turnUsername = `${expiry}`;
-      const turnPassword = createHmac("sha256", TURN_SECRET)
+      const turnPassword = createHmac("sha1", TURN_SECRET)
         .update(turnUsername)
         .digest("base64");
       webrtcConfig.turnServer = TURN_SERVER;

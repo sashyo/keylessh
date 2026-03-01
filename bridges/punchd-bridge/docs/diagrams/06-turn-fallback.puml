@@ -43,7 +43,7 @@ stun --> browser : 401 Unauthorized\nREALM: "keylessh"\nNONCE: "abc123"
 
 browser -> stun : Allocate Request\nUsername: "1708000000"\nRealm: "keylessh"\nNonce: "abc123"\nMESSAGE-INTEGRITY
 
-stun -> stun : Validate:\n1. timestamp > now? (not expired)\n2. password = HMAC-SHA256(secret, username)\n3. key = MD5(user:realm:pass)\n4. verify MESSAGE-INTEGRITY
+stun -> stun : Validate:\n1. timestamp > now? (not expired)\n2. password = HMAC-SHA1(secret, username)\n3. key = MD5(user:realm:pass)\n4. verify MESSAGE-INTEGRITY
 
 stun -> relay : Bind UDP socket\non random port 49152-65535
 activate relay
@@ -69,7 +69,7 @@ sig -> gw : forward candidate
 
 note over browser, gw
   Gateway also gets TURN credentials
-  (HMAC-SHA256) and may allocate its own
+  (HMAC-SHA1) and may allocate its own
   relay, or connect directly to the
   browser's relay address.
 end note

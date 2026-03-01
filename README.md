@@ -29,15 +29,15 @@ The result: enterprise-grade SSH access control without any private keys to mana
 
 ## Features
 
-- **Browser-side SSH** via `@microsoft/dev-tunnels-ssh` + `xterm.js`
+- **Browser-side SSH** via `@microsoft/dev-tunnels-ssh` + `xterm.js`, with no private keys anywhere
 - **SFTP file browser** - Browse, upload, download, rename, delete files via split-panel UI
 - **Quorum-based RBAC, zero-knowledge OIDC login** with TideCloak - no passwords, no keys
-- **Programmable policy encforcement** with Forseti contracts for SSH access
-- **Simple, static, trustless SSH account access** (e.g., only `ssh:root` role holders can SSH as root)
-- **Admin UX**: servers, users, roles, policy templates, change requests (access, roles, policies), sessions, logs
-- **Optional external bastion** (`bridges/tcp-bridge`) for scalable WS↔TCP tunneling
-- **NAT-traversing HTTP gateway** (`bridges/punchd-bridge`) with WebRTC P2P upgrade
-- **Browser-based RDP** via IronRDP WASM + RDCleanPath protocol (through punchd-bridge)
+- **Programmable policy enforcement** with Forseti contracts for SSH access
+- **Admin UX**: servers, users, roles, policy templates, change requests, sessions, logs
+- **Browser-based RDP** - full Windows remote desktop in a browser tab via [IronRDP](https://github.com/Devolutions/IronRDP) WASM. No client install, no ports to open, no VPN. See [RDP Architecture](bridges/punchd-bridge/docs/ARCHITECTURE.md#rdp-remote-desktop-ironrdp-wasm--rdcleanpath).
+- **P2P DataChannel transport** - automatic upgrade from HTTP relay to direct peer-to-peer WebRTC, with a Service Worker that silently reroutes all browser fetches through the encrypted DataChannel. See [Connection Lifecycle](bridges/punchd-bridge/docs/ARCHITECTURE.md#connection-lifecycle).
+- **Signal server** (`signal-server/`) - coordinates P2P connections between browsers and gateways via WebSocket signaling (SDP/ICE), relays HTTP traffic before DataChannel is ready, and generates ephemeral TURN credentials. Deployed with a coturn sidecar for STUN NAT discovery and TURN relay fallback. See [Architecture](bridges/punchd-bridge/docs/ARCHITECTURE.md#system-overview).
+- **Multi-backend routing** (`bridges/punchd-bridge`) - proxy to multiple HTTP backends and RDP servers from a single gateway. See [Multi-Backend Routing](bridges/punchd-bridge/docs/ARCHITECTURE.md#multi-backend-routing).
 
 ## Project Structure
 
@@ -63,8 +63,8 @@ keylessh/
 
 ### Component docs
 
-- **Punch'd Bridge** — NAT-traversing HTTP reverse proxy that lets you expose local web apps and RDP desktops through a public signal server without port forwarding. Starts with HTTP relay over WebSocket, then upgrades to peer-to-peer WebRTC DataChannels. Supports browser-based RDP via IronRDP WASM and the RDCleanPath protocol. See [bridges/punchd-bridge/docs/ARCHITECTURE.md](bridges/punchd-bridge/docs/ARCHITECTURE.md) for the full connection lifecycle, PlantUML diagrams, multi-backend routing, and RDP architecture.
-- **Signal Server** — Public signaling hub that brokers WebSocket connections between gateways and clients. Handles gateway registration, ICE candidate exchange, HTTP request relay, and TURN credential provisioning. Deployed alongside a coturn sidecar for STUN/TURN. See [signal-server/deploy.sh](signal-server/deploy.sh) for the automated VM deployment script.
+- [Punch'd Bridge](bridges/punchd-bridge/docs/ARCHITECTURE.md) — [connection lifecycle](bridges/punchd-bridge/docs/ARCHITECTURE.md#connection-lifecycle) (portal → relay → P2P → SW takeover), [RDP/RDCleanPath](bridges/punchd-bridge/docs/ARCHITECTURE.md#rdp-remote-desktop-ironrdp-wasm--rdcleanpath), [multi-backend routing](bridges/punchd-bridge/docs/ARCHITECTURE.md#multi-backend-routing), [DataChannel messages](bridges/punchd-bridge/docs/ARCHITECTURE.md#datachannel-messages-gateway--browser), [API endpoints](bridges/punchd-bridge/docs/ARCHITECTURE.md#signal-server-api-routes), [security & rate limits](bridges/punchd-bridge/docs/ARCHITECTURE.md#security), [sequence diagrams](bridges/punchd-bridge/docs/diagrams/)
+- [Signal Server](signal-server/deploy.sh) — WebSocket signaling (SDP/ICE), HTTP relay, gateway registry, TURN credential generation, coturn sidecar for STUN/TURN
 
 ## Quickstart (Local Dev)
 
