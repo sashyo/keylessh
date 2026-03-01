@@ -656,10 +656,23 @@
       case 2: return handleBell();
       case 3: return handleServerCutText();
       default:
-        console.warn("[VNC] Unknown server message type:", msgType,
-          "bufLen:", recvBuf.length);
-        disconnectVnc("Unknown server message: " + msgType);
-        return 0;
+        // TightVNC sends trailing padding bytes after FramebufferUpdate.
+        // Scan forward to find the start of the next 0x00 byte (FramebufferUpdate),
+        // which is the most common message after an incremental update request.
+        // Look for 0x00 followed by a plausible rect count at offset +2..+3.
+        for (var skip = 1; skip < recvBuf.length - 3; skip++) {
+          // FramebufferUpdate header: [type=0x00][pad=0x00][nRects:u16]
+          if (recvBuf[skip] === 0x00 && recvBuf[skip + 1] === 0x00) {
+            var nRects = (recvBuf[skip + 2] << 8) | recvBuf[skip + 3];
+            if (nRects > 0 && nRects < 1000) {
+              console.debug("[VNC] Skipped", skip, "trailing padding bytes");
+              return skip;
+            }
+          }
+        }
+        // Could not find a valid message start — skip all and wait for more data
+        console.debug("[VNC] Skipped", recvBuf.length, "bytes (no valid message found)");
+        return recvBuf.length;
     }
   }
 
@@ -860,21 +873,6 @@
       }
 
       if (fbUpdatePixelsLeft <= 0) {
-        // Some VNC servers (TightVNC) send trailing per-scanline padding
-        // bytes after the pixel data. Skip them inline by scanning for
-        // 4-byte BGRX pixel patterns (byte[3] == 0xFF, byte[0] > 3).
-        // Only applies to the last rect in the update.
-        if (fbUpdateRemaining <= 1) {
-          var padStart = available;
-          while (available + 4 <= recvBuf.length &&
-                 recvBuf[available + 3] === 0xFF &&
-                 recvBuf[available] > 3) {
-            available += 4;
-          }
-          if (available > padStart) {
-            console.warn("[VNC] Skipped", available - padStart, "trailing padding bytes");
-          }
-        }
         finishRect();
       }
 
