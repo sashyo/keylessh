@@ -54,7 +54,7 @@
   let dataChannel = null;      // Control channel ("http-tunnel")
   let bulkChannel = null;      // Bulk data channel ("bulk-data")
   let bulkEnabled = false;     // True after capability handshake confirms bulk support
-  let clientId = "client-" + Math.random().toString(36).slice(2, 10);
+  let clientId = "client-" + crypto.randomUUID().replace(/-/g, "").slice(0, 8);
   let pairedGatewayId = null;
   let config = null;
   let sessionToken = null;

@@ -489,6 +489,7 @@ export function createProxy(options: ProxyOptions): {
   // token simultaneously. TideCloak rotates refresh tokens on use, so the
   // second concurrent refresh fails (old token consumed). Fix: deduplicate
   // concurrent refreshes and cache the result briefly.
+  // Cache is keyed by refresh token to prevent cross-user token leaks.
   interface RefreshResult {
     accessToken: string;
     expiresIn: number;
@@ -496,20 +497,22 @@ export function createProxy(options: ProxyOptions): {
     refreshExpiresIn?: number;
     timestamp: number;
   }
-  let lastRefreshResult: RefreshResult | null = null;
-  let refreshInFlight: Promise<RefreshResult | null> | null = null;
+  const refreshCache = new Map<string, RefreshResult>();
+  const refreshInFlightMap = new Map<string, Promise<RefreshResult | null>>();
 
   async function deduplicatedRefresh(refreshToken: string): Promise<RefreshResult | null> {
     // Reuse a recent result (< 60 seconds) — prevents hammering TideCloak
     // when multiple requests trigger refresh simultaneously or in quick succession
-    if (lastRefreshResult && Date.now() - lastRefreshResult.timestamp < 60_000) {
-      return lastRefreshResult;
+    const cached = refreshCache.get(refreshToken);
+    if (cached && Date.now() - cached.timestamp < 60_000) {
+      return cached;
     }
-    // If a refresh is already in flight, wait for it
-    if (refreshInFlight) {
-      return refreshInFlight;
+    // If a refresh is already in flight for this token, wait for it
+    const inFlight = refreshInFlightMap.get(refreshToken);
+    if (inFlight) {
+      return inFlight;
     }
-    refreshInFlight = (async () => {
+    const promise = (async () => {
       try {
         const tokens = await refreshAccessToken(
           serverEndpoints,
@@ -523,20 +526,38 @@ export function createProxy(options: ProxyOptions): {
           refreshExpiresIn: tokens.refresh_expires_in,
           timestamp: Date.now(),
         };
-        lastRefreshResult = result;
+        // Evict old entries to prevent unbounded growth
+        if (refreshCache.size > 100) {
+          const oldest = refreshCache.keys().next().value;
+          if (oldest !== undefined) refreshCache.delete(oldest);
+        }
+        refreshCache.set(refreshToken, result);
         return result;
       } catch (err) {
         console.log("[Gateway] Deduplicated refresh failed:", err);
         return null;
       } finally {
-        refreshInFlight = null;
+        refreshInFlightMap.delete(refreshToken);
       }
     })();
-    return refreshInFlight;
+    refreshInFlightMap.set(refreshToken, promise);
+    return promise;
   }
 
   const isTls = !!options.tls;
   _useSecureCookies = isTls;
+
+  // Rate limiter for /auth/session-token (per-IP sliding window)
+  const sessionTokenHits = new Map<string, number[]>();
+  // Evict stale IPs every 5 minutes
+  setInterval(() => {
+    const now = Date.now();
+    for (const [ip, times] of sessionTokenHits) {
+      if (times.length === 0 || now - times[times.length - 1] > 120_000) {
+        sessionTokenHits.delete(ip);
+      }
+    }
+  }, 300_000).unref();
 
   /** Get browser-facing OIDC endpoints.
    *  Uses authServerPublicUrl if explicitly set, otherwise returns relative
@@ -548,15 +569,16 @@ export function createProxy(options: ProxyOptions): {
     return getOidcEndpoints(options.tcConfig, "");
   }
 
+  // CSP is NOT set as a blanket header. The gateway proxies third-party
+  // backend HTML and injects scripts into it; a nonce-based CSP would break
+  // the backend's own inline scripts, and 'unsafe-inline' provides no real
+  // protection. Backends should set their own CSP in their responses.
+
   const requestHandler = async (req: IncomingMessage, res: ServerResponse) => {
-      // ── Security headers ──────────────────────────────────────────
+      // ── Security headers (applied to all responses) ────────────────
       res.setHeader("X-Content-Type-Options", "nosniff");
       res.setHeader("X-Frame-Options", "SAMEORIGIN");
       res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
-      res.setHeader(
-        "Content-Security-Policy",
-        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' wss: ws:; img-src 'self' data: blob:; media-src 'self' blob:; worker-src 'self' blob:; frame-ancestors 'self'"
-      );
       if (isTls) {
         res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
       }
@@ -762,6 +784,22 @@ export function createProxy(options: ProxyOptions): {
           res.writeHead(403, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Missing X-Requested-With header" }));
           return;
+        }
+        // Rate limit: max 6 requests per minute per IP
+        const stIp = req.socket.remoteAddress || "unknown";
+        const stNow = Date.now();
+        const stHistory = sessionTokenHits.get(stIp);
+        if (stHistory) {
+          // Evict entries older than 60s
+          while (stHistory.length > 0 && stNow - stHistory[0] > 60_000) stHistory.shift();
+          if (stHistory.length >= 6) {
+            res.writeHead(429, { "Content-Type": "application/json", "Retry-After": "10" });
+            res.end(JSON.stringify({ error: "Too many requests" }));
+            return;
+          }
+          stHistory.push(stNow);
+        } else {
+          sessionTokenHits.set(stIp, [stNow]);
         }
         const cookies = parseCookies(req.headers.cookie);
         let accessToken = cookies["gateway_access"];
