@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Remote Desktop</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #1a1a2e; color: #e0e0e0; font-family: system-ui, sans-serif; overflow: hidden; }
+    #status-bar {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 10;
+      display: flex; align-items: center; gap: 12px;
+      padding: 8px 16px; background: rgba(0,0,0,0.85);
+      font-size: 13px; transition: opacity 0.3s;
+    }
+    #status-bar.connected { opacity: 0; pointer-events: none; }
+    #status-bar:hover { opacity: 1 !important; pointer-events: auto; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .dot.connecting { background: #f0a500; }
+    .dot.connected  { background: #4ecca3; }
+    .dot.error      { background: #e74c3c; }
+    #status-text { flex: 1; }
+    #disconnect-btn {
+      padding: 4px 12px; border: 1px solid #666; border-radius: 4px;
+      background: transparent; color: #ccc; cursor: pointer; font-size: 12px;
+    }
+    #disconnect-btn:hover { background: #e74c3c; border-color: #e74c3c; color: #fff; }
+    #rdp-canvas {
+      display: block; width: 100vw; height: 100vh;
+      background: #0f0f23; cursor: default; outline: none;
+    }
+    #connect-form {
+      position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+      background: #16213e; padding: 32px; border-radius: 12px;
+      min-width: 360px; box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    }
+    #connect-form h2 { margin-bottom: 20px; font-weight: 500; }
+    #connect-form .field { margin-bottom: 16px; }
+    #connect-form label { display: block; margin-bottom: 4px; font-size: 13px; color: #aaa; }
+    #connect-form input {
+      width: 100%; padding: 8px 12px; border: 1px solid #333; border-radius: 6px;
+      background: #0f0f23; color: #e0e0e0; font-size: 14px;
+    }
+    #connect-form button {
+      width: 100%; padding: 10px; border: none; border-radius: 6px;
+      background: #4ecca3; color: #1a1a2e; font-size: 14px; font-weight: 600;
+      cursor: pointer;
+    }
+    #connect-form button:hover { background: #3db890; }
+    #connect-form button:disabled { background: #555; cursor: not-allowed; }
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+  <div id="status-bar">
+    <span class="dot connecting" id="status-dot"></span>
+    <span id="status-text">Initializing...</span>
+    <button id="disconnect-btn" class="hidden">Disconnect</button>
+  </div>
+
+  <div id="connect-form">
+    <h2>Remote Desktop</h2>
+    <div class="field">
+      <label>Username</label>
+      <input type="text" id="rdp-username" autocomplete="username">
+    </div>
+    <div class="field">
+      <label>Password</label>
+      <input type="password" id="rdp-password" autocomplete="current-password">
+    </div>
+    <button id="connect-btn">Connect</button>
+    <p id="form-error" style="margin-top: 12px; color: #e74c3c; font-size: 13px;"></p>
+  </div>
+
+  <canvas id="rdp-canvas" class="hidden" tabindex="0"></canvas>
+
+  <script src="/js/rdp-client.js"></script>
+</body>
+</html>

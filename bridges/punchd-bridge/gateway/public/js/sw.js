@@ -90,7 +90,7 @@ function findAnyDcClient() {
 }
 
 /** Gateway-internal paths — skip DataChannel, go through relay. */
-var GATEWAY_PATHS = /^\/(js\/|auth\/|login|webrtc-config|_idp\/|realms\/|resources\/|portal|health)/;
+var GATEWAY_PATHS = /^\/(js\/|auth\/|login|webrtc-config|rdp|_idp\/|realms\/|resources\/|portal|health)/;
 
 /** Fetch with retry — retries on network errors and non-ok responses. */
 function fetchWithRetry(request, retries, delay) {

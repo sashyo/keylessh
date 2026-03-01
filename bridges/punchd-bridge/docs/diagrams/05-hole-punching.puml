@@ -36,9 +36,9 @@ browser -> sig : GET /webrtc-config (via relay)
 sig --> browser : { stunServer, turnServer,\n  turnUsername, turnPassword }
 
 note over sig
-  Credentials use HMAC-SHA256:
+  Credentials use HMAC-SHA1:
   user = unix_expiry
-  pass = Base64(HMAC-SHA256(secret, user))
+  pass = Base64(HMAC-SHA1(secret, user))
 end note
 
 == 2. SDP Offer/Answer Exchange ==

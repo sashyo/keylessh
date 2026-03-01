@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Server, Terminal, Clock, Activity, ArrowRight, HelpCircle, AlertCircle, X, Globe, ExternalLink, Search, LayoutGrid, List } from "lucide-react";
+import { Server, Terminal, Clock, Activity, ArrowRight, HelpCircle, AlertCircle, X, Globe, ExternalLink, Search, LayoutGrid, List, Monitor } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
 import { Input } from "@/components/ui/input";
 import type { ServerWithAccess, ActiveSession } from "@shared/schema";
@@ -17,7 +17,8 @@ import { api, type GatewayEndpoint } from "@/lib/api";
 
 type ServiceItem =
   | { kind: "ssh"; server: ServerWithAccess }
-  | { kind: "web"; endpoint: GatewayEndpoint; backend: { name: string; accessible?: boolean } };
+  | { kind: "web"; endpoint: GatewayEndpoint; backend: { name: string; protocol?: string; accessible?: boolean } }
+  | { kind: "rdp"; endpoint: GatewayEndpoint; backend: { name: string; protocol?: string; accessible?: boolean } };
 
 function ServerCard({ server, sshBlocked }: { server: ServerWithAccess; sshBlocked?: boolean }) {
   const [selectedUser, setSelectedUser] = useState<string>(server.allowedSshUsers[0] || "");
@@ -229,6 +230,86 @@ function GatewayEndpointCard({ endpoint, backend }: { endpoint: GatewayEndpoint;
   );
 }
 
+function RdpEndpointCard({ endpoint, backend }: { endpoint: GatewayEndpoint; backend: { name: string; accessible?: boolean } }) {
+  const accessible = backend.accessible !== false;
+  const isDisabled = !accessible || !endpoint.online;
+  const handleConnect = () => {
+    // Navigate to the gateway's RDP page via signal server redirect
+    const url = endpoint.signalServerUrl.replace(/\/$/, "");
+    const token = localStorage.getItem("access_token") || "";
+    // Select gateway first, then redirect to /rdp page
+    const params = new URLSearchParams({
+      gateway: endpoint.id,
+      backend: backend.name,
+    });
+    if (token) params.set("token", token);
+    window.open(`${url}/api/select?${params.toString()}&redirect=${encodeURIComponent(`/rdp?backend=${encodeURIComponent(backend.name)}`)}`, "_blank");
+  };
+
+  return (
+    <Card className="group cyber-card hover-neon-glow">
+      <CardHeader className="pb-3">
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-[hsl(var(--neon-blue,210_100%_60%)/0.15)] border border-[hsl(var(--neon-blue,210_100%_60%)/0.3)] group-hover:border-[hsl(var(--neon-blue,210_100%_60%)/0.5)] transition-colors">
+              <Monitor className="h-5 w-5 text-[hsl(var(--neon-blue,210_100%_60%))]" />
+            </div>
+            <div>
+              <CardTitle className="text-base">{backend.name}</CardTitle>
+              <CardDescription className="text-xs">
+                {endpoint.displayName} &middot; Remote Desktop
+              </CardDescription>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <Badge variant="outline" className="text-xs">RDP</Badge>
+            {endpoint.online ? (
+              <Badge variant="outline" className="gap-1.5 label-success">
+                <span className="h-2 w-2 rounded-full bg-[hsl(var(--neon-green))] animate-pulse" />
+                Online
+              </Badge>
+            ) : (
+              <Badge variant="outline" className="gap-1.5 label-danger">
+                <span className="h-2 w-2 rounded-full bg-[hsl(var(--neon-red))]" />
+                Offline
+              </Badge>
+            )}
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {endpoint.description && (
+          <p className="text-sm text-muted-foreground">{endpoint.description}</p>
+        )}
+
+        {!accessible && (
+          <p className="text-xs text-muted-foreground">
+            No access to this endpoint. Ask an admin to grant a role like{" "}
+            <span className="font-mono">dest:{endpoint.id}:{backend.name}</span>.
+          </p>
+        )}
+
+        {isDisabled ? (
+          <Button className="w-full gap-2" disabled>
+            <Monitor className="h-4 w-4" />
+            Connect RDP
+            <ArrowRight className="h-4 w-4" />
+          </Button>
+        ) : (
+          <Button
+            className="w-full gap-2 btn-primary-glow"
+            onClick={handleConnect}
+          >
+            <Monitor className="h-4 w-4" />
+            Connect RDP
+            <ArrowRight className="h-4 w-4" />
+          </Button>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function ServiceListItem({ item, sshBlocked }: { item: ServiceItem; sshBlocked?: boolean }) {
   const [selectedUser, setSelectedUser] = useState<string>(
     item.kind === "ssh" ? item.server.allowedSshUsers[0] || "" : ""
@@ -299,8 +380,9 @@ function ServiceListItem({ item, sshBlocked }: { item: ServiceItem; sshBlocked?:
     );
   }
 
-  // Web endpoint
+  // Web or RDP endpoint
   const { endpoint, backend } = item;
+  const isRdp = item.kind === "rdp";
   const accessible = backend.accessible !== false;
   const isDisabled = !accessible || !endpoint.online;
   const handleConnect = () => {
@@ -308,23 +390,31 @@ function ServiceListItem({ item, sshBlocked }: { item: ServiceItem; sshBlocked?:
     const token = localStorage.getItem("access_token") || "";
     const params = new URLSearchParams({ gateway: endpoint.id, backend: backend.name });
     if (token) params.set("token", token);
+    if (isRdp) {
+      params.set("redirect", `/rdp?backend=${encodeURIComponent(backend.name)}`);
+    }
     window.open(`${url}/api/select?${params.toString()}`, "_blank");
   };
+
+  const Icon = isRdp ? Monitor : Globe;
+  const colorVar = isRdp ? "--neon-blue,210_100%_60%" : "--neon-purple";
+  const connectLabel = isRdp ? "Connect RDP" : "Connect";
 
   return (
     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 py-3 px-4 hover-elevate rounded-md group">
       <div className="flex items-center gap-3 min-w-0">
-        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-[hsl(var(--neon-purple)/0.15)] border border-[hsl(var(--neon-purple)/0.3)]">
-          <Globe className="h-5 w-5 text-[hsl(var(--neon-purple))]" />
+        <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-[hsl(var(${colorVar})/0.15)] border border-[hsl(var(${colorVar})/0.3)]`}>
+          <Icon className={`h-5 w-5 text-[hsl(var(${colorVar}))]`} />
         </div>
         <div className="min-w-0">
           <p className="text-sm font-medium truncate">{backend.name}</p>
           <p className="text-xs text-muted-foreground truncate">
-            {endpoint.displayName}
+            {endpoint.displayName}{isRdp && " \u00b7 Remote Desktop"}
           </p>
         </div>
       </div>
       <div className="flex items-center gap-3 pl-13 sm:pl-0">
+        {isRdp && <Badge variant="outline" className="text-xs shrink-0">RDP</Badge>}
         {endpoint.online ? (
           <Badge variant="outline" className="gap-1.5 label-success shrink-0">
             <span className="h-2 w-2 rounded-full bg-[hsl(var(--neon-green))] animate-pulse" />
@@ -338,13 +428,13 @@ function ServiceListItem({ item, sshBlocked }: { item: ServiceItem; sshBlocked?:
         )}
         {isDisabled ? (
           <Button size="sm" disabled className="gap-1.5 min-h-[36px]">
-            <ExternalLink className="h-4 w-4" />
-            Connect
+            <Icon className="h-4 w-4" />
+            {connectLabel}
           </Button>
         ) : (
           <Button size="sm" className="gap-1.5 btn-primary-glow min-h-[36px]" onClick={handleConnect}>
-            <ExternalLink className="h-4 w-4" />
-            Connect
+            <Icon className="h-4 w-4" />
+            {connectLabel}
           </Button>
         )}
       </div>
@@ -458,7 +548,7 @@ export default function Dashboard() {
 
   const [search, setSearch] = useState("");
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
-  const [typeFilter, setTypeFilter] = useState<"all" | "ssh" | "web">("all");
+  const [typeFilter, setTypeFilter] = useState<"all" | "ssh" | "web" | "rdp">("all");
 
   const allServices: ServiceItem[] = useMemo(() => {
     const items: ServiceItem[] = [];
@@ -468,7 +558,10 @@ export default function Dashboard() {
     for (const endpoint of gatewayEndpoints ?? []) {
       const backends = endpoint.backends?.length > 0 ? endpoint.backends : [{ name: "Default", accessible: true }];
       for (const backend of backends) {
-        items.push({ kind: "web", endpoint, backend });
+        const kind = backend.protocol === "rdp" ? "rdp" : "web";
+        items.push(kind === "rdp"
+          ? { kind: "rdp", endpoint, backend }
+          : { kind: "web", endpoint, backend });
       }
     }
     // Sort: accessible/connectable items first
@@ -486,6 +579,7 @@ export default function Dashboard() {
 
   const sshCount = useMemo(() => allServices.filter((i) => i.kind === "ssh").length, [allServices]);
   const webCount = useMemo(() => allServices.filter((i) => i.kind === "web").length, [allServices]);
+  const rdpCount = useMemo(() => allServices.filter((i) => i.kind === "rdp").length, [allServices]);
 
   const filteredServices = useMemo(() => {
     let list = allServices;
@@ -611,11 +705,22 @@ export default function Dashboard() {
                   <Button
                     variant="ghost"
                     size="sm"
-                    className={`h-9 px-3 rounded-l-none text-xs gap-1.5 ${typeFilter === "web" ? "bg-accent" : ""}`}
+                    className={`h-9 px-3 ${rdpCount > 0 ? "rounded-none border-r border-border" : "rounded-l-none"} text-xs gap-1.5 ${typeFilter === "web" ? "bg-accent" : ""}`}
                     onClick={() => setTypeFilter("web")}
                   >
                     <Globe className="h-3.5 w-3.5" />
                     Endpoints
+                  </Button>
+                )}
+                {rdpCount > 0 && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className={`h-9 px-3 rounded-l-none text-xs gap-1.5 ${typeFilter === "rdp" ? "bg-accent" : ""}`}
+                    onClick={() => setTypeFilter("rdp")}
+                  >
+                    <Monitor className="h-3.5 w-3.5" />
+                    RDP
                   </Button>
                 )}
               </div>
@@ -655,6 +760,8 @@ export default function Dashboard() {
               {filteredServices.map((item) =>
                 item.kind === "ssh" ? (
                   <ServerCard key={item.server.id} server={item.server} sshBlocked={isSshBlocked} />
+                ) : item.kind === "rdp" ? (
+                  <RdpEndpointCard key={`${item.endpoint.signalServerId}-${item.endpoint.id}-${item.backend.name}`} endpoint={item.endpoint} backend={item.backend} />
                 ) : (
                   <GatewayEndpointCard key={`${item.endpoint.signalServerId}-${item.endpoint.id}-${item.backend.name}`} endpoint={item.endpoint} backend={item.backend} />
                 )

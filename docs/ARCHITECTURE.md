@@ -45,7 +45,7 @@ KeyleSSH is a browser-based SSH console with policy-based cryptographic authoriz
 - `signal-server/`: P2P signaling, HTTP relay, and TURN credential generation for punchd-bridge.
 - `bridges/`
   - `tcp-bridge/` (optional external deployment): stateless WS↔TCP forwarder.
-  - `punchd-bridge/`: NAT-traversing HTTP reverse proxy gateway (WebRTC P2P + HTTP relay).
+  - `punchd-bridge/`: NAT-traversing HTTP reverse proxy gateway (WebRTC P2P + HTTP relay + RDP via RDCleanPath).
 - `shared/`: shared types + schema/config.
 
 ## SSH Connection Flow

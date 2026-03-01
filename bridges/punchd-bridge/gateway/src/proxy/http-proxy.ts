@@ -42,7 +42,7 @@ import {
 export interface ProxyOptions {
   listenPort: number;
   backendUrl: string;
-  backends?: { name: string; url: string; noAuth?: boolean; stripAuth?: boolean }[];
+  backends?: { name: string; url: string; protocol?: string; noAuth?: boolean; stripAuth?: boolean }[];
   auth: TidecloakAuth;
   stripAuthHeader: boolean;
   tcConfig: TidecloakConfig;
@@ -125,6 +125,32 @@ function serveFile(
     }
     const content = readFileSync(realPath, "utf-8");
     res.writeHead(200, { "Content-Type": contentType });
+    res.end(content);
+  } catch {
+    res.writeHead(404, { "Content-Type": "text/plain" });
+    res.end("Not found");
+  }
+}
+
+/** Serve a binary static file (e.g. .wasm) without UTF-8 conversion */
+function serveBinaryFile(
+  res: ServerResponse,
+  filename: string,
+  contentType: string
+): void {
+  try {
+    const resolved = resolve(PUBLIC_DIR, filename);
+    const realPath = realpathSync(resolved);
+    if (!realPath.startsWith(PUBLIC_DIR + "/")) {
+      res.writeHead(403, { "Content-Type": "text/plain" });
+      res.end("Forbidden");
+      return;
+    }
+    const content = readFileSync(realPath);
+    res.writeHead(200, {
+      "Content-Type": contentType,
+      "Cache-Control": "public, max-age=86400",
+    });
     res.end(content);
   } catch {
     res.writeHead(404, { "Content-Type": "text/plain" });
@@ -229,10 +255,11 @@ export function createProxy(options: ProxyOptions): {
     rejectedRequests: 0,
   };
 
-  // Build backend lookup map (name → URL)
+  // Build backend lookup map (name → URL) — skip non-HTTP backends (e.g. rdp://)
   const backendMap = new Map<string, URL>();
   if (options.backends?.length) {
     for (const b of options.backends) {
+      if (b.protocol && b.protocol !== "http") continue;
       backendMap.set(b.name, new URL(b.url));
     }
   }
@@ -627,6 +654,20 @@ export function createProxy(options: ProxyOptions): {
         return;
       }
 
+      // WASM files (IronRDP)
+      if (path.startsWith("/wasm/")) {
+        const ext = path.slice(path.lastIndexOf("."));
+        if (ext === ".wasm") {
+          serveBinaryFile(res, path.slice(1), "application/wasm");
+        } else if (ext === ".js") {
+          serveFile(res, path.slice(1), "application/javascript; charset=utf-8");
+        } else {
+          res.writeHead(404);
+          res.end("Not found");
+        }
+        return;
+      }
+
       // Static JS files
       if (path.startsWith("/js/") && path.endsWith(".js")) {
         // Allow SW to control root scope even though it lives under /js/
@@ -635,6 +676,12 @@ export function createProxy(options: ProxyOptions): {
           res.setHeader("Cache-Control", "no-cache");
         }
         serveFile(res, path.slice(1), "application/javascript; charset=utf-8");
+        return;
+      }
+
+      // RDP client page — served without auth (TCP tunnel requires JWT)
+      if (path === "/rdp") {
+        serveFile(res, "rdp.html", "text/html; charset=utf-8");
         return;
       }
 
@@ -1311,7 +1358,7 @@ export function createProxy(options: ProxyOptions): {
                 const safePrefix = backendPrefix.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/</g, "\\x3c");
                 const patchScript = `<script>(function(){` +
                   `var P="${safePrefix}";` +
-                  `var W=/^\\/(js\\/|auth\\/|login|webrtc-config|realms\\/|resources\\/|portal|health)/;` +
+                  `var W=/^\\/(js\\/|auth\\/|login|webrtc-config|rdp|realms\\/|resources\\/|portal|health)/;` +
                   `function n(u){return typeof u==="string"&&u[0]==="/"&&u.indexOf("/__b/")!==0&&!W.test(u)}` +
                   `var F=window.fetch;window.fetch=function(u,i){` +
                     `if(n(u))u=P+u;` +
