@@ -144,10 +144,15 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
     // but the callback was missed.
     const watchdog = setInterval(() => {
       if (!dc.isOpen()) { clearInterval(watchdog); return; }
+      // Resume TCP sockets once queue drains below low-water mark
+      if (queue.length <= QUEUE_LOW_WATER) {
+        for (const stream of state.pausedStreams) {
+          stream.resume();
+        }
+      }
       if (getPaused() && queue.length > 0) {
         const ba = dc.bufferedAmount();
         if (ba <= maxBuffer / 4) {
-          console.log(`[WebRTC] Watchdog: unsticking queue (bufferedAmount=${ba}, queueLen=${queue.length})`);
           setPaused(false);
           drainQueue(dc, queue, maxBuffer, getPaused, setPaused, state);
         }
@@ -155,12 +160,14 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
     }, 200);
   }
 
+  const QUEUE_HIGH_WATER = 5000;  // pause TCP sockets when queue exceeds this
+  const QUEUE_LOW_WATER  = 1000;  // resume TCP sockets when queue drains below this
+
   function drainQueue(dc: DataChannel, queue: Buffer[], maxBuffer: number, getPaused: () => boolean, setPaused: (v: boolean) => void, state: PeerState): void {
     while (queue.length > 0) {
       if (!dc.isOpen()) return;
       if (dc.bufferedAmount() > maxBuffer) {
         setPaused(true);
-        // Pause all in-flight HTTP response streams
         for (const stream of state.pausedStreams) {
           stream.pause();
         }
@@ -170,11 +177,6 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
         const sent = dc.sendMessageBinary(queue[0]);
         if (!sent) {
           setPaused(true);
-          // SCTP rejected the message (congestion / remote window full) —
-          // apply backpressure to TCP sockets so they stop enqueuing data.
-          for (const stream of state.pausedStreams) {
-            stream.pause();
-          }
           return;
         }
       } catch {
@@ -205,6 +207,18 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
 
     if (dc === state.bulkDc) {
       state.bulkQueue.push(buf);
+
+      // Queue-length backpressure: when too many messages are queued,
+      // pause upstream TCP sockets so the VNC/RDP server stops sending.
+      // This prevents unbounded memory growth when the DataChannel can't
+      // drain fast enough.  Sockets are resumed once the queue drains
+      // below the low-water mark (checked in the watchdog interval).
+      if (state.bulkQueue.length > QUEUE_HIGH_WATER) {
+        for (const stream of state.pausedStreams) {
+          stream.pause();
+        }
+      }
+
       if (!state.bulkPaused) {
         drainQueue(dc, state.bulkQueue, BULK_MAX_BUFFER,
           () => state.bulkPaused, (v) => { state.bulkPaused = v; }, state);
