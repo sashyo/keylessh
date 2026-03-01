@@ -349,8 +349,8 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
           // Reply (client may have missed the proactive announcement)
           sendCapabilities(state);
         }
-      } catch {
-        console.error("[WebRTC] Failed to parse DataChannel message");
+      } catch (err) {
+        console.error("[WebRTC] DataChannel message error:", err instanceof Error ? err.message : err);
       }
     });
 
@@ -756,8 +756,10 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
 
     // Resolve backend name → host:port (only rdp:// backends allowed)
     const backendName = msg.backend || "";
+    console.log(`[WebRTC] tcp_open request: backend="${backendName}", available=[${options.backends.map(b => `${b.name}(${b.protocol})`).join(", ")}]`);
     const backend = options.backends.find((b) => b.name === backendName && b.protocol === "rdp");
     if (!backend) {
+      console.warn(`[WebRTC] tcp_open rejected: no matching backend for "${backendName}"`);
       enqueueControl(state, Buffer.from(JSON.stringify({ type: "tcp_error", id: msg.id, message: "Unknown or disallowed backend" })));
       return;
     }
