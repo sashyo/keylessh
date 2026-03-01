@@ -9,6 +9,7 @@
 import WebSocket from "ws";
 import { request as httpRequest } from "http";
 import { request as httpsRequest } from "https";
+import type { JWTPayload } from "jose";
 import { createPeerHandler, type PeerHandler } from "../webrtc/peer-handler.js";
 import type { BackendEntry } from "../config.js";
 
@@ -32,6 +33,10 @@ export interface StunRegistrationOptions {
   metadata?: { displayName?: string; description?: string; backends?: { name: string; protocol?: string }[]; realm?: string };
   /** Backend configurations (needed by peer handler for TCP tunnels) */
   backends?: BackendEntry[];
+  /** JWT verification function (for RDCleanPath auth) */
+  verifyToken?: (token: string) => Promise<JWTPayload | null>;
+  /** TideCloak client ID for dest: role extraction */
+  tcClientId?: string;
   onPaired?: (client: { id: string; reflexiveAddress: string | null }) => void;
   onCandidate?: (fromId: string, candidate: unknown) => void;
 }
@@ -86,6 +91,8 @@ export function registerWithStun(
           gatewayId: options.gatewayId,
           sendSignaling: safeSend,
           backends: options.backends || [],
+          verifyToken: options.verifyToken,
+          tcClientId: options.tcClientId,
         });
         console.log("[STUN-Reg] WebRTC peer handler ready");
       }

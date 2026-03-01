@@ -132,6 +132,32 @@ function serveFile(
   }
 }
 
+/** Serve a binary static file (e.g. .wasm) without UTF-8 conversion */
+function serveBinaryFile(
+  res: ServerResponse,
+  filename: string,
+  contentType: string
+): void {
+  try {
+    const resolved = resolve(PUBLIC_DIR, filename);
+    const realPath = realpathSync(resolved);
+    if (!realPath.startsWith(PUBLIC_DIR + "/")) {
+      res.writeHead(403, { "Content-Type": "text/plain" });
+      res.end("Forbidden");
+      return;
+    }
+    const content = readFileSync(realPath);
+    res.writeHead(200, {
+      "Content-Type": contentType,
+      "Cache-Control": "public, max-age=86400",
+    });
+    res.end(content);
+  } catch {
+    res.writeHead(404, { "Content-Type": "text/plain" });
+    res.end("Not found");
+  }
+}
+
 // ── Redirect helper ──────────────────────────────────────────────
 
 function redirect(res: ServerResponse, location: string, status = 302): void {
@@ -625,6 +651,20 @@ export function createProxy(options: ProxyOptions): {
       if (path === "/favicon.ico") {
         res.writeHead(204);
         res.end();
+        return;
+      }
+
+      // WASM files (IronRDP)
+      if (path.startsWith("/wasm/")) {
+        const ext = path.slice(path.lastIndexOf("."));
+        if (ext === ".wasm") {
+          serveBinaryFile(res, path.slice(1), "application/wasm");
+        } else if (ext === ".js") {
+          serveFile(res, path.slice(1), "application/javascript; charset=utf-8");
+        } else {
+          res.writeHead(404);
+          res.end("Not found");
+        }
         return;
       }
 

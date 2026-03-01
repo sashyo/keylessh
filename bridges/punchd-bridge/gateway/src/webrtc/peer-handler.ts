@@ -19,7 +19,9 @@ import { PeerConnection, DataChannel, setSctpSettings } from "node-datachannel";
 import { request as httpRequest } from "http";
 import { request as httpsRequest } from "https";
 import WebSocket from "ws";
+import type { JWTPayload } from "jose";
 import type { BackendEntry } from "../config.js";
+import { createRDCleanPathSession, type RDCleanPathSession } from "../rdcleanpath/rdcleanpath-handler.js";
 
 export interface PeerHandlerOptions {
   /** STUN server for ICE, e.g. "stun:relay.example.com:3478" */
@@ -38,6 +40,10 @@ export interface PeerHandlerOptions {
   gatewayId: string;
   /** Backend configurations (for TCP tunnel target resolution) */
   backends: BackendEntry[];
+  /** JWT verification function (for RDCleanPath auth) */
+  verifyToken?: (token: string) => Promise<JWTPayload | null>;
+  /** TideCloak client ID for dest: role extraction */
+  tcClientId?: string;
 }
 
 export interface PeerHandler {
@@ -84,6 +90,7 @@ function ensureSctpSettings(): void {
 interface PeerState {
   wsConnections: Map<string, WebSocket>;
   tcpConnections: Map<string, Socket>;
+  rdcleanpathSessions: Map<string, RDCleanPathSession>;
   capabilities: Set<string>;
   controlDc: DataChannel | null;
   bulkDc: DataChannel | null;
@@ -106,6 +113,7 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
       state = {
         wsConnections: new Map(),
         tcpConnections: new Map(),
+        rdcleanpathSessions: new Map(),
         capabilities: new Set(),
         controlDc: null,
         bulkDc: null,
@@ -328,13 +336,24 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
         } else if (parsed.type === "ws_open") {
           handleWsOpen(state, parsed);
         } else if (parsed.type === "ws_message") {
-          const ws = state.wsConnections.get(parsed.id);
-          if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(parsed.binary ? Buffer.from(parsed.data, "base64") : parsed.data);
+          const rdcp = state.rdcleanpathSessions.get(parsed.id);
+          if (rdcp) {
+            rdcp.handleMessage(parsed.binary ? Buffer.from(parsed.data, "base64") : Buffer.from(parsed.data));
+          } else {
+            const ws = state.wsConnections.get(parsed.id);
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              ws.send(parsed.binary ? Buffer.from(parsed.data, "base64") : parsed.data);
+            }
           }
         } else if (parsed.type === "ws_close") {
-          const ws = state.wsConnections.get(parsed.id);
-          if (ws) ws.close(parsed.code || 1000, parsed.reason || "");
+          const rdcp = state.rdcleanpathSessions.get(parsed.id);
+          if (rdcp) {
+            rdcp.close();
+            state.rdcleanpathSessions.delete(parsed.id);
+          } else {
+            const ws = state.wsConnections.get(parsed.id);
+            if (ws) ws.close(parsed.code || 1000, parsed.reason || "");
+          }
         } else if (parsed.type === "tcp_open") {
           handleTcpOpen(state, parsed);
         } else if (parsed.type === "tcp_close") {
@@ -364,6 +383,10 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
         try { sock.destroy(); } catch {}
       }
       state.tcpConnections.clear();
+      for (const [, session] of state.rdcleanpathSessions) {
+        try { session.close(); } catch {}
+      }
+      state.rdcleanpathSessions.clear();
       state.controlDc = null;
     });
   }
@@ -383,6 +406,12 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
       if (buf[0] === BINARY_WS_MAGIC && buf.length >= 37) {
         const wsId = buf.toString("ascii", 1, 37);
         const payload = buf.subarray(37);
+        // Check RDCleanPath sessions first (virtual WS)
+        const rdcp = state.rdcleanpathSessions.get(wsId);
+        if (rdcp) {
+          rdcp.handleMessage(payload);
+          return;
+        }
         const ws = state.wsConnections.get(wsId);
         if (ws && ws.readyState === WebSocket.OPEN) {
           ws.send(payload);
@@ -832,12 +861,19 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
     state: PeerState,
     msg: { id: string; url?: string; protocols?: string[]; headers?: Record<string, string> }
   ): void {
-    if (state.wsConnections.size >= MAX_WS_PER_DC) {
+    if (state.wsConnections.size + state.rdcleanpathSessions.size >= MAX_WS_PER_DC) {
       enqueueControl(state, Buffer.from(JSON.stringify({ type: "ws_error", id: msg.id, message: "Too many WebSocket connections" })));
       return;
     }
 
     const wsPath = msg.url || "/";
+
+    // RDCleanPath virtual WebSocket — handle in-process (no real WS)
+    if (wsPath === "/ws/rdcleanpath" || wsPath.startsWith("/ws/rdcleanpath?")) {
+      handleRDCleanPathWsOpen(state, msg);
+      return;
+    }
+
     if (!wsPath.startsWith("/") || /[\r\n]/.test(wsPath)) {
       enqueueControl(state, Buffer.from(JSON.stringify({ type: "ws_error", id: msg.id, message: "Invalid URL" })));
       return;
@@ -889,6 +925,53 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
 
     state.wsConnections.set(msg.id, ws);
     console.log(`[WebRTC] WS tunnel opened: ${msg.url} (id: ${msg.id})`);
+  }
+
+  // ── RDCleanPath virtual WebSocket handler ─────────────────────
+
+  function handleRDCleanPathWsOpen(
+    state: PeerState,
+    msg: { id: string; url?: string; headers?: Record<string, string> }
+  ): void {
+    if (!options.verifyToken) {
+      enqueueControl(state, Buffer.from(JSON.stringify({ type: "ws_error", id: msg.id, message: "RDCleanPath not configured (no auth)" })));
+      return;
+    }
+
+    // Send ws_opened immediately (virtual WS is always "connected")
+    enqueueControl(state, Buffer.from(JSON.stringify({
+      type: "ws_opened", id: msg.id, protocol: "",
+    })));
+
+    const session = createRDCleanPathSession({
+      sendBinary: (data: Buffer) => {
+        // Use binary WS fast-path via bulk channel when available
+        if (state.capabilities.has("binary-ws") && state.bulkDc?.isOpen()) {
+          const header = Buffer.alloc(37);
+          header[0] = BINARY_WS_MAGIC;
+          header.write(msg.id, 1, "ascii");
+          enqueueBulk(state, Buffer.concat([header, data]));
+        } else {
+          enqueueControl(state, Buffer.from(JSON.stringify({
+            type: "ws_message", id: msg.id,
+            data: data.toString("base64"), binary: true,
+          })));
+        }
+      },
+      sendClose: (code: number, reason: string) => {
+        state.rdcleanpathSessions.delete(msg.id);
+        enqueueControl(state, Buffer.from(JSON.stringify({
+          type: "ws_close", id: msg.id, code, reason,
+        })));
+      },
+      backends: options.backends,
+      verifyToken: options.verifyToken,
+      gatewayId: options.gatewayId,
+      tcClientId: options.tcClientId,
+    });
+
+    state.rdcleanpathSessions.set(msg.id, session);
+    console.log(`[WebRTC] RDCleanPath session opened: ${msg.id}`);
   }
 
   function cleanup(): void {

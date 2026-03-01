@@ -27,7 +27,7 @@
     #disconnect-btn:hover { background: #e74c3c; border-color: #e74c3c; color: #fff; }
     #rdp-canvas {
       display: block; width: 100vw; height: 100vh;
-      background: #0f0f23; cursor: default;
+      background: #0f0f23; cursor: default; outline: none;
     }
     #connect-form {
       position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
@@ -72,7 +72,7 @@
     <p id="form-error" style="margin-top: 12px; color: #e74c3c; font-size: 13px;"></p>
   </div>
 
-  <canvas id="rdp-canvas" class="hidden"></canvas>
+  <canvas id="rdp-canvas" class="hidden" tabindex="0"></canvas>
 
   <script src="/js/rdp-client.js"></script>
 </body>

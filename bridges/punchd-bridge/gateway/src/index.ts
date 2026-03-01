@@ -76,6 +76,8 @@ async function main() {
       realm: tcConfig.realm,
     },
     backends: config.backends,
+    verifyToken: (token: string) => auth.verifyToken(token),
+    tcClientId: tcConfig.resource,
     addresses: [`${getLocalAddress()}:${config.listenPort}`],
     onPaired(client) {
       console.log(
