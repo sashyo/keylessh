@@ -270,6 +270,26 @@
     }
   }
 
+  async function refreshSessionToken() {
+    try {
+      var res = await fetch(SESSION_TOKEN_ENDPOINT, {
+        credentials: "same-origin",
+        headers: { "X-Requested-With": "XMLHttpRequest" },
+      });
+      if (res.status === 401) {
+        throw new Error("Session expired — please reload and log in again");
+      }
+      if (!res.ok) throw new Error("Session token returned " + res.status);
+      var data = await res.json();
+      var newToken = data.token || data.access_token;
+      if (!newToken) throw new Error("No token in response");
+      sessionToken = newToken;
+      console.log("[RDP] Session token refreshed");
+    } catch (err) {
+      throw new Error("Auth refresh failed: " + err.message);
+    }
+  }
+
   // ── Signaling ─────────────────────────────────────────────────
 
   function connectSignaling() {
@@ -565,6 +585,10 @@
 
     try {
       var wasm = await loadWasm();
+
+      // Refresh session token right before connecting (tokens expire after 5 min)
+      setStatus("connecting", "Refreshing auth token...");
+      await refreshSessionToken();
 
       setStatus("connecting", "Connecting to " + backendName + "...");
 
