@@ -10,6 +10,7 @@ import WebSocket from "ws";
 import { request as httpRequest } from "http";
 import { request as httpsRequest } from "https";
 import { createPeerHandler, type PeerHandler } from "../webrtc/peer-handler.js";
+import type { BackendEntry } from "../config.js";
 
 export interface StunRegistrationOptions {
   stunServerUrl: string;
@@ -28,7 +29,9 @@ export interface StunRegistrationOptions {
   /** Shared secret for STUN server API authentication */
   apiSecret?: string;
   /** Metadata for portal display and realm-based routing */
-  metadata?: { displayName?: string; description?: string; backends?: { name: string }[]; realm?: string };
+  metadata?: { displayName?: string; description?: string; backends?: { name: string; protocol?: string }[]; realm?: string };
+  /** Backend configurations (needed by peer handler for TCP tunnels) */
+  backends?: BackendEntry[];
   onPaired?: (client: { id: string; reflexiveAddress: string | null }) => void;
   onCandidate?: (fromId: string, candidate: unknown) => void;
 }
@@ -82,6 +85,7 @@ export function registerWithStun(
           useTls: options.useTls,
           gatewayId: options.gatewayId,
           sendSignaling: safeSend,
+          backends: options.backends || [],
         });
         console.log("[STUN-Reg] WebRTC peer handler ready");
       }

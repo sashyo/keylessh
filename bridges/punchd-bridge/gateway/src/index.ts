@@ -72,9 +72,10 @@ async function main() {
     metadata: {
       displayName: config.displayName,
       description: config.description,
-      backends: config.backends.map((b) => ({ name: b.name })),
+      backends: config.backends.map((b) => ({ name: b.name, protocol: b.protocol || "http" })),
       realm: tcConfig.realm,
     },
+    backends: config.backends,
     addresses: [`${getLocalAddress()}:${config.listenPort}`],
     onPaired(client) {
       console.log(

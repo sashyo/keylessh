@@ -638,6 +638,12 @@ export function createProxy(options: ProxyOptions): {
         return;
       }
 
+      // RDP client page — served without auth (TCP tunnel requires JWT)
+      if (path === "/rdp") {
+        serveFile(res, "rdp.html", "text/html; charset=utf-8");
+        return;
+      }
+
       // WebRTC config — tells the browser how to connect for P2P upgrade
       // TURN credentials require valid JWT to prevent bandwidth abuse
       if (path === "/webrtc-config") {
@@ -1311,7 +1317,7 @@ export function createProxy(options: ProxyOptions): {
                 const safePrefix = backendPrefix.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/</g, "\\x3c");
                 const patchScript = `<script>(function(){` +
                   `var P="${safePrefix}";` +
-                  `var W=/^\\/(js\\/|auth\\/|login|webrtc-config|realms\\/|resources\\/|portal|health)/;` +
+                  `var W=/^\\/(js\\/|auth\\/|login|webrtc-config|rdp|realms\\/|resources\\/|portal|health)/;` +
                   `function n(u){return typeof u==="string"&&u[0]==="/"&&u.indexOf("/__b/")!==0&&!W.test(u)}` +
                   `var F=window.fetch;window.fetch=function(u,i){` +
                     `if(n(u))u=P+u;` +

@@ -14,10 +14,12 @@
  */
 
 import { createHmac } from "crypto";
+import { connect as netConnect, type Socket } from "net";
 import { PeerConnection, DataChannel, setSctpSettings } from "node-datachannel";
 import { request as httpRequest } from "http";
 import { request as httpsRequest } from "https";
 import WebSocket from "ws";
+import type { BackendEntry } from "../config.js";
 
 export interface PeerHandlerOptions {
   /** STUN server for ICE, e.g. "stun:relay.example.com:3478" */
@@ -34,6 +36,8 @@ export interface PeerHandlerOptions {
   sendSignaling: (msg: unknown) => void;
   /** Gateway ID — used as fromId in signaling messages */
   gatewayId: string;
+  /** Backend configurations (for TCP tunnel target resolution) */
+  backends: BackendEntry[];
 }
 
 export interface PeerHandler {
@@ -55,6 +59,9 @@ const COALESCE_TIMEOUT = 1;      // 1ms max coalescing delay
 
 // Binary WebSocket fast-path magic byte (avoids JSON+base64 overhead for gaming)
 const BINARY_WS_MAGIC = 0x02;
+// TCP tunnel binary fast-path magic byte
+const TCP_TUNNEL_MAGIC = 0x03;
+const MAX_TCP_PER_DC = 5;
 
 // Tune SCTP buffers for high-throughput streaming
 let sctpConfigured = false;
@@ -76,6 +83,7 @@ function ensureSctpSettings(): void {
 /** Per-peer state shared between control and bulk channels. */
 interface PeerState {
   wsConnections: Map<string, WebSocket>;
+  tcpConnections: Map<string, Socket>;
   capabilities: Set<string>;
   controlDc: DataChannel | null;
   bulkDc: DataChannel | null;
@@ -97,6 +105,7 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
     if (!state) {
       state = {
         wsConnections: new Map(),
+        tcpConnections: new Map(),
         capabilities: new Set(),
         controlDc: null,
         bulkDc: null,
@@ -283,7 +292,7 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
     peers.set(clientId, pc);
   }
 
-  const GATEWAY_FEATURES = ["bulk-channel", "binary-ws"];
+  const GATEWAY_FEATURES = ["bulk-channel", "binary-ws", "tcp-tunnel"];
 
   function sendCapabilities(state: PeerState): void {
     enqueueControl(state, Buffer.from(JSON.stringify({
@@ -326,6 +335,10 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
         } else if (parsed.type === "ws_close") {
           const ws = state.wsConnections.get(parsed.id);
           if (ws) ws.close(parsed.code || 1000, parsed.reason || "");
+        } else if (parsed.type === "tcp_open") {
+          handleTcpOpen(state, parsed);
+        } else if (parsed.type === "tcp_close") {
+          handleTcpClose(state, parsed.id);
         } else if (parsed.type === "capabilities") {
           // Client capability handshake — respond with our supported features
           const clientFeatures: string[] = parsed.features || [];
@@ -347,6 +360,10 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
         try { ws.close(); } catch {}
       }
       state.wsConnections.clear();
+      for (const [, sock] of state.tcpConnections) {
+        try { sock.destroy(); } catch {}
+      }
+      state.tcpConnections.clear();
       state.controlDc = null;
     });
   }
@@ -369,6 +386,17 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
         const ws = state.wsConnections.get(wsId);
         if (ws && ws.readyState === WebSocket.OPEN) {
           ws.send(payload);
+        }
+        return;
+      }
+
+      // TCP tunnel fast-path: [0x03][36-byte tunnel UUID][payload]
+      if (buf[0] === TCP_TUNNEL_MAGIC && buf.length >= 37) {
+        const tunnelId = buf.toString("ascii", 1, 37);
+        const payload = buf.subarray(37);
+        const sock = state.tcpConnections.get(tunnelId);
+        if (sock && !sock.destroyed) {
+          sock.write(payload);
         }
         return;
       }
@@ -714,6 +742,79 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
       req.end();
     }
   }
+
+  // ── TCP tunnel handlers ────────────────────────────────────────
+
+  function handleTcpOpen(
+    state: PeerState,
+    msg: { id: string; backend?: string }
+  ): void {
+    if (state.tcpConnections.size >= MAX_TCP_PER_DC) {
+      enqueueControl(state, Buffer.from(JSON.stringify({ type: "tcp_error", id: msg.id, message: "Too many TCP tunnels" })));
+      return;
+    }
+
+    // Resolve backend name → host:port (only rdp:// backends allowed)
+    const backendName = msg.backend || "";
+    const backend = options.backends.find((b) => b.name === backendName && b.protocol === "rdp");
+    if (!backend) {
+      enqueueControl(state, Buffer.from(JSON.stringify({ type: "tcp_error", id: msg.id, message: "Unknown or disallowed backend" })));
+      return;
+    }
+
+    // Parse rdp://host:port
+    let host: string;
+    let port: number;
+    try {
+      const url = new URL(backend.url);
+      host = url.hostname;
+      port = parseInt(url.port || "3389", 10);
+    } catch {
+      enqueueControl(state, Buffer.from(JSON.stringify({ type: "tcp_error", id: msg.id, message: "Invalid backend URL" })));
+      return;
+    }
+
+    console.log(`[WebRTC] TCP tunnel opening: ${backendName} → ${host}:${port} (id: ${msg.id})`);
+
+    const sock = netConnect({ host, port });
+
+    sock.on("connect", () => {
+      console.log(`[WebRTC] TCP tunnel connected: ${msg.id} → ${host}:${port}`);
+      enqueueControl(state, Buffer.from(JSON.stringify({ type: "tcp_opened", id: msg.id })));
+    });
+
+    sock.on("data", (data: Buffer) => {
+      if (!state.controlDc?.isOpen()) { sock.destroy(); return; }
+      const header = Buffer.alloc(37);
+      header[0] = TCP_TUNNEL_MAGIC;
+      header.write(msg.id, 1, "ascii");
+      enqueueBulk(state, Buffer.concat([header, data]));
+    });
+
+    sock.on("close", () => {
+      state.tcpConnections.delete(msg.id);
+      enqueueControl(state, Buffer.from(JSON.stringify({ type: "tcp_close", id: msg.id })));
+    });
+
+    sock.on("error", (err: Error) => {
+      console.error(`[WebRTC] TCP tunnel error (${msg.id}): ${err.message}`);
+      state.tcpConnections.delete(msg.id);
+      enqueueControl(state, Buffer.from(JSON.stringify({ type: "tcp_error", id: msg.id, message: err.message })));
+    });
+
+    state.tcpConnections.set(msg.id, sock);
+  }
+
+  function handleTcpClose(state: PeerState, tunnelId: string): void {
+    const sock = state.tcpConnections.get(tunnelId);
+    if (sock) {
+      sock.destroy();
+      state.tcpConnections.delete(tunnelId);
+      console.log(`[WebRTC] TCP tunnel closed: ${tunnelId}`);
+    }
+  }
+
+  // ── WebSocket tunnel handlers ──────────────────────────────────
 
   const MAX_WS_PER_DC = 50;
 

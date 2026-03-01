@@ -7,7 +7,7 @@ import type { WebSocket } from "ws";
 export interface GatewayMetadata {
   displayName?: string;
   description?: string;
-  backends?: { name: string }[];
+  backends?: { name: string; protocol?: string }[];
   realm?: string;
 }
 
