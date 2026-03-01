@@ -657,7 +657,17 @@
       case 2: return handleBell();
       case 3: return handleServerCutText();
       default:
-        console.warn("[VNC] Unknown server message type:", msgType);
+        // Hex dump for diagnosis — likely a framing error (pixel data leak)
+        var dumpEnd = Math.min(32, recvBuf.length);
+        var dumpBytes = [];
+        for (var d = 0; d < dumpEnd; d++) {
+          dumpBytes.push('0x' + recvBuf[d].toString(16).padStart(2, '0'));
+        }
+        console.warn("[VNC] Unknown server message type:", msgType,
+          "bufLen:", recvBuf.length,
+          "fbUpdateRemaining:", fbUpdateRemaining,
+          "fbUpdateBusy:", fbUpdateBusy,
+          "hex:", dumpBytes.join(' '));
         disconnectVnc("Unknown server message: " + msgType);
         return 0;
     }
@@ -670,7 +680,9 @@
     fbUpdateRect = null;
     fbUpdatePixelsLeft = 0;
     fbUpdateBusy = true;
-    console.log("[VNC] FramebufferUpdate:", fbUpdateRemaining, "rects");
+    console.log("[VNC] FramebufferUpdate:", fbUpdateRemaining, "rects",
+      "header:", '0x' + recvBuf[0].toString(16), '0x' + recvBuf[1].toString(16),
+      '0x' + recvBuf[2].toString(16), '0x' + recvBuf[3].toString(16));
     return 4;
   }
 
@@ -699,6 +711,11 @@
     if (!fbUpdateRect) {
       if (recvBuf.length < 12) return 0;
       var encoding = (recvBuf[8] << 24) | (recvBuf[9] << 16) | (recvBuf[10] << 8) | recvBuf[11];
+
+      // CopyRect needs 16 bytes total — check BEFORE setting fbUpdateRect
+      // to avoid stuck-state when we have 12-15 bytes
+      if (encoding === 1 && recvBuf.length < 16) return 0;
+
       fbUpdateRect = {
         x: (recvBuf[0] << 8) | recvBuf[1],
         y: (recvBuf[2] << 8) | recvBuf[3],
@@ -765,6 +782,15 @@
 
       // Raw encoding — need w*h*bpp bytes of pixel data
       fbUpdatePixelsLeft = fbUpdateRect.w * fbUpdateRect.h * serverBytesPerPixel;
+      console.log("[VNC] Raw rect:", fbUpdateRect.w, "x", fbUpdateRect.h,
+        "at", fbUpdateRect.x + "," + fbUpdateRect.y,
+        "bytes:", fbUpdatePixelsLeft);
+
+      // Zero-size rect: nothing to render, finish immediately
+      if (fbUpdatePixelsLeft <= 0) {
+        finishRect();
+      }
+
       return 12;
     }
 
@@ -849,8 +875,20 @@
       }
 
       if (fbUpdatePixelsLeft <= 0) {
+        // Diagnostic: hex dump of bytes right after the pixel data
+        var nextStart = available;
+        var nextEnd = Math.min(nextStart + 32, recvBuf.length);
+        if (nextEnd > nextStart) {
+          var nextBytes = [];
+          for (var nb = nextStart; nb < nextEnd; nb++) {
+            nextBytes.push('0x' + recvBuf[nb].toString(16).padStart(2, '0'));
+          }
+          console.log("[VNC] Rect boundary - next " + (nextEnd - nextStart) + " bytes:", nextBytes.join(' '));
+        }
         console.log("[VNC] Rect complete:", fbUpdateRect.w, "x", fbUpdateRect.h,
-          "at", fbUpdateRect.x + "," + fbUpdateRect.y);
+          "at", fbUpdateRect.x + "," + fbUpdateRect.y,
+          "rectsRemaining:", fbUpdateRemaining - 1,
+          "bufRemaining:", recvBuf.length - available);
         finishRect();
       }
 
