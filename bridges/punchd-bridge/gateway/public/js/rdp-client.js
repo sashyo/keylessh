@@ -649,9 +649,23 @@
       setStatus("error", "Session ended");
       showConnectForm();
     } catch (err) {
-      console.error("[RDP] RDP session error:", err);
+      var errMsg = "";
+      if (err && typeof err.backtrace === "function") {
+        // IronError from WASM
+        var kind = err.kind !== undefined ? err.kind() : "unknown";
+        var bt = err.backtrace();
+        console.error("[RDP] IronError kind:", kind, "backtrace:", bt);
+        var details = typeof err.rdcleanpathDetails === "function" ? err.rdcleanpathDetails() : undefined;
+        if (details) {
+          console.error("[RDP] RDCleanPath details - HTTP:", details.httpStatusCode, "TLS:", details.tlsAlertCode, "WSA:", details.wsaErrorCode);
+        }
+        errMsg = "IronRDP error (kind " + kind + "): " + bt.split("\n")[0];
+      } else {
+        errMsg = err.message || String(err);
+      }
+      console.error("[RDP] RDP session error:", errMsg, err);
       rdpSession = null;
-      setStatus("error", "Connection failed: " + (err.message || err));
+      setStatus("error", "Connection failed: " + errMsg);
       showConnectForm();
     }
   }
