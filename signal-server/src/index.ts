@@ -37,6 +37,12 @@ const TURN_SECRET = process.env.TURN_SECRET || "";
 const TLS_CERT_PATH = process.env.TLS_CERT_PATH || "";
 const TLS_KEY_PATH = process.env.TLS_KEY_PATH || "";
 const useTls = !!(TLS_CERT_PATH && TLS_KEY_PATH);
+const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS
+  ? new Set(process.env.ALLOWED_ORIGINS.split(",").map(o => o.trim()))
+  : null; // null = allow same-origin only (derive from Host header)
+const TRUSTED_PROXIES = process.env.TRUSTED_PROXIES
+  ? new Set(process.env.TRUSTED_PROXIES.split(",").map(p => p.trim()))
+  : null; // null = never trust X-Forwarded-For
 
 // ── TideCloak config + JWKS ──────────────────────────────────────
 
@@ -360,10 +366,17 @@ const requestHandler = async (req: import("http").IncomingMessage, res: import("
   // ── CORS ──────────────────────────────────────────────────────
   const origin = req.headers.origin;
   if (origin) {
-    res.setHeader("Access-Control-Allow-Origin", origin);
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-    res.setHeader("Access-Control-Allow-Credentials", "true");
+    // Validate origin: explicit allowlist, or fall back to same-host check
+    const hostOrigin = `${useTls ? "https" : "http"}://${req.headers.host}`;
+    const allowed = ALLOWED_ORIGINS
+      ? ALLOWED_ORIGINS.has(origin)
+      : origin === hostOrigin;
+    if (allowed) {
+      res.setHeader("Access-Control-Allow-Origin", origin);
+      res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+      res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+      res.setHeader("Access-Control-Allow-Credentials", "true");
+    }
   }
   if (req.method === "OPTIONS" && origin) {
     res.writeHead(204, { "Access-Control-Max-Age": "86400" });
@@ -581,9 +594,11 @@ const connectionsByIp = new Map<string, number>();
 const gatewayWebSockets = new Set<WebSocket>();
 
 signalWss.on("connection", (ws: WebSocket, req) => {
-  const clientIp = (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim()
-    || req.socket.remoteAddress
-    || "unknown";
+  const socketIp = req.socket.remoteAddress || "unknown";
+  const clientIp = (TRUSTED_PROXIES && TRUSTED_PROXIES.has(socketIp)
+    ? (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim()
+    : null)
+    || socketIp;
 
   // Per-IP connection limit
   const ipCount = connectionsByIp.get(clientIp) || 0;
