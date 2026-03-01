@@ -23,6 +23,7 @@ import {
   buildRDCleanPathResponse,
   buildRDCleanPathError,
   RDCLEANPATH_ERROR_GENERAL,
+  RDCLEANPATH_ERROR_NEGOTIATION,
   type RDCleanPathRequest,
 } from "./rdcleanpath.js";
 
@@ -69,8 +70,13 @@ export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCle
   let tlsSocket: TLSSocket | null = null;
   let relayBytesToClient = 0;
   let relayBytesFromClient = 0;
+  let pendingBuffer: Buffer[] = [];
 
   function sendError(errorCode: number, httpStatus?: number, wsaError?: number, tlsAlert?: number): void {
+    console.warn(`[RDCleanPath] Sending error PDU: code=${errorCode}` +
+      (httpStatus !== undefined ? ` http=${httpStatus}` : "") +
+      (wsaError !== undefined ? ` wsa=${wsaError}` : "") +
+      (tlsAlert !== undefined ? ` tls=${tlsAlert}` : ""));
     try {
       const pdu = buildRDCleanPathError({
         errorCode,
@@ -117,7 +123,7 @@ export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCle
       return;
     }
 
-    // Enforce dest: role
+    // Enforce dest/rdp role — accepts dest: (catch-all) or rdp: (protocol-specific)
     const backendName = request.destination;
     if (opts.gatewayId) {
       const realmRoles: string[] = (payload as any)?.realm_access?.roles ?? [];
@@ -128,13 +134,15 @@ export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCle
       const gwIdLower = opts.gatewayId.toLowerCase();
       const backendLower = backendName.toLowerCase();
       const hasAccess = allRoles.some((r: string) => {
-        if (!/^dest:/i.test(r)) return false;
+        if (!/^(dest|rdp):/i.test(r)) return false;
         const firstColon = r.indexOf(":");
         const secondColon = r.indexOf(":", firstColon + 1);
         if (secondColon < 0) return false;
+        const prefix = r.slice(0, firstColon).toLowerCase();
         const gwId = r.slice(firstColon + 1, secondColon);
         const bk = r.slice(secondColon + 1);
-        return gwId.toLowerCase() === gwIdLower && bk.toLowerCase() === backendLower;
+        if (gwId.toLowerCase() !== gwIdLower || bk.toLowerCase() !== backendLower) return false;
+        return prefix === "dest" || prefix === "rdp";
       });
       if (!hasAccess) {
         console.warn(`[RDCleanPath] dest role denied: backend="${backendName}"`);
@@ -197,6 +205,16 @@ export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCle
       state = State.RELAY;
       console.log(`[RDCleanPath] Relay mode active for "${backendName}"`);
 
+      // Flush any data buffered during handshake
+      if (pendingBuffer.length > 0) {
+        console.log(`[RDCleanPath] Flushing ${pendingBuffer.length} buffered message(s)`);
+        for (const buf of pendingBuffer) {
+          relayBytesFromClient += buf.length;
+          tlsSocket.write(buf);
+        }
+        pendingBuffer = [];
+      }
+
       // TLS socket → client
       tlsSocket.on("data", (data: Buffer) => {
         if (state !== State.RELAY) return;
@@ -220,12 +238,27 @@ export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCle
       });
     } catch (err) {
       const msg = (err as Error).message || "Connection failed";
-      console.error(`[RDCleanPath] Connection failed: ${msg}`);
-      // Determine error type
-      if (msg.includes("TLS") || msg.includes("tls")) {
-        sendError(RDCLEANPATH_ERROR_GENERAL, undefined, undefined, 40);
+      console.error(`[RDCleanPath] Connection failed for "${backendName}" (${host}:${port}): ${msg}`);
+
+      // Map error to specific RDCleanPath error codes for IronRDP diagnostics
+      if (msg.includes("TLS handshake timeout")) {
+        sendError(RDCLEANPATH_ERROR_GENERAL, undefined, undefined, 80); // handshake_failure
+      } else if (msg.includes("TLS error") || msg.includes("tls")) {
+        sendError(RDCLEANPATH_ERROR_GENERAL, undefined, undefined, 40); // access_denied
+      } else if (msg.includes("X.224 response timeout")) {
+        sendError(RDCLEANPATH_ERROR_NEGOTIATION, undefined, 10060); // WSAETIMEDOUT
+      } else if (msg.includes("Not a TPKT header") || msg.includes("Invalid TPKT length")) {
+        sendError(RDCLEANPATH_ERROR_NEGOTIATION, undefined, 10054); // WSAECONNRESET
+      } else if (msg.includes("TCP connect timeout")) {
+        sendError(RDCLEANPATH_ERROR_GENERAL, undefined, 10060); // WSAETIMEDOUT
+      } else if (msg.includes("ECONNREFUSED") || msg.includes("connect ECONNREFUSED")) {
+        sendError(RDCLEANPATH_ERROR_GENERAL, undefined, 10061); // WSAECONNREFUSED
+      } else if (msg.includes("EHOSTUNREACH") || msg.includes("ENETUNREACH")) {
+        sendError(RDCLEANPATH_ERROR_GENERAL, undefined, 10065); // WSAEHOSTUNREACH
+      } else if (msg.includes("ENOTFOUND") || msg.includes("getaddrinfo")) {
+        sendError(RDCLEANPATH_ERROR_GENERAL, undefined, 11001); // WSAHOST_NOT_FOUND
       } else {
-        sendError(RDCLEANPATH_ERROR_GENERAL, undefined, 10061);
+        sendError(RDCLEANPATH_ERROR_GENERAL, undefined, 10061); // WSAECONNREFUSED (default)
       }
     }
   }
@@ -250,7 +283,8 @@ export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCle
           break;
 
         case State.CONNECTING:
-          // Buffer or drop — client shouldn't send data during handshake
+          // Buffer data received during handshake — flush once RELAY begins
+          pendingBuffer.push(Buffer.from(data));
           break;
 
         case State.CLOSED:

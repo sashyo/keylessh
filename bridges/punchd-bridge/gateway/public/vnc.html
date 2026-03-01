@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Remote Desktop</title>
+  <title>Remote Desktop (VNC)</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { background: #1a1a2e; color: #e0e0e0; font-family: system-ui, sans-serif; overflow: hidden; }
@@ -25,9 +25,10 @@
       background: transparent; color: #ccc; cursor: pointer; font-size: 12px;
     }
     #disconnect-btn:hover { background: #e74c3c; border-color: #e74c3c; color: #fff; }
-    #rdp-canvas {
+    #vnc-canvas {
       display: block; width: 100vw; height: 100vh;
       background: #0f0f23; cursor: default; outline: none;
+      object-fit: contain;
     }
     #connect-form {
       position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
@@ -37,7 +38,7 @@
     #connect-form h2 { margin-bottom: 20px; font-weight: 500; }
     #connect-form .field { margin-bottom: 16px; }
     #connect-form label { display: block; margin-bottom: 4px; font-size: 13px; color: #aaa; }
-    #connect-form input {
+    #connect-form input, #connect-form select {
       width: 100%; padding: 8px 12px; border: 1px solid #333; border-radius: 6px;
       background: #0f0f23; color: #e0e0e0; font-size: 14px;
     }
@@ -59,32 +60,20 @@
   </div>
 
   <div id="connect-form">
-    <h2>Remote Desktop</h2>
-    <div class="field">
-      <label>Domain (optional)</label>
-      <input type="text" id="rdp-domain" placeholder="e.g. CORP" autocomplete="off">
-    </div>
-    <div class="field">
-      <label>Username</label>
-      <input type="text" id="rdp-username" autocomplete="username">
-    </div>
+    <h2>Remote Desktop (VNC)</h2>
     <div class="field">
       <label>Password</label>
-      <input type="password" id="rdp-password" autocomplete="current-password">
+      <input type="password" id="vnc-password" placeholder="VNC password" autocomplete="current-password">
     </div>
     <details style="margin-bottom: 16px;">
       <summary style="cursor: pointer; font-size: 13px; color: #aaa;">Display Settings</summary>
       <div style="margin-top: 12px;">
         <div class="field">
-          <label>Resolution</label>
-          <select id="rdp-resolution" style="width: 100%; padding: 8px 12px; border: 1px solid #333; border-radius: 6px; background: #0f0f23; color: #e0e0e0; font-size: 14px;">
-            <option value="auto" selected>Auto (match window)</option>
-            <option value="1920x1080">1920 x 1080</option>
-            <option value="1680x1050">1680 x 1050</option>
-            <option value="1440x900">1440 x 900</option>
-            <option value="1366x768">1366 x 768</option>
-            <option value="1280x720">1280 x 720</option>
-            <option value="1024x768">1024 x 768</option>
+          <label>Scale Mode</label>
+          <select id="vnc-scale">
+            <option value="fit" selected>Auto Fit</option>
+            <option value="actual">1:1 Actual Size</option>
+            <option value="stretch">Stretch</option>
           </select>
         </div>
       </div>
@@ -93,8 +82,8 @@
     <p id="form-error" style="margin-top: 12px; color: #e74c3c; font-size: 13px;"></p>
   </div>
 
-  <canvas id="rdp-canvas" class="hidden" tabindex="0"></canvas>
+  <canvas id="vnc-canvas" class="hidden" tabindex="0"></canvas>
 
-  <script src="/js/rdp-client.js"></script>
+  <script src="/js/vnc-client.js"></script>
 </body>
 </html>

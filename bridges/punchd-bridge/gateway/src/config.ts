@@ -17,8 +17,8 @@ const __dirname = dirname(__filename);
 export interface BackendEntry {
   name: string;
   url: string;
-  /** Protocol: "http" (default web proxy) or "rdp" (TCP tunnel to RDP server) */
-  protocol?: "http" | "rdp";
+  /** Protocol: "http" (default web proxy), "rdp" (TCP tunnel to RDP server), or "vnc" (TCP tunnel to VNC server) */
+  protocol?: "http" | "rdp" | "vnc";
   /** Skip gateway JWT validation — backend handles its own auth */
   noAuth?: boolean;
   /** Strip Authorization header before proxying to this backend */
@@ -140,7 +140,7 @@ function parseBackends(): BackendEntry[] {
         }
       }
       // Detect protocol from URL scheme
-      const protocol: "http" | "rdp" = rawUrl.startsWith("rdp://") ? "rdp" : "http";
+      const protocol: "http" | "rdp" | "vnc" = rawUrl.startsWith("rdp://") ? "rdp" : rawUrl.startsWith("vnc://") ? "vnc" : "http";
       return { name: entry.slice(0, eq).trim(), url: rawUrl, protocol, noAuth: noAuth || undefined, stripAuth: stripAuth || undefined };
     }).filter((b) => b.url);
   }

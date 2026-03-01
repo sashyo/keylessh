@@ -98,6 +98,7 @@ export default function AdminRoles() {
   // Endpoint role selection state
   const [selectedGatewayId, setSelectedGatewayId] = useState<string>("");
   const [selectedBackendName, setSelectedBackendName] = useState<string>("");
+  const [selectedRolePrefix, setSelectedRolePrefix] = useState<"dest" | "endpoint" | "rdp" | "vnc">("dest");
 
   const normalizeSshRoleName = (value: string) => {
     const trimmed = value.trim();
@@ -300,6 +301,7 @@ export default function AdminRoles() {
     setTemplateParams({});
     setSelectedGatewayId("");
     setSelectedBackendName("");
+    setSelectedRolePrefix("dest");
     setCreatingRole(true);
   };
 
@@ -400,7 +402,7 @@ export default function AdminRoles() {
         toast({ title: "Please select a gateway and backend", variant: "destructive" });
         return;
       }
-      name = `dest:${selectedGatewayId}:${selectedBackendName}`;
+      name = `${selectedRolePrefix}:${selectedGatewayId}:${selectedBackendName}`;
     } else {
       name = formData.name.trim();
     }
@@ -509,7 +511,7 @@ export default function AdminRoles() {
   );
 
   const destRoleCount = useMemo(
-    () => roles.filter((r) => /^dest[:\-]/i.test(r.name)).length,
+    () => roles.filter((r) => /^(dest|endpoint|rdp|vnc):/i.test(r.name)).length,
     [roles]
   );
 
@@ -526,7 +528,7 @@ export default function AdminRoles() {
           </p>
           <p className="text-xs text-muted-foreground">
             <span className="font-mono">ssh:&lt;username&gt;</span> for SSH access ({sshRoleCount}),{" "}
-            <span className="font-mono">dest:&lt;gateway&gt;:&lt;backend&gt;</span> for endpoint access ({destRoleCount}).
+            <span className="font-mono">dest|rdp|vnc|endpoint</span> for endpoint access ({destRoleCount}).
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -596,9 +598,24 @@ export default function AdminRoles() {
                               SSH
                             </Badge>
                           )}
-                          {/^dest[:\-]/i.test(role.name) && (
+                          {/^dest:/i.test(role.name) && (
                             <Badge variant="outline" className="text-xs label-success">
                               Endpoint
+                            </Badge>
+                          )}
+                          {/^endpoint:/i.test(role.name) && (
+                            <Badge variant="outline" className="text-xs label-success">
+                              Web
+                            </Badge>
+                          )}
+                          {/^rdp:/i.test(role.name) && (
+                            <Badge variant="outline" className="text-xs label-info">
+                              RDP
+                            </Badge>
+                          )}
+                          {/^vnc:/i.test(role.name) && (
+                            <Badge variant="outline" className="text-xs label-info">
+                              VNC
                             </Badge>
                           )}
                         </div>
@@ -909,7 +926,7 @@ export default function AdminRoles() {
                 <button
                   type="button"
                   className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${roleType === "endpoint" ? "bg-background shadow-sm" : "text-muted-foreground hover:text-foreground"}`}
-                  onClick={() => { setRoleType("endpoint"); setFormData({ ...formData, name: "" }); setSelectedGatewayId(""); setSelectedBackendName(""); }}
+                  onClick={() => { setRoleType("endpoint"); setFormData({ ...formData, name: "" }); setSelectedGatewayId(""); setSelectedBackendName(""); setSelectedRolePrefix("dest"); }}
                 >
                   <Globe className="h-3.5 w-3.5" />
                   Endpoint
@@ -947,6 +964,20 @@ export default function AdminRoles() {
             {/* Endpoint Role - Gateway & Backend Dropdowns */}
             {roleType === "endpoint" && (
               <div className="space-y-3">
+                <div className="space-y-2">
+                  <Label>Access Scope</Label>
+                  <Select value={selectedRolePrefix} onValueChange={(v) => setSelectedRolePrefix(v as any)}>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="dest">All protocols (dest:)</SelectItem>
+                      <SelectItem value="endpoint">Web only (endpoint:)</SelectItem>
+                      <SelectItem value="rdp">RDP only (rdp:)</SelectItem>
+                      <SelectItem value="vnc">VNC only (vnc:)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
                 <div className="space-y-2">
                   <Label>Gateway</Label>
                   <Select
@@ -994,7 +1025,8 @@ export default function AdminRoles() {
                 )}
                 {selectedGatewayId && selectedBackendName && (
                   <p className="text-xs text-muted-foreground">
-                    Creates role <span className="font-mono">dest:{selectedGatewayId}:{selectedBackendName}</span> — grants access to this endpoint.
+                    Creates role <span className="font-mono">{selectedRolePrefix}:{selectedGatewayId}:{selectedBackendName}</span> — grants{" "}
+                    {selectedRolePrefix === "dest" ? "access via any protocol" : selectedRolePrefix === "endpoint" ? "web proxy access only" : selectedRolePrefix === "rdp" ? "RDP access only" : "VNC access only"}.
                   </p>
                 )}
                 {(!gatewayEndpoints || gatewayEndpoints.length === 0) && (

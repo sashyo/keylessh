@@ -783,10 +783,10 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
       return;
     }
 
-    // Resolve backend name → host:port (only rdp:// backends allowed)
+    // Resolve backend name → host:port (only rdp:// and vnc:// backends allowed)
     const backendName = msg.backend || "";
     console.log(`[WebRTC] tcp_open request: backend="${backendName}", available=[${options.backends.map(b => `${b.name}(${b.protocol})`).join(", ")}]`);
-    const backend = options.backends.find((b) => b.name === backendName && b.protocol === "rdp");
+    const backend = options.backends.find((b) => b.name === backendName && (b.protocol === "rdp" || b.protocol === "vnc"));
     if (!backend) {
       console.warn(`[WebRTC] tcp_open rejected: no matching backend for "${backendName}"`);
       enqueueControl(state, Buffer.from(JSON.stringify({ type: "tcp_error", id: msg.id, message: "Unknown or disallowed backend" })));
@@ -799,7 +799,7 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
     try {
       const url = new URL(backend.url);
       host = url.hostname;
-      port = parseInt(url.port || "3389", 10);
+      port = parseInt(url.port || (backend.protocol === "vnc" ? "5900" : "3389"), 10);
     } catch {
       enqueueControl(state, Buffer.from(JSON.stringify({ type: "tcp_error", id: msg.id, message: "Invalid backend URL" })));
       return;

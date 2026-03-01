@@ -1282,9 +1282,11 @@ export async function registerRoutes(
 
         await Promise.all(fetches);
 
-        // Annotate backends with access info based on dest: roles.
-        // Every user (including admins) must have an explicit
-        // dest:<gatewayId>:<backendName> role to access a backend.
+        // Annotate backends with access info based on role prefixes:
+        //   dest:<gwId>:<backend>      — catch-all (any protocol)
+        //   endpoint:<gwId>:<backend>  — HTTP/web proxy only
+        //   rdp:<gwId>:<backend>       — RDP only
+        //   vnc:<gwId>:<backend>       — VNC only
         const destPerms = parseDestRolesFromToken(req.tokenPayload);
         // Debug: show raw token roles alongside parsed dest permissions
         const rawRealmRoles = req.tokenPayload?.realm_access?.roles || [];
@@ -1292,11 +1294,14 @@ export async function registerRoutes(
         log(`[dest-roles] user=${req.user?.username} realmRoles=${JSON.stringify(rawRealmRoles)} clientRoles=${JSON.stringify(rawClientRoles)} destPerms=${JSON.stringify(destPerms)} gateways=${results.map(g => `${g.id}:[${g.backends.map(b => b.name).join(",")}]`).join("; ")}`);
 
         const annotated = results.map((gw) => {
-          const backends = (gw.backends.length > 0 ? gw.backends : [{ name: "Default" }]).map((b) => ({
-            name: b.name,
-            protocol: ("protocol" in b ? b.protocol : "http") || "http",
-            accessible: hasDestAccess(destPerms, gw.id, b.name),
-          }));
+          const backends = (gw.backends.length > 0 ? gw.backends : [{ name: "Default" }]).map((b) => {
+            const protocol = ("protocol" in b ? b.protocol : "http") || "http";
+            return {
+              name: b.name,
+              protocol,
+              accessible: hasDestAccess(destPerms, gw.id, b.name, protocol),
+            };
+          });
           return { ...gw, backends };
         });
 

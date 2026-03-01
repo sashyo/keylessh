@@ -685,6 +685,12 @@ export function createProxy(options: ProxyOptions): {
         return;
       }
 
+      // VNC client page — served without auth (TCP tunnel requires JWT)
+      if (path === "/vnc") {
+        serveFile(res, "vnc.html", "text/html; charset=utf-8");
+        return;
+      }
+
       // WebRTC config — tells the browser how to connect for P2P upgrade
       // TURN credentials require valid JWT to prevent bandwidth abuse
       if (path === "/webrtc-config") {
@@ -1185,11 +1191,13 @@ export function createProxy(options: ProxyOptions): {
 
         stats.authorizedRequests++;
 
-        // ── dest: role enforcement ─────────────────────────
-        // Users must have an explicit dest:<gatewayId>:<backendName> role
-        // to access any gateway backend. No matching role = 403.
+        // ── dest/endpoint/rdp/vnc role enforcement ─────────────────
+        // Users must have an explicit role to access any gateway backend:
+        //   dest:<gatewayId>:<backendName>      — catch-all (any protocol)
+        //   endpoint:<gatewayId>:<backendName>  — HTTP/web proxy only
+        //   rdp:<gatewayId>:<backendName>       — RDP only
+        //   vnc:<gatewayId>:<backendName>       — VNC only
         if (options.gatewayId && payload) {
-          // dest:<gatewayId>:<backendName> — split on first and second ':'
           const realmRoles: string[] = (payload as any)?.realm_access?.roles ?? [];
           const clientId = options.tcConfig.resource;
           const clientRoles: string[] = (payload as any)?.resource_access?.[clientId]?.roles ?? [];
@@ -1199,17 +1207,19 @@ export function createProxy(options: ProxyOptions): {
           const gwIdLower = options.gatewayId!.toLowerCase();
           const backendLower = backend.toLowerCase();
           const hasAccess = allRoles.some((r: string) => {
-            if (!/^dest:/i.test(r)) return false;
-            // Split "dest:<gatewayId>:<backendName>" on first two colons
+            if (!/^(dest|endpoint|rdp|vnc):/i.test(r)) return false;
             const firstColon = r.indexOf(":");
             const secondColon = r.indexOf(":", firstColon + 1);
             if (secondColon < 0) return false;
+            const prefix = r.slice(0, firstColon).toLowerCase();
             const gwId = r.slice(firstColon + 1, secondColon);
             const bk = r.slice(secondColon + 1);
-            return gwId.toLowerCase() === gwIdLower && bk.toLowerCase() === backendLower;
+            if (gwId.toLowerCase() !== gwIdLower || bk.toLowerCase() !== backendLower) return false;
+            // dest: matches everything, endpoint: matches http proxy
+            return prefix === "dest" || prefix === "endpoint";
           });
           if (!hasAccess) {
-            const destRoles = allRoles.filter((r: string) => /^dest:/i.test(r));
+            const destRoles = allRoles.filter((r: string) => /^(dest|endpoint|rdp|vnc):/i.test(r));
             console.log(`[Gateway] dest role denied: gwId=${options.gatewayId} backend="${backend}" clientId="${clientId}" destRoles=${JSON.stringify(destRoles)} allRolesCount=${allRoles.length}`);
             stats.rejectedRequests++;
             res.writeHead(403, { "Content-Type": "application/json" });

@@ -18,7 +18,8 @@ import { api, type GatewayEndpoint } from "@/lib/api";
 type ServiceItem =
   | { kind: "ssh"; server: ServerWithAccess }
   | { kind: "web"; endpoint: GatewayEndpoint; backend: { name: string; protocol?: string; accessible?: boolean } }
-  | { kind: "rdp"; endpoint: GatewayEndpoint; backend: { name: string; protocol?: string; accessible?: boolean } };
+  | { kind: "rdp"; endpoint: GatewayEndpoint; backend: { name: string; protocol?: string; accessible?: boolean } }
+  | { kind: "vnc"; endpoint: GatewayEndpoint; backend: { name: string; protocol?: string; accessible?: boolean } };
 
 function ServerCard({ server, sshBlocked }: { server: ServerWithAccess; sshBlocked?: boolean }) {
   const [selectedUser, setSelectedUser] = useState<string>(server.allowedSshUsers[0] || "");
@@ -204,8 +205,8 @@ function GatewayEndpointCard({ endpoint, backend }: { endpoint: GatewayEndpoint;
 
         {!accessible && (
           <p className="text-xs text-muted-foreground">
-            No access to this endpoint. Ask an admin to grant a role like{" "}
-            <span className="font-mono">dest:{endpoint.id}:{backend.name}</span>.
+            No access. Grant <span className="font-mono">dest:{endpoint.id}:{backend.name}</span> (all) or{" "}
+            <span className="font-mono">endpoint:{endpoint.id}:{backend.name}</span> (web only).
           </p>
         )}
 
@@ -284,8 +285,8 @@ function RdpEndpointCard({ endpoint, backend }: { endpoint: GatewayEndpoint; bac
 
         {!accessible && (
           <p className="text-xs text-muted-foreground">
-            No access to this endpoint. Ask an admin to grant a role like{" "}
-            <span className="font-mono">dest:{endpoint.id}:{backend.name}</span>.
+            No access. Grant <span className="font-mono">dest:{endpoint.id}:{backend.name}</span> (all) or{" "}
+            <span className="font-mono">rdp:{endpoint.id}:{backend.name}</span> (RDP only).
           </p>
         )}
 
@@ -302,6 +303,84 @@ function RdpEndpointCard({ endpoint, backend }: { endpoint: GatewayEndpoint; bac
           >
             <Monitor className="h-4 w-4" />
             Connect RDP
+            <ArrowRight className="h-4 w-4" />
+          </Button>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function VncEndpointCard({ endpoint, backend }: { endpoint: GatewayEndpoint; backend: { name: string; accessible?: boolean } }) {
+  const accessible = backend.accessible !== false;
+  const isDisabled = !accessible || !endpoint.online;
+  const handleConnect = () => {
+    const url = endpoint.signalServerUrl.replace(/\/$/, "");
+    const token = localStorage.getItem("access_token") || "";
+    const params = new URLSearchParams({
+      gateway: endpoint.id,
+      backend: backend.name,
+    });
+    if (token) params.set("token", token);
+    window.open(`${url}/api/select?${params.toString()}&redirect=${encodeURIComponent(`/vnc?backend=${encodeURIComponent(backend.name)}`)}`, "_blank");
+  };
+
+  return (
+    <Card className="group cyber-card hover-neon-glow">
+      <CardHeader className="pb-3">
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-[hsl(var(--neon-green)/0.15)] border border-[hsl(var(--neon-green)/0.3)] group-hover:border-[hsl(var(--neon-green)/0.5)] transition-colors">
+              <Monitor className="h-5 w-5 text-[hsl(var(--neon-green))]" />
+            </div>
+            <div>
+              <CardTitle className="text-base">{backend.name}</CardTitle>
+              <CardDescription className="text-xs">
+                {endpoint.displayName} &middot; Remote Desktop (VNC)
+              </CardDescription>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <Badge variant="outline" className="text-xs">VNC</Badge>
+            {endpoint.online ? (
+              <Badge variant="outline" className="gap-1.5 label-success">
+                <span className="h-2 w-2 rounded-full bg-[hsl(var(--neon-green))] animate-pulse" />
+                Online
+              </Badge>
+            ) : (
+              <Badge variant="outline" className="gap-1.5 label-danger">
+                <span className="h-2 w-2 rounded-full bg-[hsl(var(--neon-red))]" />
+                Offline
+              </Badge>
+            )}
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {endpoint.description && (
+          <p className="text-sm text-muted-foreground">{endpoint.description}</p>
+        )}
+
+        {!accessible && (
+          <p className="text-xs text-muted-foreground">
+            No access. Grant <span className="font-mono">dest:{endpoint.id}:{backend.name}</span> (all) or{" "}
+            <span className="font-mono">vnc:{endpoint.id}:{backend.name}</span> (VNC only).
+          </p>
+        )}
+
+        {isDisabled ? (
+          <Button className="w-full gap-2" disabled>
+            <Monitor className="h-4 w-4" />
+            Connect VNC
+            <ArrowRight className="h-4 w-4" />
+          </Button>
+        ) : (
+          <Button
+            className="w-full gap-2 btn-primary-glow"
+            onClick={handleConnect}
+          >
+            <Monitor className="h-4 w-4" />
+            Connect VNC
             <ArrowRight className="h-4 w-4" />
           </Button>
         )}
@@ -380,9 +459,10 @@ function ServiceListItem({ item, sshBlocked }: { item: ServiceItem; sshBlocked?:
     );
   }
 
-  // Web or RDP endpoint
+  // Web, RDP, or VNC endpoint
   const { endpoint, backend } = item;
   const isRdp = item.kind === "rdp";
+  const isVnc = item.kind === "vnc";
   const accessible = backend.accessible !== false;
   const isDisabled = !accessible || !endpoint.online;
   const handleConnect = () => {
@@ -392,13 +472,15 @@ function ServiceListItem({ item, sshBlocked }: { item: ServiceItem; sshBlocked?:
     if (token) params.set("token", token);
     if (isRdp) {
       params.set("redirect", `/rdp?backend=${encodeURIComponent(backend.name)}`);
+    } else if (isVnc) {
+      params.set("redirect", `/vnc?backend=${encodeURIComponent(backend.name)}`);
     }
     window.open(`${url}/api/select?${params.toString()}`, "_blank");
   };
 
-  const Icon = isRdp ? Monitor : Globe;
-  const colorVar = isRdp ? "--neon-blue,210_100%_60%" : "--neon-purple";
-  const connectLabel = isRdp ? "Connect RDP" : "Connect";
+  const Icon = (isRdp || isVnc) ? Monitor : Globe;
+  const colorVar = isRdp ? "--neon-blue,210_100%_60%" : isVnc ? "--neon-green" : "--neon-purple";
+  const connectLabel = isRdp ? "Connect RDP" : isVnc ? "Connect VNC" : "Connect";
 
   return (
     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 py-3 px-4 hover-elevate rounded-md group">
@@ -409,12 +491,13 @@ function ServiceListItem({ item, sshBlocked }: { item: ServiceItem; sshBlocked?:
         <div className="min-w-0">
           <p className="text-sm font-medium truncate">{backend.name}</p>
           <p className="text-xs text-muted-foreground truncate">
-            {endpoint.displayName}{isRdp && " \u00b7 Remote Desktop"}
+            {endpoint.displayName}{isRdp && " \u00b7 Remote Desktop"}{isVnc && " \u00b7 Remote Desktop (VNC)"}
           </p>
         </div>
       </div>
       <div className="flex items-center gap-3 pl-13 sm:pl-0">
         {isRdp && <Badge variant="outline" className="text-xs shrink-0">RDP</Badge>}
+        {isVnc && <Badge variant="outline" className="text-xs shrink-0">VNC</Badge>}
         {endpoint.online ? (
           <Badge variant="outline" className="gap-1.5 label-success shrink-0">
             <span className="h-2 w-2 rounded-full bg-[hsl(var(--neon-green))] animate-pulse" />
@@ -548,7 +631,7 @@ export default function Dashboard() {
 
   const [search, setSearch] = useState("");
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
-  const [typeFilter, setTypeFilter] = useState<"all" | "ssh" | "web" | "rdp">("all");
+  const [typeFilter, setTypeFilter] = useState<"all" | "ssh" | "web" | "rdp" | "vnc">("all");
 
   const allServices: ServiceItem[] = useMemo(() => {
     const items: ServiceItem[] = [];
@@ -558,10 +641,8 @@ export default function Dashboard() {
     for (const endpoint of gatewayEndpoints ?? []) {
       const backends = endpoint.backends?.length > 0 ? endpoint.backends : [{ name: "Default", accessible: true }];
       for (const backend of backends) {
-        const kind = backend.protocol === "rdp" ? "rdp" : "web";
-        items.push(kind === "rdp"
-          ? { kind: "rdp", endpoint, backend }
-          : { kind: "web", endpoint, backend });
+        const kind = backend.protocol === "rdp" ? "rdp" : backend.protocol === "vnc" ? "vnc" : "web";
+        items.push({ kind, endpoint, backend } as ServiceItem);
       }
     }
     // Sort: accessible/connectable items first
@@ -580,6 +661,7 @@ export default function Dashboard() {
   const sshCount = useMemo(() => allServices.filter((i) => i.kind === "ssh").length, [allServices]);
   const webCount = useMemo(() => allServices.filter((i) => i.kind === "web").length, [allServices]);
   const rdpCount = useMemo(() => allServices.filter((i) => i.kind === "rdp").length, [allServices]);
+  const vncCount = useMemo(() => allServices.filter((i) => i.kind === "vnc").length, [allServices]);
 
   const filteredServices = useMemo(() => {
     let list = allServices;
@@ -705,7 +787,7 @@ export default function Dashboard() {
                   <Button
                     variant="ghost"
                     size="sm"
-                    className={`h-9 px-3 ${rdpCount > 0 ? "rounded-none border-r border-border" : "rounded-l-none"} text-xs gap-1.5 ${typeFilter === "web" ? "bg-accent" : ""}`}
+                    className={`h-9 px-3 ${rdpCount > 0 || vncCount > 0 ? "rounded-none border-r border-border" : "rounded-l-none"} text-xs gap-1.5 ${typeFilter === "web" ? "bg-accent" : ""}`}
                     onClick={() => setTypeFilter("web")}
                   >
                     <Globe className="h-3.5 w-3.5" />
@@ -716,11 +798,22 @@ export default function Dashboard() {
                   <Button
                     variant="ghost"
                     size="sm"
-                    className={`h-9 px-3 rounded-l-none text-xs gap-1.5 ${typeFilter === "rdp" ? "bg-accent" : ""}`}
+                    className={`h-9 px-3 ${vncCount > 0 ? "rounded-none border-r border-border" : "rounded-l-none"} text-xs gap-1.5 ${typeFilter === "rdp" ? "bg-accent" : ""}`}
                     onClick={() => setTypeFilter("rdp")}
                   >
                     <Monitor className="h-3.5 w-3.5" />
                     RDP
+                  </Button>
+                )}
+                {vncCount > 0 && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className={`h-9 px-3 rounded-l-none text-xs gap-1.5 ${typeFilter === "vnc" ? "bg-accent" : ""}`}
+                    onClick={() => setTypeFilter("vnc")}
+                  >
+                    <Monitor className="h-3.5 w-3.5" />
+                    VNC
                   </Button>
                 )}
               </div>
@@ -762,6 +855,8 @@ export default function Dashboard() {
                   <ServerCard key={item.server.id} server={item.server} sshBlocked={isSshBlocked} />
                 ) : item.kind === "rdp" ? (
                   <RdpEndpointCard key={`${item.endpoint.signalServerId}-${item.endpoint.id}-${item.backend.name}`} endpoint={item.endpoint} backend={item.backend} />
+                ) : item.kind === "vnc" ? (
+                  <VncEndpointCard key={`${item.endpoint.signalServerId}-${item.endpoint.id}-${item.backend.name}`} endpoint={item.endpoint} backend={item.backend} />
                 ) : (
                   <GatewayEndpointCard key={`${item.endpoint.signalServerId}-${item.endpoint.id}-${item.backend.name}`} endpoint={item.endpoint} backend={item.backend} />
                 )
