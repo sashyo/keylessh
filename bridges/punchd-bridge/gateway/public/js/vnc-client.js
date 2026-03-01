@@ -658,20 +658,38 @@
       case 3: resyncSkipped = 0; return handleServerCutText();
       default:
         // Unknown message type — parser misalignment or unsupported server extension.
-        // Skip forward to next 0x00 byte (potential FramebufferUpdate start) to resync.
+        // Scan forward for a valid FramebufferUpdate header by checking:
+        //   [type=0x00][pad=0x00][nRects:u16] with 1 <= nRects <= 1000
+        //   + first rect encoding must be a known value
         if (resyncSkipped === 0) {
           console.warn("[VNC] Unknown message type:", msgType,
             "hex:", Array.from(recvBuf.subarray(0, Math.min(20, recvBuf.length)))
               .map(function(b) { return ("0" + b.toString(16)).slice(-2); }).join(" "));
         }
-        var skip = 1;
-        while (skip < recvBuf.length && recvBuf[skip] !== 0x00) skip++;
-        resyncSkipped += skip;
+        for (var skip = 1; skip < recvBuf.length - 15; skip++) {
+          if (recvBuf[skip] !== 0x00 || recvBuf[skip + 1] !== 0x00) continue;
+          var nRects = (recvBuf[skip + 2] << 8) | recvBuf[skip + 3];
+          if (nRects < 1 || nRects > 1000) continue;
+          // Validate first rect header: encoding must be known
+          var enc = (recvBuf[skip + 12] << 24) | (recvBuf[skip + 13] << 16) |
+                    (recvBuf[skip + 14] << 8) | recvBuf[skip + 15];
+          if (enc !== 0 && enc !== 1 && enc !== -223 && enc !== -224 &&
+              enc !== -232 && enc !== -239 && enc !== -240) continue;
+          // Validate first rect dimensions are within framebuffer
+          var rw = (recvBuf[skip + 8] << 8) | recvBuf[skip + 9];
+          var rh = (recvBuf[skip + 10] << 8) | recvBuf[skip + 11];
+          if (rw === 0 || rh === 0 || rw > 8192 || rh > 8192) continue;
+          console.warn("[VNC] Resynced after skipping", skip, "bytes");
+          resyncSkipped += skip;
+          return skip;
+        }
+        // Could not resync in current buffer — discard and wait for more data
+        resyncSkipped += recvBuf.length;
         if (resyncSkipped > 1048576) {
           disconnectVnc("Parser cannot resync after 1MB of unknown data");
           return 0;
         }
-        return skip;
+        return recvBuf.length;
     }
   }
 
@@ -831,19 +849,19 @@
 
       if (encoding !== 0) {
         // Unknown encoding — can't determine data length, so abandon this
-        // FramebufferUpdate entirely and request a clean full update.
+        // FramebufferUpdate and let the resync scanner find the next valid one.
         console.warn("[VNC] Unsupported encoding:", encoding,
           "(0x" + (encoding >>> 0).toString(16) + ")",
           "rect:", fbUpdateRect.x + "," + fbUpdateRect.y,
-          fbUpdateRect.w + "x" + fbUpdateRect.h,
-          "- flushing buffer, requesting fresh update");
+          fbUpdateRect.w + "x" + fbUpdateRect.h);
         fbUpdateRect = null;
         fbUpdateRemaining = 0;
         fbUpdatePixelsLeft = 0;
         fbUpdateBusy = false;
-        recvBuf = new Uint8Array(0);
-        requestFramebufferUpdate(false);
-        return 0;
+        // Skip just the 12-byte rect header; remaining data will be handled
+        // by the resync scanner in handleServerMessage which validates
+        // FramebufferUpdate headers properly before resyncing.
+        return 12;
       }
 
       // Raw encoding — need w*h*bpp bytes of pixel data
