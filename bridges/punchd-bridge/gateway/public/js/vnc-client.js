@@ -657,21 +657,26 @@
       case 3: return handleServerCutText();
       default:
         // TightVNC sends trailing padding bytes after FramebufferUpdate.
-        // Scan forward to find the start of the next 0x00 byte (FramebufferUpdate),
-        // which is the most common message after an incremental update request.
-        // Look for 0x00 followed by a plausible rect count at offset +2..+3.
+        // Scan forward to find a valid FramebufferUpdate start by checking:
+        // 1. Header: [type=0x00][pad=0x00][nRects:u16] with 0 < nRects < 500
+        // 2. First rect header encoding field must be 0 (Raw), 1 (CopyRect),
+        //    or 0xFFFFFF21 (DesktopSize) — this makes false positives near-impossible
+        //    since random BGRX pixel data almost never forms these exact big-endian values.
         for (var skip = 1; skip < recvBuf.length - 3; skip++) {
-          // FramebufferUpdate header: [type=0x00][pad=0x00][nRects:u16]
-          if (recvBuf[skip] === 0x00 && recvBuf[skip + 1] === 0x00) {
-            var nRects = (recvBuf[skip + 2] << 8) | recvBuf[skip + 3];
-            if (nRects > 0 && nRects < 1000) {
-              console.debug("[VNC] Skipped", skip, "trailing padding bytes");
-              return skip;
-            }
+          if (recvBuf[skip] !== 0x00 || recvBuf[skip + 1] !== 0x00) continue;
+          var nRects = (recvBuf[skip + 2] << 8) | recvBuf[skip + 3];
+          if (nRects < 1 || nRects > 500) continue;
+          // Validate first rect header if we have enough data (12 bytes after the 4-byte header)
+          if (skip + 16 <= recvBuf.length) {
+            var enc = (recvBuf[skip + 12] << 24) | (recvBuf[skip + 13] << 16) |
+                      (recvBuf[skip + 14] << 8) | recvBuf[skip + 15];
+            if (enc !== 0 && enc !== 1 && enc !== -223) continue;
           }
+          console.debug("[VNC] Skipped", skip, "trailing padding bytes");
+          return skip;
         }
         // Could not find a valid message start — skip all and wait for more data
-        console.debug("[VNC] Skipped", recvBuf.length, "bytes (no valid message found)");
+        console.debug("[VNC] Skipped", recvBuf.length, "bytes (no valid message found yet)");
         return recvBuf.length;
     }
   }
