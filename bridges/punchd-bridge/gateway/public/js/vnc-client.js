@@ -587,17 +587,23 @@
     serverBShift = 0;
     serverBigEndian = false;
 
-    // Send SetEncodings: CopyRect(1), Raw(0), DesktopSize(-223)
-    var se = new Uint8Array(16);
+    // Send SetEncodings: CopyRect(1), Raw(0), DesktopSize(-223), LastRect(-224), Cursor(-239), CursorPos(-232)
+    var se = new Uint8Array(28);
     se[0] = 2; // message type: SetEncodings
     // [1] padding
-    se[2] = 0; se[3] = 3; // number of encodings
+    se[2] = 0; se[3] = 6; // number of encodings
     // CopyRect = 1 (preferred — server can use it to optimize scrolling)
     se[4] = 0; se[5] = 0; se[6] = 0; se[7] = 1;
     // Raw = 0 (fallback — always supported)
     se[8] = 0; se[9] = 0; se[10] = 0; se[11] = 0;
     // DesktopSize = -223 (0xFFFFFF21) pseudo-encoding
     se[12] = 0xFF; se[13] = 0xFF; se[14] = 0xFF; se[15] = 0x21;
+    // LastRect = -224 (0xFFFFFF20) pseudo-encoding — required for TightVNC nRects=0xFFFF
+    se[16] = 0xFF; se[17] = 0xFF; se[18] = 0xFF; se[19] = 0x20;
+    // Cursor = -239 (0xFFFFFF11) pseudo-encoding
+    se[20] = 0xFF; se[21] = 0xFF; se[22] = 0xFF; se[23] = 0x11;
+    // CursorPos = -232 (0xFFFFFF18) pseudo-encoding
+    se[24] = 0xFF; se[25] = 0xFF; se[26] = 0xFF; se[27] = 0x18;
     sendTcpData(se);
 
     rfbState = RFB_CONNECTED;
@@ -675,10 +681,14 @@
                     (recvBuf[skip + 14] << 8) | recvBuf[skip + 15];
           if (enc !== 0 && enc !== 1 && enc !== -223 && enc !== -224 &&
               enc !== -232 && enc !== -239 && enc !== -240) continue;
-          // Validate first rect dimensions are within framebuffer
-          var rw = (recvBuf[skip + 8] << 8) | recvBuf[skip + 9];
-          var rh = (recvBuf[skip + 10] << 8) | recvBuf[skip + 11];
-          if (rw === 0 || rh === 0 || rw > 8192 || rh > 8192) continue;
+          // For real encodings (Raw/CopyRect), validate dimensions are sane
+          if (enc >= 0) {
+            var rw = (recvBuf[skip + 8] << 8) | recvBuf[skip + 9];
+            var rh = (recvBuf[skip + 10] << 8) | recvBuf[skip + 11];
+            if (rw === 0 || rh === 0 ||
+                (fbWidth > 0 && rw > fbWidth) ||
+                (fbHeight > 0 && rh > fbHeight)) continue;
+          }
           console.warn("[VNC] Resynced after skipping", skip, "bytes");
           resyncSkipped += skip;
           return skip;
@@ -700,7 +710,7 @@
     fbUpdateRect = null;
     fbUpdatePixelsLeft = 0;
     fbUpdateBusy = true;
-    console.debug("[VNC] FramebufferUpdate:", fbUpdateRemaining, "rects");
+    console.log("[VNC] FramebufferUpdate:", fbUpdateRemaining, "rects");
     return 4;
   }
 
@@ -764,7 +774,8 @@
 
       // Handle pseudo-encodings
       if (encoding === -223 || encoding === (0xFFFFFF21 | 0)) {
-        console.log("[VNC] Desktop resize:", fbUpdateRect.w, "x", fbUpdateRect.h);
+        console.log("[VNC] Desktop resize:", fbUpdateRect.w, "x", fbUpdateRect.h,
+          "remaining rects:", fbUpdateRemaining);
         fbWidth = fbUpdateRect.w;
         fbHeight = fbUpdateRect.h;
         setupCanvas();
@@ -986,11 +997,9 @@
     var textLen = (recvBuf[4] << 24) | (recvBuf[5] << 16) | (recvBuf[6] << 8) | recvBuf[7];
     if (recvBuf.length < 8 + textLen) return 0;
     var text = new TextDecoder("latin1").decode(recvBuf.subarray(8, 8 + textLen));
-    try {
-      navigator.clipboard.writeText(text);
-    } catch (e) {
+    navigator.clipboard.writeText(text).catch(function(e) {
       console.debug("[VNC] Clipboard write failed:", e);
-    }
+    });
     return 8 + textLen;
   }
 
