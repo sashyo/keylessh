@@ -22,7 +22,7 @@
   var TCP_TUNNEL_MAGIC = 0x03;
   var RECONNECT_DELAY = 5000;
   var MAX_RECONNECT_DELAY = 60000;
-  var FRAMEBUFFER_UPDATE_INTERVAL = 50; // ms between incremental update requests
+  var PROGRESSIVE_PAINT_ROWS = 50; // paint every N rows during streaming
 
   var NativeWebSocket = window.WebSocket;
 
@@ -74,6 +74,7 @@
   var serverName = "";
   var ctx = null;
   var imageData = null;
+  var imageData32 = null; // Uint32Array view over imageData.data.buffer for fast pixel writes
   var updateTimer = null;
   var buttonMask = 0;
 
@@ -81,6 +82,7 @@
   var fbUpdateRemaining = 0;
   var fbUpdateRect = null;
   var fbUpdatePixelsLeft = 0;
+  var fbUpdateBusy = false; // true while processing a FramebufferUpdate
 
   // Server pixel format (populated from ServerInit, updated by SetPixelFormat)
   var serverBpp = 32; // bytes per pixel component (bits)
@@ -393,15 +395,19 @@
   var tcpBytesReceived = 0;
   function onTcpData(data) {
     tcpBytesReceived += data.length;
-    // Append to receive buffer
-    var newBuf = new Uint8Array(recvBuf.length + data.length);
-    newBuf.set(recvBuf);
-    newBuf.set(data, recvBuf.length);
-    recvBuf = newBuf;
+    // Append to receive buffer (avoid copy when recvBuf is empty)
+    if (recvBuf.length === 0) {
+      recvBuf = data;
+    } else {
+      var newBuf = new Uint8Array(recvBuf.length + data.length);
+      newBuf.set(recvBuf);
+      newBuf.set(data, recvBuf.length);
+      recvBuf = newBuf;
+    }
 
     // Log periodically
-    if (rfbState === RFB_CONNECTED && tcpBytesReceived % 100000 < data.length) {
-      console.log("[VNC] TCP bytes received:", tcpBytesReceived,
+    if (rfbState === RFB_CONNECTED && tcpBytesReceived % 500000 < data.length) {
+      console.log("[VNC] TCP bytes received:", (tcpBytesReceived / 1048576).toFixed(1) + "MB",
         "recvBuf:", recvBuf.length, "fbUpdateRemaining:", fbUpdateRemaining,
         "pixelsLeft:", fbUpdatePixelsLeft);
     }
@@ -606,12 +612,8 @@
     // Set up input handlers
     setupInputHandlers();
 
-    // Start incremental update loop
-    updateTimer = setInterval(function () {
-      if (rfbState === RFB_CONNECTED) {
-        requestFramebufferUpdate(true);
-      }
-    }, FRAMEBUFFER_UPDATE_INTERVAL);
+    // Note: incremental updates are requested after each FramebufferUpdate completes
+    // (see handleFbUpdate / handleFbUpdateRect completion logic)
 
     return 24 + nameLen;
   }
@@ -656,8 +658,25 @@
     fbUpdateRemaining = (recvBuf[2] << 8) | recvBuf[3];
     fbUpdateRect = null;
     fbUpdatePixelsLeft = 0;
+    fbUpdateBusy = true;
     console.log("[VNC] FramebufferUpdate:", fbUpdateRemaining, "rects");
     return 4;
+  }
+
+  function onFbUpdateComplete() {
+    fbUpdateBusy = false;
+    // Request next incremental update now that we've finished processing
+    if (rfbState === RFB_CONNECTED) {
+      requestFramebufferUpdate(true);
+    }
+  }
+
+  function finishRect() {
+    fbUpdateRect = null;
+    fbUpdateRemaining--;
+    if (fbUpdateRemaining <= 0) {
+      onFbUpdateComplete();
+    }
   }
 
   function handleFbUpdateRect() {
@@ -671,15 +690,14 @@
         w: (recvBuf[4] << 8) | recvBuf[5],
         h: (recvBuf[6] << 8) | recvBuf[7],
         encoding: encoding,
-        bytesDone: 0,
+        pixelRow: 0,
+        pixelCol: 0,
+        pixelByte: 0,
+        lastPaintRow: 0,
       };
-
-      console.log("[VNC] Rect:", fbUpdateRect.x, fbUpdateRect.y,
-        fbUpdateRect.w + "x" + fbUpdateRect.h, "enc=" + encoding);
 
       // Handle pseudo-encodings
       if (encoding === -223 || encoding === (0xFFFFFF21 | 0)) {
-        // DesktopSize pseudo-encoding — server resized
         console.log("[VNC] Desktop resize:", fbUpdateRect.w, "x", fbUpdateRect.h);
         fbWidth = fbUpdateRect.w;
         fbHeight = fbUpdateRect.h;
@@ -697,12 +715,30 @@
         if (recvBuf.length < 16) return 0;
         var srcX = (recvBuf[12] << 8) | recvBuf[13];
         var srcY = (recvBuf[14] << 8) | recvBuf[15];
-        if (ctx && fbUpdateRect.w > 0 && fbUpdateRect.h > 0) {
-          ctx.drawImage(vncCanvas, srcX, srcY, fbUpdateRect.w, fbUpdateRect.h,
-            fbUpdateRect.x, fbUpdateRect.y, fbUpdateRect.w, fbUpdateRect.h);
+        var rw = fbUpdateRect.w;
+        var rh = fbUpdateRect.h;
+        var dx = fbUpdateRect.x;
+        var dy = fbUpdateRect.y;
+        if (imageData && rw > 0 && rh > 0) {
+          // Copy within imageData buffer (handle overlapping regions)
+          var data = imageData.data;
+          var rowBytes = rw * 4;
+          if (dy > srcY || (dy === srcY && dx > srcX)) {
+            for (var r = rh - 1; r >= 0; r--) {
+              var sOff = ((srcY + r) * fbWidth + srcX) * 4;
+              var dOff = ((dy + r) * fbWidth + dx) * 4;
+              data.copyWithin(dOff, sOff, sOff + rowBytes);
+            }
+          } else {
+            for (var r = 0; r < rh; r++) {
+              var sOff = ((srcY + r) * fbWidth + srcX) * 4;
+              var dOff = ((dy + r) * fbWidth + dx) * 4;
+              data.copyWithin(dOff, sOff, sOff + rowBytes);
+            }
+          }
+          ctx.putImageData(imageData, 0, 0, dx, dy, rw, rh);
         }
-        fbUpdateRect = null;
-        fbUpdateRemaining--;
+        finishRect();
         return 16;
       }
 
@@ -717,87 +753,84 @@
       return 12;
     }
 
-    // Raw encoding: consume pixel data
+    // Raw encoding: consume pixel data using Uint32Array fast path
     if (fbUpdatePixelsLeft > 0) {
       var available = Math.min(recvBuf.length, fbUpdatePixelsLeft);
       if (available <= 0) return 0;
 
-      // Write pixels to canvas ImageData with progressive rendering.
-      // Wire format is BGRX (b-shift=0, g-shift=8, r-shift=16, little-endian).
-      // Canvas ImageData is RGBA. Swap: wire[B,G,R,X] → canvas[R,G,B,A=255].
+      if (imageData && ctx && imageData32) {
+        var rect = fbUpdateRect;
+        var img32 = imageData32;
+        var imgPixels = imageData.data;
+        var rw = rect.w;
+        var row = rect.pixelRow;
+        var col = rect.pixelCol;
+        var pb = rect.pixelByte;
+        var i = 0;
+
+        // Phase 1: finish any partial leading pixel (max 3 bytes)
+        if (pb > 0) {
+          var off = ((rect.y + row) * fbWidth + rect.x + col) * 4;
+          while (pb < 4 && i < available) {
+            switch (pb) {
+              case 1: imgPixels[off + 1] = recvBuf[i]; break; // G
+              case 2: imgPixels[off]     = recvBuf[i]; break; // R
+              case 3: imgPixels[off + 3] = 255;        break; // A (discard X)
+            }
+            pb++; i++;
+          }
+          if (pb >= 4) { pb = 0; col++; if (col >= rw) { col = 0; row++; } }
+        }
+
+        // Phase 2: fast path — write complete pixels via Uint32Array
+        // BGRX wire → little-endian uint32: 0xAA_BB_GG_RR = 0xFF_B_G_R
+        var idx = (rect.y + row) * fbWidth + rect.x + col;
+        while (i + 4 <= available) {
+          img32[idx] = 0xFF000000 | (recvBuf[i] << 16) | (recvBuf[i + 1] << 8) | recvBuf[i + 2];
+          i += 4; idx++;
+          col++;
+          if (col >= rw) { col = 0; row++; idx = (rect.y + row) * fbWidth + rect.x; }
+        }
+
+        // Phase 3: trailing partial pixel (max 3 bytes)
+        if (i < available) {
+          var off = ((rect.y + row) * fbWidth + rect.x + col) * 4;
+          while (i < available) {
+            switch (pb) {
+              case 0: imgPixels[off + 2] = recvBuf[i]; break; // B
+              case 1: imgPixels[off + 1] = recvBuf[i]; break; // G
+              case 2: imgPixels[off]     = recvBuf[i]; break; // R
+              case 3: imgPixels[off + 3] = 255;        break; // A (discard X)
+            }
+            pb++; i++;
+          }
+        }
+
+        rect.pixelRow = row;
+        rect.pixelCol = col;
+        rect.pixelByte = pb;
+      }
+
+      fbUpdatePixelsLeft -= available;
+
+      // Progressive rendering: paint every N rows or when done
       if (imageData && ctx) {
         var rect = fbUpdateRect;
-        var bytesPerRow = rect.w * serverBytesPerPixel;
-        var bytesDone = rect.bytesDone;
-        var imgPixels = imageData.data;
-        var rowBefore = Math.floor(bytesDone / bytesPerRow);
-
-        // Copy pixels — process 4 bytes (1 pixel) at a time
-        var i = 0;
-        while (i + 3 < available) {
-          var bp = bytesDone + i;
-          var row = (bp / bytesPerRow) | 0;
-          var col = bp - row * bytesPerRow;
-          // Only enter fast path if we're at a pixel boundary
-          if ((col & 3) !== 0) {
-            // Unaligned — handle one byte
-            var px = (col / 4) | 0;
-            var comp = col & 3;
-            var off = ((rect.y + row) * fbWidth + rect.x + px) * 4;
-            if (comp === 0) imgPixels[off + 2] = recvBuf[i];
-            else if (comp === 1) imgPixels[off + 1] = recvBuf[i];
-            else if (comp === 2) imgPixels[off] = recvBuf[i];
-            else imgPixels[off + 3] = 255;
-            i++;
-            continue;
-          }
-          var px = (col / 4) | 0;
-          var off = ((rect.y + row) * fbWidth + rect.x + px) * 4;
-          imgPixels[off + 2] = recvBuf[i];     // B → Blue
-          imgPixels[off + 1] = recvBuf[i + 1]; // G → Green
-          imgPixels[off]     = recvBuf[i + 2]; // R → Red
-          imgPixels[off + 3] = 255;             // A
-          i += 4;
-        }
-        // Handle remaining bytes
-        while (i < available) {
-          var bp = bytesDone + i;
-          var row = (bp / bytesPerRow) | 0;
-          var col = bp - row * bytesPerRow;
-          var px = (col / 4) | 0;
-          var comp = col & 3;
-          var off = ((rect.y + row) * fbWidth + rect.x + px) * 4;
-          if (comp === 0) imgPixels[off + 2] = recvBuf[i];
-          else if (comp === 1) imgPixels[off + 1] = recvBuf[i];
-          else if (comp === 2) imgPixels[off] = recvBuf[i];
-          else imgPixels[off + 3] = 255;
-          i++;
-        }
-
-        rect.bytesDone += available;
-        fbUpdatePixelsLeft -= available;
-
-        // Progressive rendering: paint completed rows immediately
-        var rowAfter = Math.floor(rect.bytesDone / bytesPerRow);
-        if (rowAfter > rowBefore || fbUpdatePixelsLeft <= 0) {
-          var paintY = rect.y + rowBefore;
-          var paintRows = (fbUpdatePixelsLeft <= 0 ? rect.h : rowAfter) - rowBefore;
-          if (paintRows > 0) {
-            ctx.putImageData(imageData, 0, 0, rect.x, paintY, rect.w, paintRows);
+        var currentRow = rect.pixelRow;
+        if (fbUpdatePixelsLeft <= 0 || currentRow - rect.lastPaintRow >= PROGRESSIVE_PAINT_ROWS) {
+          var paintY = rect.y + rect.lastPaintRow;
+          var paintH = (fbUpdatePixelsLeft <= 0 ? rect.h : currentRow) - rect.lastPaintRow;
+          if (paintH > 0) {
+            ctx.putImageData(imageData, 0, 0, rect.x, paintY, rect.w, paintH);
+            rect.lastPaintRow = fbUpdatePixelsLeft <= 0 ? rect.h : currentRow;
           }
         }
+      }
 
-        if (fbUpdatePixelsLeft <= 0) {
-          fbUpdateRect = null;
-          fbUpdateRemaining--;
-        }
-      } else {
-        // No canvas — just skip pixel data
-        fbUpdatePixelsLeft -= available;
-        if (fbUpdatePixelsLeft <= 0) {
-          fbUpdateRect = null;
-          fbUpdateRemaining--;
-        }
+      if (fbUpdatePixelsLeft <= 0) {
+        console.log("[VNC] Rect complete:", fbUpdateRect.w, "x", fbUpdateRect.h,
+          "at", fbUpdateRect.x + "," + fbUpdateRect.y);
+        finishRect();
       }
 
       return available;
@@ -1009,11 +1042,9 @@
     vncCanvas.height = fbHeight;
     ctx = vncCanvas.getContext("2d");
     imageData = ctx.createImageData(fbWidth, fbHeight);
-    // Initialize alpha to 255 (fully opaque)
-    var data = imageData.data;
-    for (var i = 3; i < data.length; i += 4) {
-      data[i] = 255;
-    }
+    imageData32 = new Uint32Array(imageData.data.buffer);
+    // Initialize all pixels to opaque black (0xFF000000 on little-endian = RGBA(0,0,0,255))
+    imageData32.fill(0xFF000000);
     applyScaleMode();
   }
 
@@ -1220,6 +1251,7 @@
     recvBuf = new Uint8Array(0);
     ctx = null;
     imageData = null;
+    imageData32 = null;
 
     setStatus("error", reason || "Disconnected");
     showConnectForm();
@@ -1238,6 +1270,7 @@
     recvBuf = new Uint8Array(0);
     ctx = null;
     imageData = null;
+    imageData32 = null;
 
     if (controlChannel) {
       try { controlChannel.onclose = null; controlChannel.close(); } catch (e) {}
