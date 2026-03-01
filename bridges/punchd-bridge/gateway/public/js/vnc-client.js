@@ -82,6 +82,14 @@
   var fbUpdateRect = null;
   var fbUpdatePixelsLeft = 0;
 
+  // Server pixel format (populated from ServerInit, updated by SetPixelFormat)
+  var serverBpp = 32; // bytes per pixel component (bits)
+  var serverBytesPerPixel = 4;
+  var serverRShift = 0;
+  var serverGShift = 8;
+  var serverBShift = 16;
+  var serverBigEndian = false;
+
   // ── Initialization ────────────────────────────────────────────
 
   function init() {
@@ -382,12 +390,21 @@
     bulkChannel.send(frame);
   }
 
+  var tcpBytesReceived = 0;
   function onTcpData(data) {
+    tcpBytesReceived += data.length;
     // Append to receive buffer
     var newBuf = new Uint8Array(recvBuf.length + data.length);
     newBuf.set(recvBuf);
     newBuf.set(data, recvBuf.length);
     recvBuf = newBuf;
+
+    // Log periodically
+    if (rfbState === RFB_CONNECTED && tcpBytesReceived % 100000 < data.length) {
+      console.log("[VNC] TCP bytes received:", tcpBytesReceived,
+        "recvBuf:", recvBuf.length, "fbUpdateRemaining:", fbUpdateRemaining,
+        "pixelsLeft:", fbUpdatePixelsLeft);
+    }
 
     // Process as much of the buffer as possible
     processRfb();
@@ -524,12 +541,21 @@
     fbHeight = (recvBuf[2] << 8) | recvBuf[3];
     serverName = new TextDecoder().decode(recvBuf.subarray(24, 24 + nameLen));
 
+    // Log server's default pixel format
     console.log("[VNC] ServerInit:", fbWidth, "x", fbHeight, "name:", serverName);
+    console.log("[VNC] Server pixel format: bpp=" + recvBuf[4], "depth=" + recvBuf[5],
+      "bigEndian=" + recvBuf[6], "trueColor=" + recvBuf[7],
+      "rMax=" + ((recvBuf[8] << 8) | recvBuf[9]),
+      "gMax=" + ((recvBuf[10] << 8) | recvBuf[11]),
+      "bMax=" + ((recvBuf[12] << 8) | recvBuf[13]),
+      "rShift=" + recvBuf[14], "gShift=" + recvBuf[15], "bShift=" + recvBuf[16]);
 
     // Set up canvas
     setupCanvas();
 
-    // Send SetPixelFormat — request 32-bit RGBX TrueColor
+    // Send SetPixelFormat — request 32-bit BGRX TrueColor
+    // BGRX matches Windows native format so TightVNC doesn't need to convert.
+    // Byte order on wire (little-endian): [B, G, R, X]
     var spf = new Uint8Array(20);
     spf[0] = 0; // message type: SetPixelFormat
     // [1..3] padding
@@ -540,11 +566,20 @@
     spf[8] = 0; spf[9] = 255;   // r-max = 255
     spf[10] = 0; spf[11] = 255; // g-max = 255
     spf[12] = 0; spf[13] = 255; // b-max = 255
-    spf[14] = 0;  // r-shift = 0
-    spf[15] = 8;  // g-shift = 8
-    spf[16] = 16; // b-shift = 16
+    spf[14] = 16; // r-shift = 16 (R in bits 16-23 → byte 2)
+    spf[15] = 8;  // g-shift = 8  (G in bits 8-15  → byte 1)
+    spf[16] = 0;  // b-shift = 0  (B in bits 0-7   → byte 0)
     // [17..19] padding
     sendTcpData(spf);
+    console.log("[VNC] Sent SetPixelFormat: 32bpp BGRX little-endian");
+
+    // Update our pixel format tracking
+    serverBpp = 32;
+    serverBytesPerPixel = 4;
+    serverRShift = 16;
+    serverGShift = 8;
+    serverBShift = 0;
+    serverBigEndian = false;
 
     // Send SetEncodings: CopyRect(1), Raw(0), DesktopSize(-223)
     var se = new Uint8Array(16);
@@ -565,6 +600,7 @@
     disconnectBtn.classList.remove("hidden");
 
     // Request full framebuffer update
+    console.log("[VNC] Requesting full framebuffer update");
     requestFramebufferUpdate(false);
 
     // Set up input handlers
@@ -620,6 +656,7 @@
     fbUpdateRemaining = (recvBuf[2] << 8) | recvBuf[3];
     fbUpdateRect = null;
     fbUpdatePixelsLeft = 0;
+    console.log("[VNC] FramebufferUpdate:", fbUpdateRemaining, "rects");
     return 4;
   }
 
@@ -627,16 +664,21 @@
     // Parse rectangle header if we haven't yet
     if (!fbUpdateRect) {
       if (recvBuf.length < 12) return 0;
+      var encoding = (recvBuf[8] << 24) | (recvBuf[9] << 16) | (recvBuf[10] << 8) | recvBuf[11];
       fbUpdateRect = {
         x: (recvBuf[0] << 8) | recvBuf[1],
         y: (recvBuf[2] << 8) | recvBuf[3],
         w: (recvBuf[4] << 8) | recvBuf[5],
         h: (recvBuf[6] << 8) | recvBuf[7],
-        encoding: (recvBuf[8] << 24) | (recvBuf[9] << 16) | (recvBuf[10] << 8) | recvBuf[11],
+        encoding: encoding,
+        bytesDone: 0,
       };
 
+      console.log("[VNC] Rect:", fbUpdateRect.x, fbUpdateRect.y,
+        fbUpdateRect.w + "x" + fbUpdateRect.h, "enc=" + encoding);
+
       // Handle pseudo-encodings
-      if (fbUpdateRect.encoding === -223 || fbUpdateRect.encoding === (0xFFFFFF21 | 0)) {
+      if (encoding === -223 || encoding === (0xFFFFFF21 | 0)) {
         // DesktopSize pseudo-encoding — server resized
         console.log("[VNC] Desktop resize:", fbUpdateRect.w, "x", fbUpdateRect.h);
         fbWidth = fbUpdateRect.w;
@@ -650,7 +692,7 @@
         return 12;
       }
 
-      if (fbUpdateRect.encoding === 1) {
+      if (encoding === 1) {
         // CopyRect: [srcX:u16][srcY:u16]
         if (recvBuf.length < 16) return 0;
         var srcX = (recvBuf[12] << 8) | recvBuf[13];
@@ -664,14 +706,14 @@
         return 16;
       }
 
-      if (fbUpdateRect.encoding !== 0) {
-        console.warn("[VNC] Unsupported encoding:", fbUpdateRect.encoding);
-        disconnectVnc("Unsupported encoding: " + fbUpdateRect.encoding);
+      if (encoding !== 0) {
+        console.warn("[VNC] Unsupported encoding:", encoding);
+        disconnectVnc("Unsupported encoding: " + encoding);
         return 0;
       }
 
-      // Raw encoding — need w*h*4 bytes of pixel data
-      fbUpdatePixelsLeft = fbUpdateRect.w * fbUpdateRect.h * 4;
+      // Raw encoding — need w*h*bpp bytes of pixel data
+      fbUpdatePixelsLeft = fbUpdateRect.w * fbUpdateRect.h * serverBytesPerPixel;
       return 12;
     }
 
@@ -683,50 +725,39 @@
       // Write pixels to canvas ImageData
       if (imageData && ctx) {
         var rect = fbUpdateRect;
-        var pixelsDone = (rect.w * rect.h * 4) - fbUpdatePixelsLeft;
-        var startRow = Math.floor(pixelsDone / (rect.w * 4));
-        var startCol = (pixelsDone % (rect.w * 4));
+        var bytesPerRow = rect.w * serverBytesPerPixel;
+        var bytesDone = rect.bytesDone;
 
-        // Copy pixel data into imageData
+        // Copy pixel data from recvBuf into imageData.
+        // Wire format is BGRX (little-endian, b-shift=0, g-shift=8, r-shift=16).
+        // Canvas ImageData is RGBA. So: wire byte 0=B→canvas[2], byte 1=G→canvas[1],
+        // byte 2=R→canvas[0], byte 3=X→canvas[3]=255.
         var imgPixels = imageData.data;
-        var srcOff = 0;
-        var dstRow = startRow;
-        var dstCol = startCol;
+        for (var i = 0; i < available; i++) {
+          var bytePos = bytesDone + i;
+          var row = Math.floor(bytePos / bytesPerRow);
+          var col = bytePos % bytesPerRow;
+          var px = Math.floor(col / serverBytesPerPixel);
+          var component = col % serverBytesPerPixel;
+          var imgOffset = ((rect.y + row) * fbWidth + rect.x + px) * 4;
 
-        while (srcOff < available) {
-          // Calculate position in imageData
-          var imgY = rect.y + dstRow;
-          var imgX = rect.x + Math.floor(dstCol / 4);
-          var imgOff = (imgY * fbWidth + imgX) * 4;
-          var component = dstCol % 4;
-
-          // How many bytes until end of this row in the rect?
-          var rowRemaining = rect.w * 4 - dstCol;
-          var toCopy = Math.min(available - srcOff, rowRemaining);
-
-          // Bulk copy this chunk of the row
-          for (var i = 0; i < toCopy; i++) {
-            var c = (component + i) % 4;
-            var pixel = Math.floor((dstCol + i) / 4);
-            var destOff = ((rect.y + dstRow) * fbWidth + rect.x + pixel) * 4;
-            if (c === 0) imgPixels[destOff] = recvBuf[srcOff + i];     // R
-            else if (c === 1) imgPixels[destOff + 1] = recvBuf[srcOff + i]; // G
-            else if (c === 2) imgPixels[destOff + 2] = recvBuf[srcOff + i]; // B
-            else imgPixels[destOff + 3] = 255; // A (ignore server's padding byte, force opaque)
-          }
-
-          srcOff += toCopy;
-          dstCol += toCopy;
-          if (dstCol >= rect.w * 4) {
-            dstCol = 0;
-            dstRow++;
+          if (component === 0) {
+            imgPixels[imgOffset + 2] = recvBuf[i]; // B → canvas Blue
+          } else if (component === 1) {
+            imgPixels[imgOffset + 1] = recvBuf[i]; // G → canvas Green
+          } else if (component === 2) {
+            imgPixels[imgOffset] = recvBuf[i];     // R → canvas Red
+          } else {
+            imgPixels[imgOffset + 3] = 255;         // X → canvas Alpha (opaque)
           }
         }
 
+        rect.bytesDone += available;
         fbUpdatePixelsLeft -= available;
 
-        // When this rect is complete, paint it
+        // Paint when rect is complete
         if (fbUpdatePixelsLeft <= 0) {
+          console.log("[VNC] Painting rect:", rect.x, rect.y, rect.w + "x" + rect.h);
           ctx.putImageData(imageData, 0, 0, rect.x, rect.y, rect.w, rect.h);
           fbUpdateRect = null;
           fbUpdateRemaining--;
@@ -944,6 +975,7 @@
   // ── Canvas Setup ──────────────────────────────────────────────
 
   function setupCanvas() {
+    console.log("[VNC] setupCanvas:", fbWidth, "x", fbHeight);
     vncCanvas.width = fbWidth;
     vncCanvas.height = fbHeight;
     ctx = vncCanvas.getContext("2d");
