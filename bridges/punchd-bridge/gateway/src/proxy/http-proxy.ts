@@ -42,7 +42,7 @@ import {
 export interface ProxyOptions {
   listenPort: number;
   backendUrl: string;
-  backends?: { name: string; url: string; noAuth?: boolean; stripAuth?: boolean }[];
+  backends?: { name: string; url: string; protocol?: string; noAuth?: boolean; stripAuth?: boolean }[];
   auth: TidecloakAuth;
   stripAuthHeader: boolean;
   tcConfig: TidecloakConfig;
@@ -132,6 +132,32 @@ function serveFile(
   }
 }
 
+/** Serve a binary static file (e.g. .wasm) without UTF-8 conversion */
+function serveBinaryFile(
+  res: ServerResponse,
+  filename: string,
+  contentType: string
+): void {
+  try {
+    const resolved = resolve(PUBLIC_DIR, filename);
+    const realPath = realpathSync(resolved);
+    if (!realPath.startsWith(PUBLIC_DIR + "/")) {
+      res.writeHead(403, { "Content-Type": "text/plain" });
+      res.end("Forbidden");
+      return;
+    }
+    const content = readFileSync(realPath);
+    res.writeHead(200, {
+      "Content-Type": contentType,
+      "Cache-Control": "public, max-age=86400",
+    });
+    res.end(content);
+  } catch {
+    res.writeHead(404, { "Content-Type": "text/plain" });
+    res.end("Not found");
+  }
+}
+
 // ── Redirect helper ──────────────────────────────────────────────
 
 function redirect(res: ServerResponse, location: string, status = 302): void {
@@ -158,6 +184,19 @@ const ALLOWED_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"
 function isBrowserRequest(req: IncomingMessage): boolean {
   const accept = req.headers.accept || "";
   return accept.includes("text/html");
+}
+
+/** Browser-initiated resource requests that don't contain sensitive data.
+ *  Without this exemption they 401 before the session token is refreshed. */
+function isPublicResource(path: string): boolean {
+  const basename = path.split("/").pop() || "";
+  return (
+    basename === "manifest.json" ||
+    basename.endsWith(".webmanifest") ||
+    basename === "browserconfig.xml" ||
+    basename === "robots.txt" ||
+    basename.endsWith(".ico")
+  );
 }
 
 function getCallbackUrl(req: IncomingMessage, isTls: boolean): string {
@@ -216,10 +255,11 @@ export function createProxy(options: ProxyOptions): {
     rejectedRequests: 0,
   };
 
-  // Build backend lookup map (name → URL)
+  // Build backend lookup map (name → URL) — skip non-HTTP backends (e.g. rdp://)
   const backendMap = new Map<string, URL>();
   if (options.backends?.length) {
     for (const b of options.backends) {
+      if (b.protocol && b.protocol !== "http") continue;
       backendMap.set(b.name, new URL(b.url));
     }
   }
@@ -469,8 +509,82 @@ export function createProxy(options: ProxyOptions): {
   // Server-side endpoints (token exchange, refresh) always use internal URL
   const serverEndpoints: OidcEndpoints = getOidcEndpoints(options.tcConfig, tcInternalUrl);
   const clientId = options.tcConfig.resource;
+
+  // ── Refresh token dedup cache ─────────────────────────────────
+  // When the access token expires, multiple concurrent requests (manifest.json,
+  // DC requests, session-token refresh) may all try to use the same refresh
+  // token simultaneously. TideCloak rotates refresh tokens on use, so the
+  // second concurrent refresh fails (old token consumed). Fix: deduplicate
+  // concurrent refreshes and cache the result briefly.
+  // Cache is keyed by refresh token to prevent cross-user token leaks.
+  interface RefreshResult {
+    accessToken: string;
+    expiresIn: number;
+    refreshToken?: string;
+    refreshExpiresIn?: number;
+    timestamp: number;
+  }
+  const refreshCache = new Map<string, RefreshResult>();
+  const refreshInFlightMap = new Map<string, Promise<RefreshResult | null>>();
+
+  async function deduplicatedRefresh(refreshToken: string): Promise<RefreshResult | null> {
+    // Reuse a recent result (< 60 seconds) — prevents hammering TideCloak
+    // when multiple requests trigger refresh simultaneously or in quick succession
+    const cached = refreshCache.get(refreshToken);
+    if (cached && Date.now() - cached.timestamp < 60_000) {
+      return cached;
+    }
+    // If a refresh is already in flight for this token, wait for it
+    const inFlight = refreshInFlightMap.get(refreshToken);
+    if (inFlight) {
+      return inFlight;
+    }
+    const promise = (async () => {
+      try {
+        const tokens = await refreshAccessToken(
+          serverEndpoints,
+          clientId,
+          refreshToken
+        );
+        const result: RefreshResult = {
+          accessToken: tokens.access_token,
+          expiresIn: tokens.expires_in,
+          refreshToken: tokens.refresh_token,
+          refreshExpiresIn: tokens.refresh_expires_in,
+          timestamp: Date.now(),
+        };
+        // Evict old entries to prevent unbounded growth
+        if (refreshCache.size > 100) {
+          const oldest = refreshCache.keys().next().value;
+          if (oldest !== undefined) refreshCache.delete(oldest);
+        }
+        refreshCache.set(refreshToken, result);
+        return result;
+      } catch (err) {
+        console.log("[Gateway] Deduplicated refresh failed:", err);
+        return null;
+      } finally {
+        refreshInFlightMap.delete(refreshToken);
+      }
+    })();
+    refreshInFlightMap.set(refreshToken, promise);
+    return promise;
+  }
+
   const isTls = !!options.tls;
   _useSecureCookies = isTls;
+
+  // Rate limiter for /auth/session-token (per-IP sliding window)
+  const sessionTokenHits = new Map<string, number[]>();
+  // Evict stale IPs every 5 minutes
+  setInterval(() => {
+    const now = Date.now();
+    for (const [ip, times] of sessionTokenHits) {
+      if (times.length === 0 || now - times[times.length - 1] > 120_000) {
+        sessionTokenHits.delete(ip);
+      }
+    }
+  }, 300_000).unref();
 
   /** Get browser-facing OIDC endpoints.
    *  Uses authServerPublicUrl if explicitly set, otherwise returns relative
@@ -482,15 +596,16 @@ export function createProxy(options: ProxyOptions): {
     return getOidcEndpoints(options.tcConfig, "");
   }
 
+  // CSP is NOT set as a blanket header. The gateway proxies third-party
+  // backend HTML and injects scripts into it; a nonce-based CSP would break
+  // the backend's own inline scripts, and 'unsafe-inline' provides no real
+  // protection. Backends should set their own CSP in their responses.
+
   const requestHandler = async (req: IncomingMessage, res: ServerResponse) => {
-      // ── Security headers ──────────────────────────────────────────
+      // ── Security headers (applied to all responses) ────────────────
       res.setHeader("X-Content-Type-Options", "nosniff");
       res.setHeader("X-Frame-Options", "SAMEORIGIN");
       res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
-      res.setHeader(
-        "Content-Security-Policy",
-        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' wss: ws:; img-src 'self' data: blob:; media-src 'self' blob:; worker-src 'self' blob:; frame-ancestors 'self'"
-      );
       if (isTls) {
         res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
       }
@@ -539,6 +654,20 @@ export function createProxy(options: ProxyOptions): {
         return;
       }
 
+      // WASM files (IronRDP)
+      if (path.startsWith("/wasm/")) {
+        const ext = path.slice(path.lastIndexOf("."));
+        if (ext === ".wasm") {
+          serveBinaryFile(res, path.slice(1), "application/wasm");
+        } else if (ext === ".js") {
+          serveFile(res, path.slice(1), "application/javascript; charset=utf-8");
+        } else {
+          res.writeHead(404);
+          res.end("Not found");
+        }
+        return;
+      }
+
       // Static JS files
       if (path.startsWith("/js/") && path.endsWith(".js")) {
         // Allow SW to control root scope even though it lives under /js/
@@ -547,6 +676,12 @@ export function createProxy(options: ProxyOptions): {
           res.setHeader("Cache-Control", "no-cache");
         }
         serveFile(res, path.slice(1), "application/javascript; charset=utf-8");
+        return;
+      }
+
+      // RDP client page — served without auth (TCP tunnel requires JWT)
+      if (path === "/rdp") {
+        serveFile(res, "rdp.html", "text/html; charset=utf-8");
         return;
       }
 
@@ -561,6 +696,7 @@ export function createProxy(options: ProxyOptions): {
           stunServer: options.iceServers?.[0]
             ? `stun:${options.iceServers[0].replace("stun:", "")}`
             : null,
+          targetGatewayId: options.gatewayId || undefined,
         };
         if (options.turnServer && options.turnSecret) {
           // Only serve TURN credentials to authenticated users
@@ -696,6 +832,22 @@ export function createProxy(options: ProxyOptions): {
           res.end(JSON.stringify({ error: "Missing X-Requested-With header" }));
           return;
         }
+        // Rate limit: max 6 requests per minute per IP
+        const stIp = req.socket.remoteAddress || "unknown";
+        const stNow = Date.now();
+        const stHistory = sessionTokenHits.get(stIp);
+        if (stHistory) {
+          // Evict entries older than 60s
+          while (stHistory.length > 0 && stNow - stHistory[0] > 60_000) stHistory.shift();
+          if (stHistory.length >= 6) {
+            res.writeHead(429, { "Content-Type": "application/json", "Retry-After": "10" });
+            res.end(JSON.stringify({ error: "Too many requests" }));
+            return;
+          }
+          stHistory.push(stNow);
+        } else {
+          sessionTokenHits.set(stIp, [stNow]);
+        }
         const cookies = parseCookies(req.headers.cookie);
         let accessToken = cookies["gateway_access"];
         // Also accept Authorization: Bearer token (relay flow has no cookies)
@@ -705,36 +857,34 @@ export function createProxy(options: ProxyOptions): {
             accessToken = authHeader.slice(7);
           }
         }
-        if (!accessToken) {
-          res.writeHead(401, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: "No session" }));
-          return;
-        }
-        let payload = await options.auth.verifyToken(accessToken);
 
-        // If access token expired, try refreshing with refresh token
+        let payload = accessToken
+          ? await options.auth.verifyToken(accessToken)
+          : null;
+
+        // Always refresh when the session-token endpoint is called.
+        // This endpoint is only called by the client's periodic refresh
+        // (every 2 min), so it's not excessive. It ensures the client
+        // always gets a token with full lifetime and the browser's
+        // gateway_access cookie is renewed (preventing expiry-based 401s
+        // on non-DC requests like manifest.json).
         const setCookies: string[] = [];
-        if (!payload && cookies["gateway_refresh"]) {
-          try {
-            const tokens = await refreshAccessToken(
-              serverEndpoints,
-              clientId,
-              cookies["gateway_refresh"]
-            );
-            payload = await options.auth.verifyToken(tokens.access_token);
-            if (payload) {
-              accessToken = tokens.access_token;
+        if (cookies["gateway_refresh"]) {
+          const refreshResult = await deduplicatedRefresh(cookies["gateway_refresh"]);
+          if (refreshResult) {
+            const refreshedPayload = await options.auth.verifyToken(refreshResult.accessToken);
+            if (refreshedPayload) {
+              payload = refreshedPayload;
+              accessToken = refreshResult.accessToken;
               setCookies.push(
-                buildCookieHeader("gateway_access", tokens.access_token, tokens.expires_in)
+                buildCookieHeader("gateway_access", refreshResult.accessToken, refreshResult.expiresIn)
               );
-              if (tokens.refresh_token) {
+              if (refreshResult.refreshToken) {
                 setCookies.push(
-                  buildCookieHeader("gateway_refresh", tokens.refresh_token, tokens.refresh_expires_in || 1800, "Strict")
+                  buildCookieHeader("gateway_refresh", refreshResult.refreshToken, refreshResult.refreshExpiresIn || 1800, "Strict")
                 );
               }
             }
-          } catch (err) {
-            console.log("[Gateway] Session token refresh failed:", err);
           }
         }
 
@@ -956,9 +1106,9 @@ export function createProxy(options: ProxyOptions): {
       stats.totalRequests++;
 
       // Check if this backend skips gateway-side JWT validation
-      const isNoAuth = activeBackend
+      const isNoAuth = isPublicResource(path) || (activeBackend
         ? noAuthBackends.has(activeBackend)
-        : false; // default backend always requires JWT
+        : false); // default backend always requires JWT
 
       let payload: any = null;
 
@@ -982,46 +1132,41 @@ export function createProxy(options: ProxyOptions): {
 
         // If access token expired, try refreshing with refresh token
         if (!payload && cookies["gateway_refresh"]) {
-          try {
-            const tokens = await refreshAccessToken(
-              serverEndpoints,
-              clientId,
-              cookies["gateway_refresh"]
-            );
-
-            payload = await options.auth.verifyToken(tokens.access_token);
-
+          const refreshResult = await deduplicatedRefresh(cookies["gateway_refresh"]);
+          if (refreshResult) {
+            payload = await options.auth.verifyToken(refreshResult.accessToken);
             if (payload) {
-              // Set updated cookies on the response
-              token = tokens.access_token;
+              token = refreshResult.accessToken;
               const refreshCookies: string[] = [
                 buildCookieHeader(
                   "gateway_access",
-                  tokens.access_token,
-                  tokens.expires_in
+                  refreshResult.accessToken,
+                  refreshResult.expiresIn
                 ),
               ];
-              if (tokens.refresh_token) {
+              if (refreshResult.refreshToken) {
                 refreshCookies.push(
                   buildCookieHeader(
                     "gateway_refresh",
-                    tokens.refresh_token,
-                    tokens.refresh_expires_in || 1800,
+                    refreshResult.refreshToken,
+                    refreshResult.refreshExpiresIn || 1800,
                     "Strict"
                   )
                 );
               }
-              // Store cookies to set on the proxied response
               (res as any).__refreshCookies = refreshCookies;
             }
-          } catch (err) {
-            console.log("[Gateway] Token refresh failed:", err);
           }
         }
 
         // No valid token — redirect browser or 401 for API
         if (!payload) {
           stats.rejectedRequests++;
+          // Diagnostic: log why auth failed for DC requests
+          if (req.headers["x-dc-request"]) {
+            const tokenSnippet = token ? `${token.slice(0, 20)}...` : "null";
+            console.log(`[Gateway] DC auth failed: url=${url} token=${tokenSnippet} hasRefreshCookie=${!!cookies["gateway_refresh"]}`);
+          }
 
           if (isBrowserRequest(req)) {
             const fullUrl = backendPrefix + url;
@@ -1209,11 +1354,11 @@ export function createProxy(options: ProxyOptions): {
                 // /__b/<name> prefix prepended automatically.
                 // Gateway-internal paths (/auth/*, /js/*, /realms/*, etc.) are
                 // skipped — they work without the prefix.
-                // Escape backendPrefix for safe JS string interpolation (prevents XSS if name contains quotes/backslashes)
+                // Escape backendPrefix for safe JS string interpolation (prevents XSS if name contains quotes/backslashes).
                 const safePrefix = backendPrefix.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/</g, "\\x3c");
                 const patchScript = `<script>(function(){` +
                   `var P="${safePrefix}";` +
-                  `var W=/^\\/(js\\/|auth\\/|login|webrtc-config|realms\\/|resources\\/|portal|health)/;` +
+                  `var W=/^\\/(js\\/|auth\\/|login|webrtc-config|rdp|realms\\/|resources\\/|portal|health)/;` +
                   `function n(u){return typeof u==="string"&&u[0]==="/"&&u.indexOf("/__b/")!==0&&!W.test(u)}` +
                   `var F=window.fetch;window.fetch=function(u,i){` +
                     `if(n(u))u=P+u;` +
@@ -1232,6 +1377,26 @@ export function createProxy(options: ProxyOptions): {
                   `var SA=Element.prototype.setAttribute;Element.prototype.setAttribute=function(a,v){` +
                     `if((a==="src"||a==="href")&&typeof v==="string"&&n(v))v=P+v;` +
                     `return SA.call(this,a,v)};` +
+                  // Fix CSS url() breakage when /__b/<name> contains apostrophes or spaces:
+                  // strip quotes from url('…') / url("…") and percent-encode chars that
+                  // are invalid in unquoted CSS url() (spaces, quotes, parens, tabs).
+                  // Uses a Proxy on HTMLElement.style for reliable interception.
+                  `function q(v){if(typeof v!=="string"||v.indexOf("url(")===-1)return v;` +
+                    `return v.replace(/url\\(([^)]*)\\)/g,function(m,i){` +
+                      `var u=i.trim();` +
+                      `if(u.length>1&&(u[0]==="'"||u[0]==='"')&&u[u.length-1]===u[0])u=u.slice(1,-1);` +
+                      `return"url("+u.replace(/ /g,"%20").replace(/'/g,"%27").replace(/"/g,"%22").replace(/\\t/g,"%09")+")"` +
+                    `})}` +
+                  `var _sd=Object.getOwnPropertyDescriptor(HTMLElement.prototype,"style");` +
+                  `if(_sd&&_sd.get){var _wm=new WeakMap();Object.defineProperty(HTMLElement.prototype,"style",{` +
+                    `get:function(){var r=_sd.get.call(this),p=_wm.get(r);if(!p){p=new Proxy(r,{` +
+                      `set:function(t,k,v){t[k]=q(v);return true},` +
+                      `get:function(t,k){var v=t[k];if(typeof v!=="function")return v;` +
+                        `if(k==="setProperty")return function(){if(arguments.length>1)arguments[1]=q(arguments[1]);return t.setProperty.apply(t,arguments)};` +
+                        `return v.bind(t)}` +
+                    `});_wm.set(r,p)}return p},` +
+                    `set:_sd.set?function(v){_sd.set.call(this,q(v))}:void 0,` +
+                    `configurable:true})}` +
                   `})()</script>`;
                 if (html.includes("<head>")) {
                   html = html.replace("<head>", `<head>${patchScript}`);

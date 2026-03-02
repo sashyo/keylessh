@@ -1,10 +1,10 @@
 /**
  * Service Worker for WebRTC DataChannel HTTP tunneling.
  *
- * Intercepts same-origin sub-resource requests and routes them through
- * the page's WebRTC DataChannel when available. Navigation requests
- * always use the network (relay) since they load new pages that need
- * to establish their own DataChannel.
+ * Intercepts same-origin requests (including navigations) and routes
+ * them through the page's WebRTC DataChannel when available. If the
+ * requesting client has no DC (e.g. new tab), any other tab's active
+ * DC is used as a proxy.
  *
  * The page signals DC readiness via postMessage({ type: "dc_ready" }).
  * Only clients that have signaled are used for DataChannel routing.
@@ -74,8 +74,42 @@ function waitForDc(clientId, timeoutMs) {
   });
 }
 
+/** Find any active DC client for routing (e.g. new tab without its own DC). */
+function findAnyDcClient() {
+  if (dcClients.size === 0) return Promise.resolve(null);
+  return self.clients.matchAll({ type: "window" }).then(function (allClients) {
+    var alive = {};
+    allClients.forEach(function (c) { alive[c.id] = true; });
+    for (var id of dcClients) {
+      if (alive[id]) return id;
+    }
+    // All DC clients are gone — clean up stale entries
+    dcClients.clear();
+    return null;
+  });
+}
+
 /** Gateway-internal paths — skip DataChannel, go through relay. */
-var GATEWAY_PATHS = /^\/(js\/|auth\/|login|webrtc-config|_idp\/|realms\/|resources\/|portal|health)/;
+var GATEWAY_PATHS = /^\/(js\/|auth\/|login|webrtc-config|rdp|_idp\/|realms\/|resources\/|portal|health)/;
+
+/** Fetch with retry — retries on network errors and non-ok responses. */
+function fetchWithRetry(request, retries, delay) {
+  return fetch(request).then(function (resp) {
+    if (resp.ok || retries <= 0) return resp;
+    return new Promise(function (resolve) {
+      setTimeout(function () {
+        resolve(fetchWithRetry(request, retries - 1, delay));
+      }, delay);
+    });
+  }).catch(function (err) {
+    if (retries <= 0) throw err;
+    return new Promise(function (resolve, reject) {
+      setTimeout(function () {
+        fetchWithRetry(request, retries - 1, delay).then(resolve).catch(reject);
+      }, delay);
+    });
+  });
+}
 
 function extractPrefix(pathname) {
   var m = pathname.match(/^\/__b\/[^/]+/);
@@ -88,33 +122,44 @@ function stripPrefix(pathname) {
 }
 
 self.addEventListener("fetch", function (event) {
-  // Navigation requests (page loads) always use relay — new pages
-  // need to establish their own DataChannel
-  if (event.request.mode === "navigate") return;
-
   var url = new URL(event.request.url);
 
-  // Intercept requests to localhost (any port) that target TideCloak
-  // paths (/realms/*, /resources/*). The SDK/adapter may construct
-  // absolute URLs using the TideCloak's internal localhost address.
+  // Intercept requests to localhost (any port). Backends (Jellyfin, etc.)
+  // may construct absolute localhost URLs in API responses (e.g. image URLs
+  // like http://localhost:8096/Items/{id}/Images/Primary). These bypass
+  // the patchScript's URL rewriting and would be blocked by CSP img-src 'self'.
   // Rewrite them to same-origin so they route through the gateway proxy.
   if (
     url.origin !== self.location.origin &&
-    (url.hostname === "localhost" || url.hostname === "127.0.0.1") &&
-    (url.pathname.startsWith("/realms/") || url.pathname.startsWith("/resources/"))
+    (url.hostname === "localhost" || url.hostname === "127.0.0.1")
   ) {
-    console.log("[SW] Rewriting localhost request:", event.request.url);
-    var rewrittenUrl = self.location.origin + url.pathname + url.search;
     event.respondWith(
-      fetch(new Request(rewrittenUrl, {
-        method: event.request.method,
-        headers: event.request.headers,
-        body: event.request.method !== "GET" && event.request.method !== "HEAD"
-          ? event.request.body
-          : undefined,
-        credentials: "same-origin",
-        redirect: event.request.redirect,
-      }))
+      (async function () {
+        var targetPath = url.pathname + url.search;
+        // Add backend prefix from the requesting client's page URL
+        if (event.clientId && !targetPath.startsWith("/__b/")) {
+          try {
+            var reqClient = await self.clients.get(event.clientId);
+            if (reqClient) {
+              var clientPrefix = extractPrefix(new URL(reqClient.url).pathname);
+              if (clientPrefix && !GATEWAY_PATHS.test(url.pathname)) {
+                targetPath = clientPrefix + targetPath;
+              }
+            }
+          } catch (e) {}
+        }
+        var rewrittenUrl = self.location.origin + targetPath;
+        console.log("[SW] Rewriting localhost request:", event.request.url, "→", rewrittenUrl);
+        return fetch(new Request(rewrittenUrl, {
+          method: event.request.method,
+          headers: event.request.headers,
+          body: event.request.method !== "GET" && event.request.method !== "HEAD"
+            ? event.request.body
+            : undefined,
+          credentials: "same-origin",
+          redirect: event.request.redirect,
+        }));
+      })()
     );
     return;
   }
@@ -122,38 +167,68 @@ self.addEventListener("fetch", function (event) {
   if (url.origin !== self.location.origin) return;
 
   // Skip gateway-internal paths (strip prefix first for matching)
-  if (GATEWAY_PATHS.test(stripPrefix(url.pathname))) return;
-
-  // If DC is already active, route through it immediately.
-  // If not yet ready, wait up to 8s for it — this prevents the burst
-  // of sub-resource requests from flooding the STUN relay while
-  // WebRTC is still connecting. Falls back to network on timeout.
-  if (!event.clientId) return;
-
-  if (dcClients.has(event.clientId)) {
-    event.respondWith(rewriteAndHandle(event));
+  if (GATEWAY_PATHS.test(stripPrefix(url.pathname))) {
+    // Retry chunk/bundle file loading on failure — fast SPA navigation
+    // can saturate connections, causing transient load failures.
+    if (/\.(chunk|bundle)\.(js|css)/.test(url.pathname)) {
+      event.respondWith(fetchWithRetry(event.request, 2, 500));
+    }
     return;
   }
 
+  // Navigation requests (page loads, reloads) should NEVER wait for DC —
+  // let them go through relay immediately so the page loads fast.
+  // DC will be set up in the background and used for subsequent requests.
+  var isNavigation = event.request.mode === "navigate";
+
+  // Route through DataChannel if possible. Priority:
+  // 1. Requesting client has DC → use it immediately
+  // 2. Any other client has DC → use it (new tabs, redirects)
+  // 3. Wait briefly for requesting client's DC (only for subresources)
+  // 4. Fall back to network (relay)
+  if (event.clientId && dcClients.has(event.clientId)) {
+    event.respondWith(rewriteAndHandle(event, event.clientId));
+    return;
+  }
+
+  if (dcClients.size > 0) {
+    event.respondWith(
+      findAnyDcClient().then(function (dcClientId) {
+        if (dcClientId) return rewriteAndHandle(event, dcClientId);
+        // No live DC client found — navigations go straight to relay
+        if (isNavigation) return fetch(event.request);
+        if (event.clientId) {
+          return waitForDc(event.clientId, 3000).then(function (ready) {
+            if (ready) return rewriteAndHandle(event, event.clientId);
+            return fetch(event.request);
+          });
+        }
+        return fetch(event.request);
+      })
+    );
+    return;
+  }
+
+  // No DC clients at all — navigations go straight to relay (don't block page load)
+  if (isNavigation || !event.clientId) return;
+
+  // Subresource request: wait briefly for DC, then fall back to relay
   event.respondWith(
-    waitForDc(event.clientId, 8000).then(function (ready) {
-      if (ready) {
-        return rewriteAndHandle(event);
-      }
-      // DC didn't connect in time — fall back to network (relay)
+    waitForDc(event.clientId, 3000).then(function (ready) {
+      if (ready) return rewriteAndHandle(event, event.clientId);
       return fetch(event.request);
     })
   );
 });
 
-async function rewriteAndHandle(event) {
+async function rewriteAndHandle(event, clientId) {
   var request = event.request;
   var url = new URL(request.url);
 
-  // Prepend /__b/<name> prefix from requesting client if needed
-  if (!url.pathname.startsWith("/__b/") && event.clientId) {
+  // Prepend /__b/<name> prefix from DC client's page if needed
+  if (!url.pathname.startsWith("/__b/") && clientId) {
     try {
-      var client = await self.clients.get(event.clientId);
+      var client = await self.clients.get(clientId);
       if (client) {
         var prefix = extractPrefix(new URL(client.url).pathname);
         if (prefix && !GATEWAY_PATHS.test(url.pathname)) {
@@ -167,7 +242,7 @@ async function rewriteAndHandle(event) {
     }
   }
 
-  return handleViaDataChannel(event.clientId, request);
+  return handleViaDataChannel(clientId, request);
 }
 
 async function handleViaDataChannel(clientId, request) {
@@ -194,6 +269,11 @@ async function handleViaDataChannel(clientId, request) {
     for (var pair of request.headers) {
       headers[pair[0]] = pair[1];
     }
+    // Strip conditional headers — DC responses bypass the browser's HTTP
+    // cache, so a 304 from the backend produces a null-body response that
+    // the browser can't match to a cache entry.  Force full 200 responses.
+    delete headers["if-none-match"];
+    delete headers["if-modified-since"];
 
     client.postMessage(
       {
@@ -240,6 +320,18 @@ async function handleViaDataChannel(clientId, request) {
           }
         }
 
+        // Redirect responses: return a proper redirect so the browser follows it.
+        // The subsequent request will be intercepted by the SW and routed through DC.
+        if ([301, 302, 303, 307, 308].indexOf(e.data.statusCode) !== -1) {
+          var location = responseHeaders.get("location");
+          if (location) {
+            try {
+              resolve(Response.redirect(new URL(location, request.url).href, e.data.statusCode));
+              return;
+            } catch (err) { /* invalid URL, fall through */ }
+          }
+        }
+
         if (e.data.streaming) {
           // Live streaming response (SSE, NDJSON) — return a ReadableStream
           // so the browser can consume data progressively.
@@ -279,26 +371,42 @@ async function handleViaDataChannel(clientId, request) {
           return;
         }
 
-        var bodyBytes;
-        if (e.data.binaryBody instanceof ArrayBuffer) {
-          bodyBytes = new Uint8Array(e.data.binaryBody);
-        } else {
-          bodyBytes = Uint8Array.from(atob(e.data.body || ""), function (c) {
-            return c.charCodeAt(0);
-          });
+        // Null-body status codes (204, 304) must not have a body per spec
+        var nullBodyStatus = e.data.statusCode === 204 || e.data.statusCode === 304;
+
+        try {
+          var bodyBytes;
+          if (nullBodyStatus) {
+            bodyBytes = null;
+          } else if (e.data.binaryBody instanceof ArrayBuffer) {
+            bodyBytes = new Uint8Array(e.data.binaryBody);
+          } else {
+            bodyBytes = Uint8Array.from(atob(e.data.body || ""), function (c) {
+              return c.charCodeAt(0);
+            });
+          }
+
+          // Remove content-length — the browser derives it from bodyBytes.
+          // A mismatched value (from the backend's original HTTP response) can
+          // cause truncation or rendering failures in SW-constructed Responses.
+          responseHeaders.delete("content-length");
+          responseHeaders.delete("content-encoding");
+
+          console.log("[SW] DC response:", e.data.statusCode,
+            "type:", responseHeaders.get("content-type") || "",
+            "body:", nullBodyStatus ? 0 : bodyBytes.length, "bytes",
+            "via:", nullBodyStatus ? "null-body" : e.data.binaryBody ? "binary" : "base64");
+
+          resolve(
+            new Response(bodyBytes, {
+              status: e.data.statusCode,
+              headers: responseHeaders,
+            })
+          );
+        } catch (buildErr) {
+          console.error("[SW] Failed to build DC response:", buildErr);
+          resolve(fetch(fallbackRequest));
         }
-
-        console.log("[SW] DC response:", e.data.statusCode,
-          "body:", bodyBytes.length, "bytes",
-          "content-range:", responseHeaders.get("content-range"),
-          "via:", e.data.binaryBody ? "ArrayBuffer" : "base64");
-
-        resolve(
-          new Response(bodyBytes, {
-            status: e.data.statusCode,
-            headers: responseHeaders,
-          })
-        );
       };
     });
   } catch (e) {

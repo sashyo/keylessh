@@ -1,7 +1,7 @@
 @startuml system-overview
 !theme plain
 !pragma layout smetana
-title Punc'd — System Overview
+title Punch'd — System Overview
 
 skinparam {
   backgroundColor #0f172a
@@ -50,6 +50,7 @@ package "Private Network" as priv {
   component "Gateway\n(port 7891)" as gw
   component "Backend App 1\n(port 3000)" as app1
   component "Backend App 2\n(port 8080)" as app2
+  component "RDP Server\n(port 3389)" as rdpsrv
 }
 
 cloud "TideCloak" as tc {
@@ -65,8 +66,9 @@ browser <-right-> gw : "4. P2P DataChannel\n(hole-punched)"
 sig <-right-> gw : "Persistent WS\n(registration +\nrelay + signaling)"
 sig -down-> reg
 
-gw -down-> app1 : "Proxy"
-gw -down-> app2 : "Proxy"
+gw -down-> app1 : "HTTP Proxy"
+gw -down-> app2 : "HTTP Proxy"
+gw -down-> rdpsrv : "RDCleanPath\n(TCP+TLS)"
 gw -left-> oidc : "OIDC\ncode exchange"
 browser -right-> oidc : "Login\n(via Gateway proxy)"
 

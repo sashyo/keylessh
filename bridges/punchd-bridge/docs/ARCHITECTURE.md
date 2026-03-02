@@ -1,6 +1,6 @@
-# Punc'd Architecture
+# Punch'd Architecture
 
-Punc'd's signal server and gateway work together to provide authenticated, NAT-traversing access to backend web applications. The signal server acts as a public signaling hub and HTTP relay; a coturn sidecar handles STUN/TURN protocol traffic. The gateway is a local proxy that registers with the signal server and serves traffic from remote clients — first via HTTP relay, then upgraded to peer-to-peer WebRTC DataChannels.
+Punch'd's signal server and gateway work together to provide authenticated, NAT-traversing access to backend web applications. The signal server acts as a public signaling hub and HTTP relay; a coturn sidecar handles STUN/TURN protocol traffic. The gateway is a local proxy that registers with the signal server and serves traffic from remote clients — first via HTTP relay, then upgraded to peer-to-peer WebRTC DataChannels.
 
 > PlantUML sources are in [docs/diagrams/](diagrams/) if you need to regenerate or edit the SVGs.
 
@@ -115,6 +115,138 @@ End-to-end view: portal selection → authentication → HTTP relay → WebRTC u
 
 ![Complete Lifecycle](diagrams/complete-lifecycle.svg)
 
+## RDP Remote Desktop (IronRDP WASM + RDCleanPath)
+
+The gateway supports browser-based RDP remote desktop sessions using [IronRDP](https://github.com/Devolutions/IronRDP) compiled to WebAssembly. RDP traffic flows through the same WebRTC DataChannel infrastructure as HTTP — no additional ports or servers required.
+
+![RDP via RDCleanPath](diagrams/rdp-rdcleanpath.svg)
+
+### Architecture
+
+```
+Browser (IronRDP WASM)
+  │
+  │  IronRDP creates a WebSocket to /ws/rdcleanpath
+  │  DCWebSocket shim intercepts (same-origin)
+  │
+  ├─ Control: ws_open, ws_close      → controlChannel (DataChannel)
+  ├─ Binary:  [0x02][UUID][payload]  → bulkChannel (DataChannel)
+  │
+  │  ── WebRTC (P2P or TURN relay) ──
+  │
+  ├─ Gateway peer-handler receives DataChannel messages
+  │  recognizes path "/ws/rdcleanpath"
+  │  routes to virtual RDCleanPath session (no real WebSocket)
+  │
+  ├─ RDCleanPath handler:
+  │   1. Parses RDCleanPath Request PDU (ASN.1 DER)
+  │   2. Validates JWT + enforces dest: role
+  │   3. TCP connects to RDP server
+  │   4. X.224 Connection Request/Confirm
+  │   5. TLS handshake (gateway terminates TLS)
+  │   6. Extracts server certificate chain
+  │   7. Sends RDCleanPath Response PDU
+  │   8. Enters relay mode: TLS socket ↔ DataChannel
+  │
+  └─ RDP Server (port 3389)
+```
+
+IronRDP WASM cannot make raw TCP/TLS connections from the browser. The **RDCleanPath protocol** solves this by having the gateway act as a TLS-terminating proxy: the gateway performs the TLS handshake with the RDP server and sends the server's certificate chain back to IronRDP, which uses it for NLA/CredSSP authentication. After the handshake, the gateway enters relay mode — forwarding encrypted RDP data bidirectionally between the browser (via DataChannel) and the RDP server (via TLS socket).
+
+### DCWebSocket Shim
+
+IronRDP WASM expects a standard `WebSocket` object. The `DCWebSocket` shim (in `rdp-client.js`) overrides `window.WebSocket` for same-origin connections and routes traffic through the existing DataChannel infrastructure:
+
+- `ws_open` / `ws_close` messages flow over the **control** DataChannel (JSON)
+- Binary data uses the **bulk** DataChannel with the binary WS fast-path (`0x02` magic byte + 36-byte UUID + payload)
+
+This means no real WebSocket server is needed — the peer-handler creates a virtual WebSocket session backed by the RDCleanPath handler.
+
+### RDCleanPath Protocol (ASN.1 DER)
+
+The wire format uses ASN.1 DER encoding with EXPLICIT context-specific tags. Version constant: `3390`.
+
+**Request PDU** (client → gateway):
+
+| Tag | Field | Type | Description |
+|-----|-------|------|-------------|
+| [0] | version | INTEGER | Protocol version (3390) |
+| [2] | destination | UTF8String | Backend name (e.g. "My PC") |
+| [3] | proxy_auth | UTF8String | JWT for authentication |
+| [5] | preconnection_blob | UTF8String | Optional PCB |
+| [6] | x224_connection_pdu | OCTET STRING | X.224 Connection Request bytes |
+
+**Response PDU** (gateway → client):
+
+| Tag | Field | Type | Description |
+|-----|-------|------|-------------|
+| [0] | version | INTEGER | Protocol version (3390) |
+| [6] | x224_connection_pdu | OCTET STRING | X.224 Connection Confirm bytes |
+| [7] | server_cert_chain | SEQUENCE OF OCTET STRING | DER X.509 certs (leaf first) |
+| [9] | server_addr | UTF8String | RDP server hostname |
+
+**Error PDU** (gateway → client):
+
+| Tag | Field | Type | Description |
+|-----|-------|------|-------------|
+| [0] | version | INTEGER | Protocol version (3390) |
+| [1] | error | SEQUENCE | Error details |
+| [1][0] | error_code | INTEGER | 1=general, 2=negotiation |
+| [1][1] | http_status | INTEGER | HTTP status (401, 403, 404, 500) |
+| [1][2] | wsa_error | INTEGER | Windows socket error (e.g. 10061=ECONNREFUSED) |
+| [1][3] | tls_alert | INTEGER | TLS alert code |
+
+### RDP Backend Configuration
+
+RDP backends use the `rdp://` protocol scheme in the `BACKENDS` environment variable:
+
+```bash
+BACKENDS="Web App=http://localhost:3000,My PC=rdp://localhost:3389"
+```
+
+The browser navigates to `/rdp?backend=My%20PC` to start an RDP session. The connect form prompts for Windows credentials (username + password), then IronRDP WASM handles the full RDP protocol including CredSSP/NLA authentication.
+
+### Security
+
+- JWT validated before any TCP connection (prevents SSRF/network scanning)
+- Backend name resolved from config only (no arbitrary host:port from client)
+- `dest:<gatewayId>:<backendName>` role enforcement (same as HTTP proxy)
+- RDCleanPath sessions count toward the per-DataChannel WebSocket limit
+- TLS to the RDP server uses `rejectUnauthorized: false` (RDP servers typically use self-signed certificates — IronRDP validates via CredSSP)
+
+### IronRDP WASM Build
+
+IronRDP WASM is built from the [IronRDP](https://github.com/Devolutions/IronRDP) repository:
+
+```bash
+# Prerequisites
+rustup target add wasm32-unknown-unknown
+cargo install wasm-pack
+
+# Build
+git clone https://github.com/Devolutions/IronRDP.git /tmp/ironrdp
+cd /tmp/ironrdp/crates/ironrdp-web
+RUSTFLAGS="-Ctarget-feature=+simd128,+bulk-memory --cfg getrandom_backend=\"wasm_js\"" \
+  wasm-pack build --target web
+
+# Deploy to gateway
+cp pkg/ironrdp_web_bg.wasm <gateway>/public/wasm/
+cp pkg/ironrdp_web.js <gateway>/public/wasm/
+```
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `src/rdcleanpath/der-codec.ts` | Minimal ASN.1 DER encoder/decoder |
+| `src/rdcleanpath/rdcleanpath.ts` | RDCleanPath PDU parse/serialize |
+| `src/rdcleanpath/rdcleanpath-handler.ts` | Session state machine (AWAITING_REQUEST → CONNECTING → RELAY → CLOSED) |
+| `src/webrtc/peer-handler.ts` | Intercepts `/ws/rdcleanpath` WebSocket opens on DataChannel |
+| `public/js/rdp-client.js` | Browser-side: signaling, DCWebSocket shim, IronRDP WASM integration, canvas rendering |
+| `public/rdp.html` | RDP connect form + fullscreen canvas |
+| `public/wasm/ironrdp_web.js` | IronRDP WASM JavaScript bindings |
+| `public/wasm/ironrdp_web_bg.wasm` | IronRDP WASM binary |
+
 ## Authentication Flow
 
 ### Gateway OIDC Login (through relay)
@@ -141,7 +273,7 @@ The gateway also handles an `/_idp/` prefix: TideCloak URLs are rewritten to `{p
 **Token validation:**
 1. `gateway_access` cookie (HttpOnly, `Lax`)
 2. `Authorization: Bearer <jwt>` header
-3. If expired, transparent refresh via `gateway_refresh` cookie (`Strict`)
+3. If expired, transparent refresh via `gateway_refresh` cookie (`Strict`). Refresh is deduplicated per refresh token — concurrent requests sharing the same token reuse a single in-flight refresh call, and results are cached for 60 seconds (bounded to 100 entries).
 4. Proxied requests include `x-forwarded-user` header with the subject claim
 
 ### Portal/Admin TideCloak Auth
@@ -182,6 +314,7 @@ BACKENDS="App=http://localhost:3000,AuthServer=http://localhost:8080;noauth"
 
 - **Auth backends** (no `;noauth`): Requests without a valid JWT are redirected to the TideCloak login flow. The gateway sets `x-forwarded-user` from the verified token.
 - **No-auth backends** (`;noauth`): Requests are forwarded as-is. No JWT extraction, validation, refresh, or login redirect. No `x-forwarded-user` header is set.
+- **Public resources**: Certain browser-initiated resource requests (`manifest.json`, `*.webmanifest`, `browserconfig.xml`, `robots.txt`, `*.ico`) are always proxied without auth, regardless of backend auth settings. These are fetched by the browser before any session is established and would otherwise return 401.
 
 ### Path Prefix System
 
@@ -222,20 +355,20 @@ STUN/TURN protocol handling is delegated to [coturn](https://github.com/coturn/c
 
 - STUN Binding Requests/Responses (RFC 5389) for NAT discovery
 - TURN Allocate/Refresh/Send/CreatePermission/ChannelBind (RFC 5766) for relay fallback
-- Ephemeral credential validation via HMAC-SHA256 shared secret
+- Ephemeral credential validation via HMAC-SHA1 shared secret
 
 The signaling server and gateway only handle WebSocket signaling; all UDP/TCP STUN/TURN traffic goes directly to coturn.
 
-### TURN REST API Credentials (HMAC-SHA256)
+### TURN REST API Credentials (HMAC-SHA1)
 
 Both the gateway and coturn share a `TURN_SECRET`. The gateway generates short-lived credentials for clients:
 
 ```
 username = String(Math.floor(Date.now() / 1000) + 3600)   // expires in 1 hour
-password = Base64(HMAC-SHA256(TURN_SECRET, username))
+password = Base64(HMAC-SHA1(TURN_SECRET, username))
 ```
 
-coturn validates by recomputing the HMAC-SHA256 and checking the expiry timestamp. The `--auth-secret-algorithm=sha256` flag tells coturn to use SHA-256 instead of the legacy SHA-1 default.
+coturn validates by recomputing the HMAC-SHA1 and checking the expiry timestamp. This uses coturn's default `--use-auth-secret` mode (HMAC-SHA1).
 
 ### STUN Message Format (RFC 5389)
 
@@ -295,17 +428,28 @@ Both servers set on every response:
 
 The signal server sets `X-Frame-Options: DENY`. The gateway sets `X-Frame-Options: SAMEORIGIN` (Tide SDK enclave uses iframes).
 
+**CSP is intentionally not set** on proxied backend responses. The gateway proxies third-party backend HTML and injects scripts (fetch/XHR patch, WebRTC upgrade); a nonce-based CSP would break the backend's own inline scripts, and `unsafe-inline` provides no real protection since the whole point is injecting scripts. Backends should set their own CSP in their responses.
+
 ### Request Validation
 
 - **HTTP method whitelist:** Only `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, `OPTIONS` are allowed. Other methods return 405. Applied at all three request entry points (relay, DataChannel, backend proxy).
 - **Open redirect prevention:** Auth redirect parameters only accept relative paths starting with `/`.
 - **Body size limits:** 10 MB for relay requests, 64 KB for API POST bodies, 50 MB for proxied response buffering.
 
+### CORS
+
+The signal server validates the `Origin` header on every request. If `ALLOWED_ORIGINS` is set, only listed origins receive CORS headers. If unset, only same-origin requests (where `Origin` matches the `Host` header) are allowed. Credentials (`Access-Control-Allow-Credentials: true`) are only sent with validated origins.
+
+### IP Trust
+
+The signal server only reads `X-Forwarded-For` when the direct socket IP is in the `TRUSTED_PROXIES` set. When no trusted proxies are configured, the socket address is always used for rate limiting and logging.
+
 ### Authentication & Secrets
 
 - **API_SECRET:** Gateway registration with the signal server uses timing-safe comparison (`crypto.timingSafeEqual`).
-- **TURN_SECRET:** Shared secret for HMAC-SHA256 ephemeral TURN credentials.
+- **TURN_SECRET:** Shared secret for HMAC-SHA1 ephemeral TURN credentials.
 - **Gateway ID:** Generated with `crypto.randomBytes(8).toString("hex")` (16 hex chars) for cryptographic uniqueness.
+- **Client ID:** Generated with `crypto.randomUUID()` (cryptographically random) to prevent guessing or collision.
 
 ### Rate Limiting & Capacity
 
@@ -320,6 +464,7 @@ The signal server sets `X-Frame-Options: DENY`. The gateway sets `X-Frame-Option
 | WebRTC peer connections per gateway | 200 | New offers rejected |
 | Admin WebSocket subscribers | 50 | Subscription rejected |
 | TC cookie jar sessions | 10,000 | LRU eviction |
+| `/auth/session-token` requests per IP | 6 per minute | HTTP 429 |
 
 ### Proxy Timeouts
 
@@ -375,6 +520,11 @@ See [turnserver.conf](../signal-server/turnserver.conf) for the full configurati
 | `TIDECLOAK_CONFIG_B64` | (none) | Base64 TideCloak adapter config (enables admin JWT auth) |
 | `TLS_CERT_PATH` | (none) | TLS cert for signaling port (enables HTTPS/WSS) |
 | `TLS_KEY_PATH` | (none) | TLS key for signaling port |
+| `ALLOWED_ORIGINS` | (none) | Comma-separated origins for CORS (`null` = same-origin only) |
+| `TRUSTED_PROXIES` | (none) | Comma-separated proxy IPs trusted for `X-Forwarded-For` |
+| `ICE_SERVERS` | (none) | STUN server URL for gateway WebRTC config, e.g. `stun:host:3478` |
+| `TURN_SERVER` | (none) | TURN server URL for gateway WebRTC config, e.g. `turn:host:3478` |
+| `TURN_SECRET` | (none) | Shared secret for TURN ephemeral credentials (HMAC-SHA1) |
 
 ### Gateway
 
@@ -390,7 +540,7 @@ See [turnserver.conf](../signal-server/turnserver.conf) for the full configurati
 | `GATEWAY_DESCRIPTION` | (none) | Description shown in portal |
 | `ICE_SERVERS` | derived from `STUN_SERVER_URL` | STUN server for WebRTC, e.g. `stun:host:3478` |
 | `TURN_SERVER` | (none) | TURN server URL, e.g. `turn:host:3478` |
-| `TURN_SECRET` | (none) | Shared secret for TURN credentials (HMAC-SHA256) |
+| `TURN_SECRET` | (none) | Shared secret for TURN credentials (HMAC-SHA1) |
 | `API_SECRET` | (none) | Shared secret for signal server registration |
 | `TIDECLOAK_CONFIG_B64` | (none) | Base64 TideCloak adapter config |
 | `TIDECLOAK_CONFIG_PATH` | `<project>/data/tidecloak.json` | File path to TideCloak config (fallback if B64 not set) |
@@ -470,7 +620,7 @@ The signal server and gateway can be run by **different operators**. The signal 
 | Secret | Generated by | Given to | Purpose |
 |--------|-------------|----------|---------|
 | `API_SECRET` | Signal server operator | Gateway operators | Authenticates gateway registration (timing-safe validated) |
-| `TURN_SECRET` | Signal server operator | Gateway operators | Generates ephemeral TURN relay credentials (HMAC-SHA256) |
+| `TURN_SECRET` | Signal server operator | Gateway operators | Generates ephemeral TURN relay credentials (HMAC-SHA1) |
 
 **Typical flow:**
 1. Signal server operator deploys → secrets auto-generated by `signal-server/deploy.sh`

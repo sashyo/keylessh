@@ -123,6 +123,7 @@ import {
   GetRawChangeSetRequest,
   AddApprovalWithSignedRequest,
   GetClientEvents,
+  syncPolicyToTideCloak,
 } from "./lib/tidecloakApi";
 import type { ChangeSetRequest, AccessApproval } from "./lib/auth/keycloakTypes";
 import { getAllowedSshUsersFromToken } from "./lib/auth/sshUsers";
@@ -1250,7 +1251,7 @@ export async function registerRoutes(
           id: string;
           displayName: string;
           description: string;
-          backends: { name: string }[];
+          backends: { name: string; protocol?: string }[];
           online: boolean;
           clientCount: number;
           signalServerId: string;
@@ -1271,7 +1272,7 @@ export async function registerRoutes(
               id: string;
               displayName: string;
               description: string;
-              backends: { name: string }[];
+              backends: { name: string; protocol?: string }[];
               online: boolean;
               clientCount: number;
             }> };
@@ -1305,6 +1306,7 @@ export async function registerRoutes(
         const annotated = results.map((gw) => {
           const backends = (gw.backends.length > 0 ? gw.backends : [{ name: "Default" }]).map((b) => ({
             name: b.name,
+            protocol: ("protocol" in b ? b.protocol : "http") || "http",
             accessible: hasDestAccess(destPerms, gw.id, b.name),
           }));
           return { ...gw, backends };
@@ -1960,6 +1962,7 @@ export async function registerRoutes(
         }
 
         // Extract the Policy from the PolicySignRequest and store it WITH the VVK signature
+        let policyDataBase64: string | undefined;
         try {
           const request = PolicySignRequest.decode(base64ToBytes(pendingPolicy.policyRequestData));
           const policy = request.getRequestedPolicy();
@@ -1975,7 +1978,7 @@ export async function registerRoutes(
           }
 
           const policyBytes = policy.toBytes();
-          const policyDataBase64 = bytesToBase64(policyBytes);
+          policyDataBase64 = bytesToBase64(policyBytes);
 
           // Store the committed policy bytes in ssh_policies table
           await policyStorage.upsertPolicy({
@@ -1991,6 +1994,24 @@ export async function registerRoutes(
         } catch (extractError) {
           log(`Warning: Failed to extract policy bytes: ${extractError}`);
           // Continue with commit even if extraction fails
+        }
+
+        // Sync to TideCloak so the admin UI can display it
+        try {
+          const token = req.accessToken!;
+          const syncUrl = `${token ? "has token" : "NO TOKEN"}`;
+          console.log(`[PolicySync] Starting sync for role=${pendingPolicy.roleId}, token=${syncUrl}, policyData=${policyDataBase64 ? policyDataBase64.substring(0, 20) + "..." : "empty"}`);
+          await syncPolicyToTideCloak(token, {
+            roleId: pendingPolicy.roleId,
+            contractCode: pendingPolicy.contractCode,
+            approvalType: "implicit",
+            executionType: "private",
+            threshold: pendingPolicy.threshold,
+            policyData: policyDataBase64 || "",
+          });
+          log(`Synced policy for role ${pendingPolicy.roleId} to TideCloak`);
+        } catch (syncError) {
+          log(`Warning: Failed to sync policy to TideCloak: ${syncError}`);
         }
 
         await pendingPolicyStorage.commitPolicy(id, req.user?.email || "unknown");
