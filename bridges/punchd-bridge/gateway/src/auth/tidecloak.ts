@@ -1,9 +1,10 @@
 /**
- * TideCloak JWT verification using local JWKS.
- * Adapted from tcp-bridge pattern.
+ * TideCloak JWT verification using local JWKS with remote fallback.
+ * Tries the local JWKS first (from config), and falls back to fetching
+ * the JWKS from the TideCloak server if the local key doesn't match.
  */
 
-import { jwtVerify, createLocalJWKSet, JWTPayload } from "jose";
+import { jwtVerify, createLocalJWKSet, createRemoteJWKSet, JWTPayload } from "jose";
 import type { TidecloakConfig } from "../config.js";
 
 export interface TidecloakAuth {
@@ -14,10 +15,12 @@ export function createTidecloakAuth(
   config: TidecloakConfig,
   extraIssuers?: string[]
 ): TidecloakAuth {
-  const JWKS = createLocalJWKSet(config.jwk);
+  const localJWKS = createLocalJWKSet(config.jwk);
 
   const baseUrl = config["auth-server-url"].replace(/\/$/, "");
   const primaryIssuer = `${baseUrl}/realms/${config.realm}`;
+  const jwksUrl = new URL(`${primaryIssuer}/protocol/openid-connect/certs`);
+  const remoteJWKS = createRemoteJWKSet(jwksUrl);
 
   // Accept tokens from both the local and public TideCloak URLs
   const validIssuers = [primaryIssuer];
@@ -29,14 +32,27 @@ export function createTidecloakAuth(
   }
 
   console.log("[Gateway] TideCloak JWKS loaded successfully");
+  console.log(`[Gateway] Remote JWKS fallback: ${jwksUrl}`);
   console.log(`[Gateway] Valid issuers: ${validIssuers.join(", ")}`);
 
   return {
     async verifyToken(token: string): Promise<JWTPayload | null> {
       try {
-        const { payload } = await jwtVerify(token, JWKS, {
-          issuer: validIssuers,
-        });
+        // Try local JWKS first, fall back to remote if key not found
+        let payload: JWTPayload;
+        try {
+          ({ payload } = await jwtVerify(token, localJWKS, {
+            issuer: validIssuers,
+          }));
+        } catch (localErr: any) {
+          if (localErr?.code === "ERR_JWKS_NO_MATCHING_KEY") {
+            ({ payload } = await jwtVerify(token, remoteJWKS, {
+              issuer: validIssuers,
+            }));
+          } else {
+            throw localErr;
+          }
+        }
 
         if (payload.azp !== config.resource) {
           console.log(

@@ -26,7 +26,7 @@ import {
 } from "https";
 import { createHmac, randomBytes } from "crypto";
 import { readFileSync, realpathSync } from "fs";
-import { join, resolve } from "path";
+import { join, resolve, sep } from "path";
 import type { TidecloakAuth } from "../auth/tidecloak.js";
 import type { TidecloakConfig } from "../config.js";
 import {
@@ -118,7 +118,7 @@ function serveFile(
     const resolved = resolve(PUBLIC_DIR, filename);
     // Prevent path traversal and symlink escape — real path must be inside PUBLIC_DIR
     const realPath = realpathSync(resolved);
-    if (!realPath.startsWith(PUBLIC_DIR + "/")) {
+    if (!realPath.startsWith(PUBLIC_DIR + sep)) {
       res.writeHead(403, { "Content-Type": "text/plain" });
       res.end("Forbidden");
       return;
@@ -141,7 +141,7 @@ function serveBinaryFile(
   try {
     const resolved = resolve(PUBLIC_DIR, filename);
     const realPath = realpathSync(resolved);
-    if (!realPath.startsWith(PUBLIC_DIR + "/")) {
+    if (!realPath.startsWith(PUBLIC_DIR + sep)) {
       res.writeHead(403, { "Content-Type": "text/plain" });
       res.end("Forbidden");
       return;
