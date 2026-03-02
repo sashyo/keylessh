@@ -1,7 +1,7 @@
 import { createServer as createHttpServer, request as httpRequest } from "http";
 import { createServer as createHttpsServer, request as httpsRequest } from "https";
 import { WebSocketServer, WebSocket } from "ws";
-import { jwtVerify, createLocalJWKSet, JWTPayload } from "jose";
+import { jwtVerify, createLocalJWKSet, createRemoteJWKSet, JWTPayload } from "jose";
 import { readFileSync, existsSync } from "fs";
 import { join } from "path";
 import { timingSafeEqual, createHmac, randomBytes } from "crypto";
@@ -75,6 +75,7 @@ interface TidecloakConfig {
 
 let tcConfig: TidecloakConfig | null = null;
 let JWKS: ReturnType<typeof createLocalJWKSet> | null = null;
+let remoteJWKS: ReturnType<typeof createRemoteJWKSet> | null = null;
 
 function loadConfig(): boolean {
   try {
@@ -104,7 +105,11 @@ function loadConfig(): boolean {
     }
 
     JWKS = createLocalJWKSet(tcConfig.jwk);
+    const baseUrl = tcConfig["auth-server-url"].replace(/\/$/, "");
+    const jwksUrl = new URL(`${baseUrl}/realms/${tcConfig.realm}/protocol/openid-connect/certs`);
+    remoteJWKS = createRemoteJWKSet(jwksUrl);
     console.log("[Signal] JWKS loaded successfully");
+    console.log(`[Signal] Remote JWKS fallback: ${jwksUrl}`);
     return true;
   } catch (err) {
     console.error("[Signal] Failed to load config:", err);
@@ -120,7 +125,17 @@ async function verifyToken(token: string): Promise<JWTPayload | null> {
       ? `${tcConfig["auth-server-url"]}realms/${tcConfig.realm}`
       : `${tcConfig["auth-server-url"]}/realms/${tcConfig.realm}`;
 
-    const { payload } = await jwtVerify(token, JWKS, { issuer });
+    // Try local JWKS first, fall back to remote if key not found
+    let payload: JWTPayload;
+    try {
+      ({ payload } = await jwtVerify(token, JWKS, { issuer }));
+    } catch (localErr: any) {
+      if (localErr?.code === "ERR_JWKS_NO_MATCHING_KEY" && remoteJWKS) {
+        ({ payload } = await jwtVerify(token, remoteJWKS, { issuer }));
+      } else {
+        throw localErr;
+      }
+    }
 
     if (payload.azp !== tcConfig.resource) {
       console.log(`[Signal] AZP mismatch: expected ${tcConfig.resource}, got ${payload.azp}`);
@@ -742,22 +757,10 @@ async function handleRegister(ws: WebSocket, msg: SignalMessage, clientIp: strin
     gatewayWebSockets.add(ws);
     safeSend(ws, { type: "registered", role: "gateway", id: msg.id });
   } else if (msg.role === "client") {
-    // Client registration requires a valid JWT from KeyleSSH
-    if (!msg.token) {
-      safeSend(ws, { type: "error", message: "Authentication required" });
-      ws.close(4001, "Missing token");
-      return;
-    }
-
-    const payload = await verifyToken(msg.token);
-    if (!payload) {
-      safeSend(ws, { type: "error", message: "Invalid or expired token" });
-      ws.close(4002, "Invalid token");
-      return;
-    }
-
-    console.log(`[Signal] Client authenticated: ${payload.sub || "unknown"} (${msg.id})`);
-    registry.registerClient(msg.id, ws, msg.token);
+    // Signal server is a dumb relay — gateway handles auth.
+    // Just pass the token through so the gateway can validate it.
+    console.log(`[Signal] Client registered: ${msg.id}`);
+    registry.registerClient(msg.id, ws, msg.token || "");
     registry.updateClientReflexive(msg.id, clientIp);
     safeSend(ws, { type: "registered", role: "client", id: msg.id });
 
