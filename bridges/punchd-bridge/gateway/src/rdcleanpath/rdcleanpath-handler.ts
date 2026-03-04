@@ -201,6 +201,26 @@ export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCle
         await performCredSSP(tlsSocket, username, request.proxyAuth);
 
         console.log(`[RDCleanPath] CredSSP/NLA completed for "${backendName}"`);
+
+        // Read and consume the 4-byte Early User Authorization Result PDU
+        // (MS-RDPBCGR §2.2.10.2) — sent by the server after NLA completes.
+        const authResult = await readExactBytes(tlsSocket, 4);
+        const authValue = authResult.readUInt32LE(0);
+        console.log(`[RDCleanPath] Early User Auth Result: 0x${authValue.toString(16).padStart(8, "0")}`);
+        if (authValue !== 0x00000000) {
+          throw new Error(`Early User Authorization denied: 0x${authValue.toString(16).padStart(8, "0")}`);
+        }
+
+        // Modify X.224 selectedProtocol from PROTOCOL_HYBRID (2) to
+        // PROTOCOL_SSL (1) so IronRDP skips NLA (we already did it).
+        // selectedProtocol is at byte offset 15 (LE uint32).
+        if (x224Response.length >= 19) {
+          x224Response[15] = 0x01; // PROTOCOL_SSL
+          x224Response[16] = 0x00;
+          x224Response[17] = 0x00;
+          x224Response[18] = 0x00;
+          console.log(`[RDCleanPath] Patched X.224 selectedProtocol to PROTOCOL_SSL`);
+        }
       }
 
       // Step 6: Send RDCleanPath Response PDU
@@ -408,4 +428,39 @@ function extractCertChain(tls: TLSSocket): Buffer[] {
   }
 
   return chain;
+}
+
+/**
+ * Read exactly `n` bytes from a TLS socket.
+ */
+function readExactBytes(sock: TLSSocket, n: number): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let got = 0;
+
+    const timer = setTimeout(() => {
+      sock.off("data", onData);
+      reject(new Error(`readExactBytes timeout (wanted ${n}, got ${got})`));
+    }, X224_READ_TIMEOUT);
+
+    function onData(data: Buffer): void {
+      chunks.push(data);
+      got += data.length;
+      if (got >= n) {
+        clearTimeout(timer);
+        sock.off("data", onData);
+        resolve(Buffer.concat(chunks).subarray(0, n));
+      }
+    }
+
+    sock.on("data", onData);
+    sock.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    sock.on("close", () => {
+      clearTimeout(timer);
+      reject(new Error(`Socket closed (wanted ${n} bytes, got ${got})`));
+    });
+  });
 }
