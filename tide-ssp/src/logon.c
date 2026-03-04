@@ -87,7 +87,7 @@ NTSTATUS TideLogonUser(
             NULL,              /* no domain prefix */
             &authData,
             &authDataSize,
-            (PSECURITY_STRING)&flatNameBuf);
+            &flatNameBuf);
 
         if (NT_SUCCESS(status) && authData) {
             /*
