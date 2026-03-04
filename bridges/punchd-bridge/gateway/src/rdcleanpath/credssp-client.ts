@@ -126,6 +126,10 @@ export async function performCredSSP(
   // ── Step 2: Read server response (ACCEPTOR_NEGO + CHALLENGE) ──
 
   const tsResp1 = await readTSRequest(tlsSocket);
+  console.log(`[CredSSP] Server TSRequest: version=${tsResp1.version}, hasNegoToken=${!!tsResp1.negoToken}, errorCode=${tsResp1.errorCode ?? "none"}, hasPubKeyAuth=${!!tsResp1.pubKeyAuth}`);
+  if (tsResp1.negoToken) {
+    console.log(`[CredSSP] Server negoToken: ${tsResp1.negoToken.length} bytes, first bytes: ${tsResp1.negoToken.subarray(0, 20).toString("hex")}`);
+  }
   const challengeSpnego = extractNegoToken(tsResp1);
   if (!challengeSpnego) {
     throw new Error("CredSSP: no negoToken in server response");

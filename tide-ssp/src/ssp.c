@@ -356,7 +356,7 @@ static NTSTATUS NTAPI TideSsp_GetExtendedInformation(
         if (!info) return SEC_E_INSUFFICIENT_MEMORY;
 
         info->Class = SecpkgNego2Info;
-        info->Info.Nego2Info.AuthSchemeID = TIDESSP_AUTH_SCHEME;
+        memcpy(info->Info.Nego2Info.AuthScheme, &TIDESSP_AUTH_SCHEME, 16);
         info->Info.Nego2Info.PackageFlags = 0;
         *ppInfo = info;
         return STATUS_SUCCESS;
