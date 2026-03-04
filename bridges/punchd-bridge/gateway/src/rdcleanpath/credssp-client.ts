@@ -312,21 +312,17 @@ export async function performCredSSP(
     console.log(`[CredSSP]   +svrVerify ku=25: ${ck25wv.toString("hex")}`);
   }
 
-  // Client's VERIFY transcript must include the server's VERIFY message.
-  // "All previously exchanged NEGOEX messages" before the client's own VERIFY
-  // includes the server's VERIFY (which was received before the client sends its own).
-  const clientTranscript = serverVerifyBytes
-    ? Buffer.concat([transcriptData, serverVerifyBytes])
-    : transcriptData;
-
-  const KU_CLIENT_VERIFY = 23;
+  // RFC 4121 key usages: 23 = KG_USAGE_ACCEPTOR_SIGN, 25 = KG_USAGE_INITIATOR_SIGN
+  // Server (acceptor) used ku=23; client (initiator) must use ku=25.
+  // Transcript excludes VERIFY messages (both sides checksum the same non-VERIFY messages).
+  const KU_CLIENT_VERIFY = 25;
   let clientChecksum: Buffer;
   if (serverCksumType === CHECKSUM_TYPE_HMAC_SHA1_96_AES128) {
-    clientChecksum = computeAes128Checksum(sessionKey, KU_CLIENT_VERIFY, clientTranscript);
+    clientChecksum = computeAes128Checksum(sessionKey, KU_CLIENT_VERIFY, transcriptData);
   } else {
-    clientChecksum = md4(clientTranscript);
+    clientChecksum = md4(transcriptData);
   }
-  console.log(`[CredSSP] Client VERIFY: ku=${KU_CLIENT_VERIFY}, transcript=${clientTranscript.length}b, checksum=${clientChecksum.toString("hex")}`);
+  console.log(`[CredSSP] Client VERIFY: ku=${KU_CLIENT_VERIFY}, transcript=${transcriptData.length}b, checksum=${clientChecksum.toString("hex")}`);
 
   const clientVerifyMsg = buildVerifyMessage(
     conversationId,
@@ -360,10 +356,8 @@ export async function performCredSSP(
   console.log(`[CredSSP] RFC4121 MIC ku=25 (${mic25.length}b): ${mic25.toString("hex")}`);
   console.log(`[CredSSP] RFC4121 MIC ku=23 (${mic23.length}b): ${mic23.toString("hex")}`);
 
-  // Use ku=25 (standard RFC 4121 initiator sign key usage)
-  const mechListMICToken = mic25;
-  console.log(`[CredSSP] Using RFC4121 mechListMIC (${mechListMICToken.length}b): ${mechListMICToken.toString("hex")}`);
-  const verifySpnego = buildSpnegoResponse(clientVerifyMsg, mechListMICToken);
+  // Skip mechListMIC for now to isolate VERIFY fix
+  const verifySpnego = buildSpnegoResponse(clientVerifyMsg);
   console.log(`[CredSSP] Client NEGOEX VERIFY raw (${clientVerifyMsg.length}b): ${clientVerifyMsg.toString("hex")}`);
   console.log(`[CredSSP] Client SPNEGO response raw (${verifySpnego.length}b): ${verifySpnego.toString("hex")}`);
   // Also log the server's SPNEGO for comparison
