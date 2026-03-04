@@ -2,18 +2,16 @@
  * TideSSP — SSPI function implementations with NegoExtender (NEGOEX) support.
  *
  * Wire protocol tokens:
- *   NEGOTIATE  [0x01][version:u8][username_len:u16LE][username:UTF-8]
- *   CHALLENGE  [0x02][challenge:32 bytes]
- *   AUTHENTICATE [0x03][signature:64 bytes][pubkey:32 bytes]
+ *   TOKEN_JWT  [0x04][JWT bytes (ASCII)]
  *
  * Flow (server side — AcceptSecurityContext):
- *   1. Receive NEGOTIATE → extract username, generate challenge → return CHALLENGE
- *   2. Receive AUTHENTICATE → verify Ed25519(pubkey, challenge, sig) → logon user
+ *   1. Receive TOKEN_JWT → verify JWT EdDSA signature against hardcoded JWK
+ *      → extract username → derive session key → logon user → return SEC_E_OK
  *
  * NegoEx integration:
  *   - SECPKG_FLAG_NEGOTIABLE2 flag in SpGetInfo tells NegoExtender to include us
  *   - SpGetExtendedInformation returns our AuthScheme GUID for NEGOEX negotiation
- *   - Session key derived from SHA-256(challenge || signature || pubkey) for VERIFY
+ *   - Session key derived from SHA-256(jwt_signature_bytes) for VERIFY
  */
 
 #define WIN32_LEAN_AND_MEAN
@@ -57,13 +55,20 @@ static const GUID TIDESSP_AUTH_SCHEME = {
 
 /* ── Token types ──────────────────────────────────────────────── */
 
-#define TOKEN_NEGOTIATE    0x01
-#define TOKEN_CHALLENGE    0x02
-#define TOKEN_AUTHENTICATE 0x03
+#define TOKEN_JWT          0x04
 
-#define CHALLENGE_SIZE     32
 #define SESSION_KEY_SIZE   16
 #define MAX_USERNAME_LEN   256
+
+/* ── JWK Ed25519 public key (from tidecloak.json) ────────────── */
+/* kid: TPlidYX-_Jaw8wTsthyDEQIwIxqbJkyoJBW6qN4InTQ               */
+/* x (base64url): 75TGtIj59SC5jCYJFMkuq-bjhdbHFXWniyZ1dc3BV2E     */
+static const UCHAR JWK_PUBLIC_KEY[32] = {
+    0xef, 0x94, 0xc6, 0xb4, 0x88, 0xf9, 0xf5, 0x20,
+    0xb9, 0x8c, 0x26, 0x09, 0x14, 0xc9, 0x2e, 0xab,
+    0xe6, 0xe3, 0x85, 0xd6, 0xc7, 0x15, 0x75, 0xa7,
+    0x8b, 0x26, 0x75, 0x75, 0xcd, 0xc1, 0x57, 0x61,
+};
 
 /* ── LSA dispatch table — set by SpInitialize ─────────────────── */
 
@@ -73,12 +78,11 @@ static PLSA_SECPKG_FUNCTION_TABLE LsaDispatch = NULL;
 
 typedef struct _TIDE_CONTEXT {
     ULONG_PTR ContextHandle;
-    UCHAR     Challenge[CHALLENGE_SIZE];
-    UCHAR     SessionKey[SESSION_KEY_SIZE]; /* derived after AUTHENTICATE */
+    UCHAR     SessionKey[SESSION_KEY_SIZE]; /* derived from JWT signature */
     BOOLEAN   SessionKeyValid;
     WCHAR     Username[MAX_USERNAME_LEN + 1];
     USHORT    UsernameLen;
-    int       State;  /* 0 = awaiting NEGOTIATE, 1 = awaiting AUTHENTICATE, 2 = done */
+    int       State;  /* 0 = initial, 2 = done */
 } TIDE_CONTEXT, *PTIDE_CONTEXT;
 
 /* ── Forward declarations ─────────────────────────────────────── */
@@ -90,25 +94,132 @@ extern NTSTATUS TideLogonUser(
     PVOID *TokenInformation,
     PULONG TokenInfoSize);
 
-/* ── Helper: derive session key ───────────────────────────────── */
-/* SHA-256(challenge || signature || pubkey), truncated to 16 bytes */
+/* ── Base64url decode ─────────────────────────────────────────── */
+
+static const signed char B64URL_TABLE[256] = {
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,-1,
+     52,53,54,55,56,57,58,59,60,61,-1,-1,-1,-1,-1,-1,
+    -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,
+    15,16,17,18,19,20,21,22,23,24,25,-1,-1,-1,-1,63,
+    -1,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,
+    41,42,43,44,45,46,47,48,49,50,51,-1,-1,-1,-1,-1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+};
+
+/* Decode base64url (no padding required). Returns decoded length, or -1 on error. */
+static int base64url_decode(const char *src, int srcLen, UCHAR *dst, int dstCapacity)
+{
+    int i, j = 0;
+    unsigned int accum = 0;
+    int bits = 0;
+    for (i = 0; i < srcLen; i++) {
+        if (src[i] == '=' || src[i] == '\0') break;
+        signed char val = B64URL_TABLE[(unsigned char)src[i]];
+        if (val < 0) return -1;
+        accum = (accum << 6) | (unsigned int)val;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            if (j >= dstCapacity) return -1;
+            dst[j++] = (UCHAR)((accum >> bits) & 0xFF);
+        }
+    }
+    return j;
+}
+
+/* ── Minimal JSON string extraction ──────────────────────────── */
+/* Find "key":"value" in JSON and copy value to dst. Returns length or -1. */
+
+static int json_extract_string(const char *json, int jsonLen,
+                               const char *key, char *dst, int dstCapacity)
+{
+    /* Build search pattern: "key":" */
+    char pattern[128];
+    int keyLen = (int)strlen(key);
+    if (keyLen + 4 > (int)sizeof(pattern)) return -1;
+    pattern[0] = '"';
+    memcpy(pattern + 1, key, keyLen);
+    pattern[keyLen + 1] = '"';
+    pattern[keyLen + 2] = ':';
+    pattern[keyLen + 3] = '\0';
+
+    /* Search for pattern */
+    const char *pos = NULL;
+    int i;
+    int patLen = keyLen + 3;
+    for (i = 0; i <= jsonLen - patLen; i++) {
+        if (memcmp(json + i, pattern, patLen) == 0) {
+            pos = json + i + patLen;
+            break;
+        }
+    }
+    if (!pos) return -1;
+
+    /* Skip whitespace */
+    while (pos < json + jsonLen && (*pos == ' ' || *pos == '\t')) pos++;
+    if (pos >= json + jsonLen || *pos != '"') return -1;
+    pos++; /* skip opening quote */
+
+    /* Copy until closing quote */
+    int len = 0;
+    while (pos < json + jsonLen && *pos != '"' && len < dstCapacity - 1) {
+        dst[len++] = *pos++;
+    }
+    dst[len] = '\0';
+    return len;
+}
+
+/* Extract integer value for "key":number */
+static long long json_extract_int(const char *json, int jsonLen, const char *key)
+{
+    char pattern[128];
+    int keyLen = (int)strlen(key);
+    if (keyLen + 4 > (int)sizeof(pattern)) return -1;
+    pattern[0] = '"';
+    memcpy(pattern + 1, key, keyLen);
+    pattern[keyLen + 1] = '"';
+    pattern[keyLen + 2] = ':';
+    pattern[keyLen + 3] = '\0';
+
+    const char *pos = NULL;
+    int i;
+    int patLen = keyLen + 3;
+    for (i = 0; i <= jsonLen - patLen; i++) {
+        if (memcmp(json + i, pattern, patLen) == 0) {
+            pos = json + i + patLen;
+            break;
+        }
+    }
+    if (!pos) return -1;
+    while (pos < json + jsonLen && (*pos == ' ' || *pos == '\t')) pos++;
+    return _atoi64(pos);
+}
+
+/* ── Helper: derive session key from JWT signature ───────────── */
+/* SHA-256(jwt_signature_bytes), truncated to 16 bytes */
 /* Must match the gateway's derivation exactly */
 
-static void deriveSessionKey(
-    const UCHAR challenge[CHALLENGE_SIZE],
-    const UCHAR signature[64],
-    const UCHAR pubkey[32],
+static void deriveSessionKeyFromSig(
+    const UCHAR *sigBytes, ULONG sigLen,
     UCHAR outKey[SESSION_KEY_SIZE])
 {
     BCRYPT_ALG_HANDLE hAlg = NULL;
     BCRYPT_HASH_HANDLE hHash = NULL;
     UCHAR hash[32]; /* SHA-256 output */
 
+    memset(outKey, 0, SESSION_KEY_SIZE);
     if (BCRYPT_SUCCESS(BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_SHA256_ALGORITHM, NULL, 0))) {
         if (BCRYPT_SUCCESS(BCryptCreateHash(hAlg, &hHash, NULL, 0, NULL, 0, 0))) {
-            BCryptHashData(hHash, (PUCHAR)challenge, CHALLENGE_SIZE, 0);
-            BCryptHashData(hHash, (PUCHAR)signature, 64, 0);
-            BCryptHashData(hHash, (PUCHAR)pubkey, 32, 0);
+            BCryptHashData(hHash, (PUCHAR)sigBytes, sigLen, 0);
             BCryptFinishHash(hHash, hash, sizeof(hash), 0);
             BCryptDestroyHash(hHash);
         }
@@ -146,7 +257,7 @@ static NTSTATUS NTAPI TideSsp_GetInfo(PSecPkgInfoW PackageInfo)
                                 SECPKG_FLAG_NEGOTIABLE2;
     PackageInfo->wVersion = TIDESSP_VERSION;
     PackageInfo->wRPCID = SECPKG_ID_NONE;
-    PackageInfo->cbMaxToken = 1 + 1 + 64 + 32; /* AUTHENTICATE token size */
+    PackageInfo->cbMaxToken = 4096; /* JWT token size */
     PackageInfo->Name = TIDESSP_NAME;
     PackageInfo->Comment = TIDESSP_COMMENT;
     return STATUS_SUCCESS;
@@ -202,25 +313,85 @@ static NTSTATUS NTAPI TideSsp_AcceptLsaModeContext(
 
     PUCHAR token = (PUCHAR)inBuf->pvBuffer;
 
-    if (token[0] == TOKEN_NEGOTIATE) {
-        /* ── Step 1: NEGOTIATE ── */
-        if (inBuf->cbBuffer < 4)
+    if (token[0] == TOKEN_JWT) {
+        /* ── JWT verification (single round, no challenge) ── */
+        const char *jwt = (const char *)(token + 1);
+        int jwtLen = (int)(inBuf->cbBuffer - 1);
+
+        /* Find the three parts: header.payload.signature */
+        const char *dot1 = NULL, *dot2 = NULL;
+        int k;
+        for (k = 0; k < jwtLen; k++) {
+            if (jwt[k] == '.') {
+                if (!dot1) dot1 = jwt + k;
+                else { dot2 = jwt + k; break; }
+            }
+        }
+        if (!dot1 || !dot2)
             return SEC_E_INVALID_TOKEN;
 
-        UCHAR version = token[1];
-        (void)version;
+        /* Signed data = header.payload (raw ASCII bytes before last dot) */
+        int signedDataLen = (int)(dot2 - jwt);
+        const char *sigB64 = dot2 + 1;
+        int sigB64Len = jwtLen - (int)(sigB64 - jwt);
 
-        USHORT usernameLen = (USHORT)(token[2] | ((USHORT)token[3] << 8));
-        if (usernameLen > MAX_USERNAME_LEN || (ULONG)(4 + usernameLen) > inBuf->cbBuffer)
+        /* Decode the signature (should be 64 bytes for Ed25519) */
+        UCHAR sigBytes[64];
+        int sigLen = base64url_decode(sigB64, sigB64Len, sigBytes, sizeof(sigBytes));
+        if (sigLen != 64)
             return SEC_E_INVALID_TOKEN;
 
-        /* Allocate context */
-        ctx = (PTIDE_CONTEXT)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(TIDE_CONTEXT));
-        if (!ctx) return SEC_E_INSUFFICIENT_MEMORY;
+        /* Verify Ed25519 signature against JWK public key */
+        if (ed25519_verify(sigBytes, (const uint8_t *)jwt, (size_t)signedDataLen, JWK_PUBLIC_KEY) != 0) {
+            return SEC_E_LOGON_DENIED;
+        }
+
+        /* Decode payload to extract username and expiry */
+        const char *payloadB64 = dot1 + 1;
+        int payloadB64Len = (int)(dot2 - dot1 - 1);
+        char payloadJson[2048];
+        int payloadLen = base64url_decode(payloadB64, payloadB64Len,
+                                          (UCHAR *)payloadJson, sizeof(payloadJson) - 1);
+        if (payloadLen <= 0)
+            return SEC_E_INVALID_TOKEN;
+        payloadJson[payloadLen] = '\0';
+
+        /* Check token expiry */
+        long long exp = json_extract_int(payloadJson, payloadLen, "exp");
+        if (exp > 0) {
+            FILETIME ft;
+            GetSystemTimeAsFileTime(&ft);
+            /* FILETIME is 100ns intervals since 1601-01-01. Unix epoch offset: */
+            ULARGE_INTEGER uli;
+            uli.LowPart = ft.dwLowDateTime;
+            uli.HighPart = ft.dwHighDateTime;
+            long long unixNow = (long long)((uli.QuadPart - 116444736000000000ULL) / 10000000ULL);
+            if (unixNow > exp)
+                return SEC_E_CONTEXT_EXPIRED;
+        }
+
+        /* Extract username (preferred_username or sub) */
+        char usernameUtf8[MAX_USERNAME_LEN + 1];
+        int usernameLen = json_extract_string(payloadJson, payloadLen,
+                                              "preferred_username",
+                                              usernameUtf8, sizeof(usernameUtf8));
+        if (usernameLen <= 0)
+            usernameLen = json_extract_string(payloadJson, payloadLen,
+                                              "sub", usernameUtf8, sizeof(usernameUtf8));
+        if (usernameLen <= 0)
+            return SEC_E_INVALID_TOKEN;
+
+        /* Allocate or reuse context */
+        if (ContextHandle) {
+            ctx = (PTIDE_CONTEXT)ContextHandle;
+        } else {
+            ctx = (PTIDE_CONTEXT)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(TIDE_CONTEXT));
+            if (!ctx) return SEC_E_INSUFFICIENT_MEMORY;
+        }
 
         /* Store username (UTF-8 → UTF-16) */
         int wLen = MultiByteToWideChar(CP_UTF8, 0,
-            (LPCSTR)(token + 4), usernameLen,
+            usernameUtf8, usernameLen,
             ctx->Username, MAX_USERNAME_LEN);
         if (wLen <= 0) {
             HeapFree(GetProcessHeap(), 0, ctx);
@@ -229,58 +400,8 @@ static NTSTATUS NTAPI TideSsp_AcceptLsaModeContext(
         ctx->Username[wLen] = L'\0';
         ctx->UsernameLen = (USHORT)wLen;
 
-        /* Generate random challenge */
-        if (!BCRYPT_SUCCESS(BCryptGenRandom(
-                NULL, ctx->Challenge, CHALLENGE_SIZE,
-                BCRYPT_USE_SYSTEM_PREFERRED_RNG))) {
-            HeapFree(GetProcessHeap(), 0, ctx);
-            return SEC_E_INTERNAL_ERROR;
-        }
-
-        ctx->State = 1;
-        ctx->SessionKeyValid = FALSE;
-
-        /* Build CHALLENGE output token */
-        if (!outBuf || outBuf->cbBuffer < 1 + CHALLENGE_SIZE) {
-            HeapFree(GetProcessHeap(), 0, ctx);
-            return SEC_E_BUFFER_TOO_SMALL;
-        }
-
-        PUCHAR out = (PUCHAR)outBuf->pvBuffer;
-        out[0] = TOKEN_CHALLENGE;
-        memcpy(out + 1, ctx->Challenge, CHALLENGE_SIZE);
-        outBuf->cbBuffer = 1 + CHALLENGE_SIZE;
-
-        *NewContextHandle = (LSA_SEC_HANDLE)ctx;
-        *ContextAttr = 0;
-        if (ExpirationTime) {
-            ExpirationTime->LowPart = 0xFFFFFFFF;
-            ExpirationTime->HighPart = 0x7FFFFFFF;
-        }
-        if (MappedContext) *MappedContext = FALSE;
-
-        return SEC_I_CONTINUE_NEEDED;
-    }
-    else if (token[0] == TOKEN_AUTHENTICATE) {
-        /* ── Step 2: AUTHENTICATE ── */
-        if (inBuf->cbBuffer < 1 + 64 + 32)
-            return SEC_E_INVALID_TOKEN;
-
-        ctx = (PTIDE_CONTEXT)ContextHandle;
-        if (!ctx || ctx->State != 1)
-            return SEC_E_INVALID_HANDLE;
-
-        const uint8_t *signature = token + 1;
-        const uint8_t *pubkey = token + 1 + 64;
-
-        /* Verify Ed25519 signature over the challenge */
-        if (ed25519_verify(signature, ctx->Challenge, CHALLENGE_SIZE, pubkey) != 0) {
-            HeapFree(GetProcessHeap(), 0, ctx);
-            return SEC_E_LOGON_DENIED;
-        }
-
-        /* Derive session key for NEGOEX VERIFY */
-        deriveSessionKey(ctx->Challenge, signature, pubkey, ctx->SessionKey);
+        /* Derive session key from JWT signature for NEGOEX VERIFY */
+        deriveSessionKeyFromSig(sigBytes, 64, ctx->SessionKey);
         ctx->SessionKeyValid = TRUE;
 
         /* Create Windows logon session */
@@ -295,13 +416,14 @@ static NTSTATUS NTAPI TideSsp_AcceptLsaModeContext(
                 &tokenInfo,
                 &tokenInfoSize);
             if (!NT_SUCCESS(status)) {
-                HeapFree(GetProcessHeap(), 0, ctx);
+                if (!ContextHandle) HeapFree(GetProcessHeap(), 0, ctx);
                 return SEC_E_LOGON_DENIED;
             }
             if (tokenInfo && LsaDispatch->FreeLsaHeap)
                 LsaDispatch->FreeLsaHeap(tokenInfo);
         }
 
+        /* No output token — single round, auth complete */
         if (outBuf) outBuf->cbBuffer = 0;
 
         *NewContextHandle = (LSA_SEC_HANDLE)ctx;
@@ -429,7 +551,7 @@ static NTSTATUS NTAPI TideSsp_ExchangeMetaData(
 static NTSTATUS NTAPI TideSsp_QueryContextAttributes(LSA_SEC_HANDLE h, ULONG attr, PVOID buf) {
     if (attr == SECPKG_ATTR_SIZES) {
         PSecPkgContext_Sizes sizes = (PSecPkgContext_Sizes)buf;
-        sizes->cbMaxToken = 1 + 64 + 32;
+        sizes->cbMaxToken = 4096;
         sizes->cbMaxSignature = 0;
         sizes->cbBlockSize = 0;
         sizes->cbSecurityTrailer = 0;

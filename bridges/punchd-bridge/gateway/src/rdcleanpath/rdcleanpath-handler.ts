@@ -25,15 +25,13 @@ import {
   RDCLEANPATH_ERROR_GENERAL,
   type RDCleanPathRequest,
 } from "./rdcleanpath.js";
-import { performCredSSP, type CredSSPCallbacks } from "./credssp-client.js";
+import { performCredSSP } from "./credssp-client.js";
 
 // ── Public interface ─────────────────────────────────────────────
 
 export interface RDCleanPathSession {
   /** Handle a binary message from the client */
   handleMessage(data: Buffer): void;
-  /** Handle an EdDSA signature response from the browser */
-  handleEddsaResponse?(signature: Buffer, publicKey: Buffer): void;
   /** Close the session */
   close(): void;
 }
@@ -43,10 +41,6 @@ export interface RDCleanPathSessionOptions {
   sendBinary: (data: Buffer) => void;
   /** Send a close frame back to the client */
   sendClose: (code: number, reason: string) => void;
-  /** Send an EdDSA challenge to the browser for signing */
-  sendEddsaChallenge?: (sessionId: string, challenge: Buffer) => void;
-  /** Session ID for EdDSA challenge correlation */
-  sessionId?: string;
   /** Available backends for resolution */
   backends: BackendEntry[];
   /** JWT verification function */
@@ -77,10 +71,6 @@ export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCle
   let tlsSocket: TLSSocket | null = null;
   let relayBytesToClient = 0;
   let relayBytesFromClient = 0;
-
-  // EdDSA challenge-response pending promise
-  let pendingEddsaResolve: ((result: { signature: Buffer; publicKey: Buffer }) => void) | null = null;
-  let pendingEddsaReject: ((err: Error) => void) | null = null;
 
   function sendError(errorCode: number, httpStatus?: number, wsaError?: number, tlsAlert?: number): void {
     try {
@@ -202,34 +192,13 @@ export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCle
         state = State.CREDSSP;
 
         // Extract username from JWT (preferred_username or sub)
-        const username = (payload as any).preferred_username
-          || (payload as any).sub
-          || "user";
+        const username = (payload as any).preferred_username || (payload as any).sub;
+        if (!username) {
+          throw new Error("JWT has no username claim (preferred_username or sub)");
+        }
 
-        await performCredSSP(tlsSocket, username, {
-          async onChallenge(challenge: Buffer) {
-            return new Promise<{ signature: Buffer; publicKey: Buffer }>((resolve, reject) => {
-              pendingEddsaResolve = resolve;
-              pendingEddsaReject = reject;
-
-              // Send challenge to browser for Ed25519 signing
-              if (opts.sendEddsaChallenge && opts.sessionId) {
-                opts.sendEddsaChallenge(opts.sessionId, challenge);
-              } else {
-                reject(new Error("No EdDSA challenge channel configured"));
-              }
-
-              // Timeout if browser doesn't respond
-              setTimeout(() => {
-                if (pendingEddsaReject) {
-                  pendingEddsaReject(new Error("EdDSA challenge timeout"));
-                  pendingEddsaResolve = null;
-                  pendingEddsaReject = null;
-                }
-              }, 30_000);
-            });
-          },
-        });
+        // Send JWT directly to TideSSP — it verifies the EdDSA signature
+        await performCredSSP(tlsSocket, username, request.proxyAuth);
 
         console.log(`[RDCleanPath] CredSSP/NLA completed for "${backendName}"`);
       }
@@ -309,24 +278,7 @@ export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCle
       }
     },
 
-    handleEddsaResponse(signature: Buffer, publicKey: Buffer): void {
-      if (pendingEddsaResolve) {
-        console.log("[RDCleanPath] Received EdDSA response from browser");
-        const resolve = pendingEddsaResolve;
-        pendingEddsaResolve = null;
-        pendingEddsaReject = null;
-        resolve({ signature, publicKey });
-      } else {
-        console.warn("[RDCleanPath] Unexpected EdDSA response — no pending challenge");
-      }
-    },
-
     close(): void {
-      if (pendingEddsaReject) {
-        pendingEddsaReject(new Error("Session closed during EdDSA challenge"));
-        pendingEddsaResolve = null;
-        pendingEddsaReject = null;
-      }
       cleanup();
     },
   };

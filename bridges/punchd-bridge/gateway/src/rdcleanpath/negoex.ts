@@ -297,20 +297,18 @@ export function parseNegoexMessages(data: Buffer): NegoexMessage[] {
 // ── Session Key & Checksum ───────────────────────────────────────
 
 /**
- * Derive the NEGOEX session key from TideSSP auth data.
- * Must match the derivation in tide-ssp/src/ssp.c deriveSessionKey().
+ * Derive the NEGOEX session key from JWT signature bytes.
+ * Must match the derivation in tide-ssp/src/ssp.c deriveSessionKeyFromSig().
  *
- * sessionKey = SHA-256(challenge || signature || publicKey)[0..15]
+ * sessionKey = SHA-256(jwt_signature_bytes)[0..15]
  */
-export function deriveSessionKey(
-  challenge: Buffer,
-  signature: Buffer,
-  publicKey: Buffer,
-): Buffer {
+export function deriveSessionKeyFromJwt(jwt: string): Buffer {
+  const lastDot = jwt.lastIndexOf(".");
+  if (lastDot < 0) throw new Error("Invalid JWT");
+  const sigB64 = jwt.substring(lastDot + 1);
+  const sigBytes = Buffer.from(sigB64, "base64url");
   return createHash("sha256")
-    .update(challenge)
-    .update(signature)
-    .update(publicKey)
+    .update(sigBytes)
     .digest()
     .subarray(0, 16);
 }
