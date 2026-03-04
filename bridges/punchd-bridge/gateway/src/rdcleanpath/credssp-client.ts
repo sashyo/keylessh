@@ -252,17 +252,14 @@ export async function performCredSSP(
 
   // ── Step 3: Send client VERIFY ──
   //
-  // Key usage: initiator makes with ku=25 (MIT krb5 convention,
-  // confirmed by server/acceptor using ku=23 to make).
-  // Server verifies client's VERIFY with ku=25.
+  // Hypothesis: Windows NegoExtender includes VERIFY messages in the transcript
+  // (unlike MIT krb5 which excludes them). So the client's VERIFY checksum
+  // covers [INIT_NEGO, EXCHANGE, ACCEPT_NEGO, SERVER_VERIFY] = 4 messages.
   //
-  // Transcript: all non-VERIFY messages [INIT_NEGO, EXCHANGE, ACCEPT_NEGO].
+  // Key usage: try ku=23 (same as server uses, since TideSSP returns same
+  // key for both key and verify_key).
 
-  const KU_INITIATOR_MAKE = 25;
-  const clientChecksum = computeAes128Checksum(sessionKey, KU_INITIATOR_MAKE, transcriptData);
-  console.log(`[CredSSP] Client VERIFY checksum (ku=${KU_INITIATOR_MAKE}, 3-msg): ${clientChecksum.toString("hex")}`);
-
-  // Also log 4-msg variant for debugging (transcript + server VERIFY)
+  // Extract server's raw VERIFY bytes
   const serverVerifyRaw = (() => {
     let pos = 0;
     while (pos + 40 <= serverNegoex1.length) {
@@ -275,12 +272,26 @@ export async function performCredSSP(
     }
     return null;
   })();
-  if (serverVerifyRaw) {
-    const transcript4 = Buffer.concat([transcriptData, serverVerifyRaw]);
-    const ck25_4 = computeAes128Checksum(sessionKey, 25, transcript4);
-    const ck23_4 = computeAes128Checksum(sessionKey, 23, transcript4);
-    console.log(`[CredSSP] Alt: ku=25 4-msg: ${ck25_4.toString("hex")}, ku=23 4-msg: ${ck23_4.toString("hex")}`);
+
+  if (!serverVerifyRaw) {
+    throw new Error("CredSSP: could not extract server's raw VERIFY bytes");
   }
+
+  const transcript4 = Buffer.concat([transcriptData, serverVerifyRaw]);
+  console.log(`[CredSSP] Client VERIFY transcript: 4 parts, ${transcript4.length} bytes (3-msg + server VERIFY)`);
+
+  // Log all 4 checksum variants for debugging
+  const ck23_3 = computeAes128Checksum(sessionKey, 23, transcriptData);
+  const ck25_3 = computeAes128Checksum(sessionKey, 25, transcriptData);
+  const ck23_4 = computeAes128Checksum(sessionKey, 23, transcript4);
+  const ck25_4 = computeAes128Checksum(sessionKey, 25, transcript4);
+  console.log(`[CredSSP] Checksums: ku23/3msg=${ck23_3.toString("hex")} ku25/3msg=${ck25_3.toString("hex")}`);
+  console.log(`[CredSSP] Checksums: ku23/4msg=${ck23_4.toString("hex")} ku25/4msg=${ck25_4.toString("hex")}`);
+
+  // Try ku=23 over 4-msg transcript
+  const KU_CLIENT_VERIFY = 23;
+  const clientChecksum = ck23_4;
+  console.log(`[CredSSP] Using: ku=${KU_CLIENT_VERIFY}, 4-msg transcript`);
 
   const clientVerify = buildVerifyMessage(
     conversationId,
@@ -294,7 +305,7 @@ export async function performCredSSP(
   const verifySpnego = buildSpnegoResponse(clientVerify);
   const tsReqVerify = buildTSRequest(CREDSSP_VERSION, verifySpnego, undefined, undefined, clientNonce);
   tlsSocket.write(tsReqVerify);
-  console.log(`[CredSSP] Sent VERIFY ku=${KU_INITIATOR_MAKE}, 3-msg transcript, no mechListMIC`);
+  console.log(`[CredSSP] Sent VERIFY ku=${KU_CLIENT_VERIFY}, 4-msg transcript, no mechListMIC`);
 
   // ── Step 4: Read server's SPNEGO accept-complete ──
   const tsRespComplete = await readTSRequest(tlsSocket);
@@ -303,7 +314,7 @@ export async function performCredSSP(
     logSpnegoFields("Server step4 SPNEGO", tsRespComplete.negoToken);
   }
   if (tsRespComplete.errorCode) {
-    console.log(`[CredSSP] FAILED with error 0x${tsRespComplete.errorCode.toString(16)} — VERIFY ku=25, 3-msg transcript, no mechListMIC`);
+    console.log(`[CredSSP] FAILED with error 0x${tsRespComplete.errorCode.toString(16)} — VERIFY ku=23, 4-msg transcript, no mechListMIC`);
     throw new Error(`CredSSP: server error after step3 0x${tsRespComplete.errorCode.toString(16)}`);
   }
   console.log("[CredSSP] SPNEGO/NEGOEX authentication complete");
