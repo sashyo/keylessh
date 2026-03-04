@@ -10,7 +10,7 @@
  * Reference: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-negoex/
  */
 
-import { randomBytes, createHmac, createHash } from "crypto";
+import { randomBytes, createHmac, createHash, createCipheriv } from "crypto";
 
 // ── Constants ────────────────────────────────────────────────────
 
@@ -194,6 +194,7 @@ export function buildVerifyMessage(
   seqNum: number,
   authScheme: Buffer,
   checksumValue: Buffer,
+  checksumType: number,
 ): Buffer {
   const headerLen = 76;
   const totalLen = headerLen + checksumValue.length;
@@ -206,7 +207,7 @@ export function buildVerifyMessage(
   // Checksum structure
   buf.writeUInt32LE(20, 56);                     // cbHeaderLength
   buf.writeUInt32LE(CHECKSUM_SCHEME_RFC3961, 60); // ChecksumScheme
-  buf.writeInt32LE(-138, 64);                     // ChecksumType (HMAC-MD5)
+  buf.writeInt32LE(checksumType, 64);             // ChecksumType
   buf.writeUInt32LE(headerLen, 68);               // value offset
   buf.writeUInt32LE(checksumValue.length, 72);    // value length
 
@@ -403,6 +404,94 @@ export function md4(data: Buffer): Buffer {
   const out = Buffer.alloc(16);
   out.writeUInt32LE(a0, 0); out.writeUInt32LE(b0, 4); out.writeUInt32LE(c0, 8); out.writeUInt32LE(d0, 12);
   return out;
+}
+
+// ── RFC 3961 AES-128 Key Derivation & Checksum ──────────────────
+
+function gcd(a: number, b: number): number {
+  while (b) { [a, b] = [b, a % b]; }
+  return a;
+}
+
+/**
+ * RFC 3961 n-fold: fold input bytes to outBits bits.
+ * Replicates input with 13-bit rotation per cycle, then ones-complement sums
+ * successive output-sized chunks.
+ */
+function nfold(input: Buffer, outBits: number): Buffer {
+  const inLen = input.length;
+  const outLen = outBits / 8;
+  const lcm = (inLen * outLen) / gcd(inLen, outLen);
+
+  const out = Buffer.alloc(outLen, 0);
+  let carry = 0;
+
+  for (let i = lcm - 1; i >= 0; i--) {
+    const rep = Math.floor(i / inLen);
+    const offset = i % inLen;
+    const totalRot = 13 * rep;
+    const byteRot = Math.floor(totalRot / 8);
+    const bitRot = totalRot % 8;
+
+    const s1 = (offset + byteRot) % inLen;
+    const s2 = (offset + byteRot + 1) % inLen;
+
+    const val = bitRot === 0
+      ? input[s1]
+      : ((input[s1] << bitRot) | (input[s2] >>> (8 - bitRot))) & 0xff;
+
+    carry += val + out[i % outLen];
+    out[i % outLen] = carry & 0xff;
+    carry >>>= 8;
+  }
+
+  // Propagate remaining carry (ones-complement end-around)
+  if (carry) {
+    for (let i = outLen - 1; i >= 0; i--) {
+      carry += out[i];
+      out[i] = carry & 0xff;
+      carry >>>= 8;
+    }
+  }
+
+  return out;
+}
+
+/**
+ * RFC 3961 DK(base_key, constant) for AES-128.
+ * DR: AES-ECB iterations until enough key material.
+ * For AES-128: key_size = block_size = 16, so one AES-ECB block suffices.
+ */
+function dk(baseKey: Buffer, constant: Buffer): Buffer {
+  const folded = nfold(constant, 128);
+  const cipher = createCipheriv("aes-128-ecb", baseKey, null);
+  cipher.setAutoPadding(false);
+  return Buffer.concat([cipher.update(folded), cipher.final()]);
+}
+
+/** Checksum type 15: hmac-sha1-96-aes128 */
+export const CHECKSUM_TYPE_HMAC_SHA1_96_AES128 = 15;
+
+/**
+ * Compute hmac-sha1-96-aes128 checksum (RFC 3962, type 15).
+ * 1. Ki = DK(base_key, pack_be32(keyUsage) || 0x55)
+ * 2. checksum = HMAC-SHA1(Ki, data)[0:12]
+ *
+ * @param sessionKey - 16-byte AES-128 session key
+ * @param keyUsage - 23 for initiator, 25 for acceptor
+ * @param data - transcript data to checksum
+ */
+export function computeAes128Checksum(
+  sessionKey: Buffer,
+  keyUsage: number,
+  data: Buffer,
+): Buffer {
+  const constant = Buffer.alloc(5);
+  constant.writeUInt32BE(keyUsage, 0);
+  constant[4] = 0x55; // 0x55 = integrity key derivation
+
+  const ki = dk(sessionKey, constant);
+  return createHmac("sha1", ki).update(data).digest().subarray(0, 12);
 }
 
 /**
