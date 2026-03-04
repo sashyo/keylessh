@@ -232,21 +232,24 @@ export async function performCredSSP(
 
   let serverChecksumOk = false;
 
+  // Key usage convention (empirically determined):
+  //   Acceptor (server) VERIFY: keyUsage = 23
+  //   Initiator (client) VERIFY: keyUsage = 25
+  const KU_ACCEPTOR_VERIFY = 23;
+  const KU_INITIATOR_VERIFY = 25;
+
   if (serverCksumType === CHECKSUM_TYPE_HMAC_SHA1_96_AES128) {
-    // Keyed checksum: hmac-sha1-96-aes128 (type 15) — keyUsage 25 for acceptor
-    const expected = computeAes128Checksum(sessionKey, 25, transcriptData);
+    const expected = computeAes128Checksum(sessionKey, KU_ACCEPTOR_VERIFY, transcriptData);
     serverChecksumOk = serverVerify1.checksum.equals(expected);
-    console.log(`[CredSSP] AES128 checksum (ku=25): ${expected.toString("hex")}${serverChecksumOk ? " *** MATCH ***" : ""}`);
+    console.log(`[CredSSP] Server VERIFY check (ku=${KU_ACCEPTOR_VERIFY}): ${expected.toString("hex")}${serverChecksumOk ? " *** MATCH ***" : ""}`);
   } else if (serverCksumType === 2) {
-    // Unkeyed MD4 fallback (NegoExtender didn't recognize key type)
     const expected = md4(transcriptData);
     serverChecksumOk = serverVerify1.checksum.equals(expected);
     console.log(`[CredSSP] MD4 checksum: ${expected.toString("hex")}${serverChecksumOk ? " *** MATCH ***" : ""}`);
   } else {
-    // Try both algorithms
-    const aes = computeAes128Checksum(sessionKey, 25, transcriptData);
+    const aes = computeAes128Checksum(sessionKey, KU_ACCEPTOR_VERIFY, transcriptData);
     const md4ck = md4(transcriptData);
-    console.log(`[CredSSP] Unknown checksumType=${serverCksumType}, trying AES128: ${aes.toString("hex")}, MD4: ${md4ck.toString("hex")}`);
+    console.log(`[CredSSP] Unknown checksumType=${serverCksumType}, AES128: ${aes.toString("hex")}, MD4: ${md4ck.toString("hex")}`);
     serverChecksumOk = serverVerify1.checksum.equals(aes) || serverVerify1.checksum.equals(md4ck);
   }
 
@@ -255,12 +258,11 @@ export async function performCredSSP(
   }
 
   // ── Step 3: Send client VERIFY ──
-  // MS-NEGOEX requires both sides to send VERIFY. Initiator uses keyUsage=23.
+  // Initiator uses keyUsage=25 (opposite of acceptor's 23).
   let clientChecksum: Buffer;
   if (serverCksumType === CHECKSUM_TYPE_HMAC_SHA1_96_AES128) {
-    clientChecksum = computeAes128Checksum(sessionKey, 23, transcriptData);
+    clientChecksum = computeAes128Checksum(sessionKey, KU_INITIATOR_VERIFY, transcriptData);
   } else {
-    // MD4 (unkeyed) — same for both sides
     clientChecksum = md4(transcriptData);
   }
 
