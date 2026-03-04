@@ -307,8 +307,6 @@ export async function performCredSSP(
     console.log(`[CredSSP]   +svrVerify ku=25: ${ck25wv.toString("hex")}`);
   }
 
-  // Diagnostic: send WRONG checksum first to see if error changes.
-  // If SEC_E_MESSAGE_ALTERED with both wrong and right checksums, the error is NOT from VERIFY.
   const KU_CLIENT_VERIFY = 23;
   let clientChecksum: Buffer;
   if (serverCksumType === CHECKSUM_TYPE_HMAC_SHA1_96_AES128) {
@@ -316,15 +314,13 @@ export async function performCredSSP(
   } else {
     clientChecksum = md4(transcriptData);
   }
-  // Deliberately corrupt the checksum for diagnostic
-  const wrongChecksum = Buffer.alloc(clientChecksum.length, 0xAA);
-  console.log(`[CredSSP] Client VERIFY: ku=${KU_CLIENT_VERIFY}, correct=${clientChecksum.toString("hex")}, SENDING WRONG=${wrongChecksum.toString("hex")}`);
+  console.log(`[CredSSP] Client VERIFY: ku=${KU_CLIENT_VERIFY}, checksum=${clientChecksum.toString("hex")}`);
 
   const clientVerifyMsg = buildVerifyMessage(
     conversationId,
     seqNum++,
     TIDESSP_AUTH_SCHEME,
-    wrongChecksum,  // DIAGNOSTIC: deliberately wrong checksum
+    clientChecksum,
     serverCksumType,
   );
 
