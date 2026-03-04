@@ -186,11 +186,24 @@ export async function performCredSSP(
       }
       console.log(`[CredSSP] Transcript total: ${serverTranscript.length} bytes`);
 
-      // Try multiple keyUsage values to find which one matches
+      // Try multiple keyUsage values with rc4-hmac checksum
+      const { createHmac: hmac, createHash: hash } = await import("crypto");
       for (const ku of [23, 24, 25, 26]) {
         const ck = computeVerifyChecksum(sessionKey, ku, serverTranscript);
         const match = serverChecksum.equals(ck) ? " *** MATCH ***" : "";
-        console.log(`[CredSSP] keyUsage=${ku}: ${ck.toString("hex")}${match}`);
+        console.log(`[CredSSP] rc4-hmac ku=${ku}: ${ck.toString("hex")}${match}`);
+      }
+      // Try simple HMAC-MD5(key, data)
+      const simple = hmac("md5", sessionKey).update(serverTranscript).digest();
+      console.log(`[CredSSP] HMAC-MD5(key,data): ${simple.toString("hex")}${serverChecksum.equals(simple) ? " *** MATCH ***" : ""}`);
+      // Try plain MD5
+      const md5 = hash("md5").update(serverTranscript).digest();
+      console.log(`[CredSSP] MD5(data): ${md5.toString("hex")}${serverChecksum.equals(md5) ? " *** MATCH ***" : ""}`);
+      // Try HMAC-MD5 with keyUsage prepended to data
+      for (const ku of [23, 25]) {
+        const kuBuf = Buffer.alloc(4); kuBuf.writeInt32LE(ku);
+        const hk = hmac("md5", sessionKey).update(kuBuf).update(serverTranscript).digest();
+        console.log(`[CredSSP] HMAC-MD5(key,ku${ku}||data): ${hk.toString("hex")}${serverChecksum.equals(hk) ? " *** MATCH ***" : ""}`);
       }
     }
   }
