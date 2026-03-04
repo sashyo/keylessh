@@ -348,10 +348,10 @@ export async function performCredSSP(
     }
   }
 
-  // Use raw 12-byte checksum with ku=25 (KG_USAGE_INITIATOR_SIGN)
-  const mechListMICValue = computeAes128Checksum(sessionKey, 25, mechTypesList);
-  console.log(`[CredSSP] Using raw mechListMIC ku=25: ${mechListMICValue.toString("hex")}`);
-  const verifySpnego = buildSpnegoResponse(clientVerifyMsg, mechListMICValue);
+  // Try RFC 4121 MIC with Kc (now fixed) — ku=25 for initiator sign
+  const mechListMICToken = buildRfc4121Mic(sessionKey, 25, 0, mechTypesList);
+  console.log(`[CredSSP] Using RFC4121 mechListMIC Kc ku=25 (${mechListMICToken.length}b): ${mechListMICToken.toString("hex")}`);
+  const verifySpnego = buildSpnegoResponse(clientVerifyMsg, mechListMICToken);
   console.log(`[CredSSP] Client NEGOEX VERIFY raw (${clientVerifyMsg.length}b): ${clientVerifyMsg.toString("hex")}`);
   console.log(`[CredSSP] Client SPNEGO response raw (${verifySpnego.length}b): ${verifySpnego.toString("hex")}`);
   // Also log the server's SPNEGO for comparison
