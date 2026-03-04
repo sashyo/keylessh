@@ -321,15 +321,23 @@ export async function performCredSSP(
   // CredSSP v6: pubKeyAuth = EncryptMessage(SHA-256("CredSSP Client-To-Server Binding Hash\0" + nonce + SHA-256(serverCertRaw)))
 
   const serverCertRaw = extractTlsServerCert(tlsSocket);
+  console.log(`[CredSSP] Server cert raw DER: ${serverCertRaw.length} bytes`);
+
   // Extract SubjectPublicKeyInfo DER from the certificate (per MS-CSSP spec)
   const x509 = new X509Certificate(serverCertRaw);
   const spkiDer = Buffer.from(x509.publicKey.export({ type: "spki", format: "der" }));
+  console.log(`[CredSSP] SPKI DER: ${spkiDer.length} bytes, first16=${spkiDer.subarray(0, 16).toString("hex")}`);
+
   const certHash = createHash("sha256").update(spkiDer).digest();
-  const clientHashInput = Buffer.concat([
-    Buffer.from("CredSSP Client-To-Server Binding Hash\0", "ascii"),
-    clientNonce,
-    certHash,
-  ]);
+  console.log(`[CredSSP] certHash (SHA256 of SPKI): ${certHash.toString("hex")}`);
+
+  const hashMagic = Buffer.from("CredSSP Client-To-Server Binding Hash\0", "ascii");
+  console.log(`[CredSSP] hashMagic: ${hashMagic.length} bytes`);
+  console.log(`[CredSSP] clientNonce: ${clientNonce.toString("hex")}`);
+
+  const clientHashInput = Buffer.concat([hashMagic, clientNonce, certHash]);
+  console.log(`[CredSSP] hashInput: ${clientHashInput.length} bytes (${hashMagic.length}+${clientNonce.length}+${certHash.length})`);
+
   const clientHashEncData = createHash("sha256").update(clientHashInput).digest();
   console.log(`[CredSSP] pubKeyAuth plaintext (${clientHashEncData.length}b): ${clientHashEncData.toString("hex")}`);
 

@@ -65,6 +65,15 @@ static const GUID TIDESSP_AUTH_SCHEME = {
 #define SESSION_KEY_SIZE   16
 #define MAX_USERNAME_LEN   256
 
+/* AES-128-GCM wire format sizes */
+#define TIDE_GCM_NONCE_SIZE  12
+#define TIDE_GCM_TAG_SIZE    16
+#define TIDE_TOKEN_SIZE      (TIDE_GCM_NONCE_SIZE + TIDE_GCM_TAG_SIZE)  /* 28 */
+
+#ifndef SECBUFFER_STREAM
+#define SECBUFFER_STREAM 10
+#endif
+
 /* ── JWK Ed25519 public key (from tidecloak.json) ────────────── */
 /* kid: TPlidYX-_Jaw8wTsthyDEQIwIxqbJkyoJBW6qN4InTQ               */
 /* x (base64url): 75TGtIj59SC5jCYJFMkuq-bjhdbHFXWniyZ1dc3BV2E     */
@@ -277,7 +286,10 @@ static NTSTATUS NTAPI TideSsp_Shutdown(void)
 static NTSTATUS NTAPI TideSsp_GetInfo(PSecPkgInfoW PackageInfo)
 {
     tide_log("GetInfo called");
-    PackageInfo->fCapabilities = SECPKG_FLAG_ACCEPT_WIN32_NAME |
+    PackageInfo->fCapabilities = SECPKG_FLAG_INTEGRITY |
+                                SECPKG_FLAG_PRIVACY |
+                                SECPKG_FLAG_MUTUAL_AUTH |
+                                SECPKG_FLAG_ACCEPT_WIN32_NAME |
                                 SECPKG_FLAG_CONNECTION |
                                 SECPKG_FLAG_NEGOTIABLE2;
     PackageInfo->wVersion = TIDESSP_VERSION;
@@ -650,9 +662,10 @@ static NTSTATUS NTAPI TideSsp_QueryContextAttributes(LSA_SEC_HANDLE h, ULONG att
     if (attr == SECPKG_ATTR_SIZES) {
         PSecPkgContext_Sizes sizes = (PSecPkgContext_Sizes)buf;
         sizes->cbMaxToken = 4096;
-        sizes->cbMaxSignature = 0;
-        sizes->cbBlockSize = 0;
-        sizes->cbSecurityTrailer = 0;
+        sizes->cbMaxSignature = 16;           /* HMAC-SHA-256 truncated */
+        sizes->cbBlockSize = 1;               /* GCM has no block alignment */
+        sizes->cbSecurityTrailer = TIDE_TOKEN_SIZE;  /* 28 = nonce(12) + tag(16) */
+        tide_log("LSA SIZES: trailer=%u, sig=%u", TIDE_TOKEN_SIZE, 16);
         return STATUS_SUCCESS;
     }
     if (attr == SECPKG_ATTR_NEGO_KEYS) {
@@ -718,7 +731,10 @@ static NTSTATUS NTAPI TideSsp_QueryContextAttributes(LSA_SEC_HANDLE h, ULONG att
         WCHAR *commentStr = nameStr + 16;
         wcscpy(nameStr, TIDESSP_NAME);
         wcscpy(commentStr, TIDESSP_COMMENT);
-        info->fCapabilities = SECPKG_FLAG_ACCEPT_WIN32_NAME |
+        info->fCapabilities = SECPKG_FLAG_INTEGRITY |
+                              SECPKG_FLAG_PRIVACY |
+                              SECPKG_FLAG_MUTUAL_AUTH |
+                              SECPKG_FLAG_ACCEPT_WIN32_NAME |
                               SECPKG_FLAG_CONNECTION |
                               SECPKG_FLAG_NEGOTIABLE2;
         info->wVersion = TIDESSP_VERSION;
@@ -740,7 +756,10 @@ static NTSTATUS NTAPI TideSsp_QueryContextAttributes(LSA_SEC_HANDLE h, ULONG att
         WCHAR *commentStr = nameStr + 16;
         wcscpy(nameStr, TIDESSP_NAME);
         wcscpy(commentStr, TIDESSP_COMMENT);
-        info->fCapabilities = SECPKG_FLAG_ACCEPT_WIN32_NAME |
+        info->fCapabilities = SECPKG_FLAG_INTEGRITY |
+                              SECPKG_FLAG_PRIVACY |
+                              SECPKG_FLAG_MUTUAL_AUTH |
+                              SECPKG_FLAG_ACCEPT_WIN32_NAME |
                               SECPKG_FLAG_CONNECTION |
                               SECPKG_FLAG_NEGOTIABLE2;
         info->wVersion = TIDESSP_VERSION;
@@ -873,10 +892,6 @@ static NTSTATUS NTAPI TideSsp_FreeCredentialsHandle(LSA_SEC_HANDLE h) {
  *    SECBUFFER_TOKEN (28 bytes): [12-byte nonce] [16-byte GCM tag]
  *    SECBUFFER_DATA:             AES-GCM ciphertext (same length)
  * ══════════════════════════════════════════════════════════════════ */
-
-#define TIDE_GCM_NONCE_SIZE  12
-#define TIDE_GCM_TAG_SIZE    16
-#define TIDE_TOKEN_SIZE      (TIDE_GCM_NONCE_SIZE + TIDE_GCM_TAG_SIZE)  /* 28 */
 
 /* User-mode context: holds session key for encryption */
 typedef struct _TIDE_USER_CONTEXT {
@@ -1080,16 +1095,26 @@ static NTSTATUS NTAPI TideSsp_SealMessage(
 
     PTIDE_USER_CONTEXT uctx = tide_user_ctx_find(ContextHandle);
     if (!uctx) {
-        tide_log("SealMessage: context not found");
+        tide_log("SealMessage: context not found for handle=%p", (void*)ContextHandle);
         return SEC_E_INVALID_HANDLE;
+    }
+
+    /* Log all buffer types */
+    tide_log("SealMessage: %u buffers", MessageBuffers->cBuffers);
+    for (ULONG i = 0; i < MessageBuffers->cBuffers; i++) {
+        tide_log("  buf[%u]: type=%u, cb=%u, pv=%p",
+                 i, MessageBuffers->pBuffers[i].BufferType,
+                 MessageBuffers->pBuffers[i].cbBuffer,
+                 MessageBuffers->pBuffers[i].pvBuffer);
     }
 
     /* Find TOKEN and DATA buffers */
     PSecBuffer tokenBuf = NULL, dataBuf = NULL;
     for (ULONG i = 0; i < MessageBuffers->cBuffers; i++) {
-        if (MessageBuffers->pBuffers[i].BufferType == SECBUFFER_TOKEN)
+        ULONG btype = MessageBuffers->pBuffers[i].BufferType & 0x0FFFFFFF;
+        if (btype == SECBUFFER_TOKEN)
             tokenBuf = &MessageBuffers->pBuffers[i];
-        else if (MessageBuffers->pBuffers[i].BufferType == SECBUFFER_DATA)
+        else if (btype == SECBUFFER_DATA)
             dataBuf = &MessageBuffers->pBuffers[i];
     }
 
@@ -1138,28 +1163,85 @@ static NTSTATUS NTAPI TideSsp_UnsealMessage(
 
     PTIDE_USER_CONTEXT uctx = tide_user_ctx_find(ContextHandle);
     if (!uctx) {
-        tide_log("UnsealMessage: context not found");
+        tide_log("UnsealMessage: context not found for handle=%p", (void*)ContextHandle);
         return SEC_E_INVALID_HANDLE;
     }
 
-    PSecBuffer tokenBuf = NULL, dataBuf = NULL;
+    /* Log all buffer types for debugging */
+    tide_log("UnsealMessage: %u buffers", MessageBuffers->cBuffers);
     for (ULONG i = 0; i < MessageBuffers->cBuffers; i++) {
-        if (MessageBuffers->pBuffers[i].BufferType == SECBUFFER_TOKEN)
-            tokenBuf = &MessageBuffers->pBuffers[i];
-        else if (MessageBuffers->pBuffers[i].BufferType == SECBUFFER_DATA)
-            dataBuf = &MessageBuffers->pBuffers[i];
+        tide_log("  buf[%u]: type=%u, cb=%u, pv=%p",
+                 i, MessageBuffers->pBuffers[i].BufferType,
+                 MessageBuffers->pBuffers[i].cbBuffer,
+                 MessageBuffers->pBuffers[i].pvBuffer);
     }
 
-    if (!tokenBuf || !dataBuf || !tokenBuf->pvBuffer || !dataBuf->pvBuffer)
+    PSecBuffer tokenBuf = NULL, dataBuf = NULL, streamBuf = NULL;
+    for (ULONG i = 0; i < MessageBuffers->cBuffers; i++) {
+        ULONG btype = MessageBuffers->pBuffers[i].BufferType & 0x0FFFFFFF;
+        if (btype == SECBUFFER_TOKEN)
+            tokenBuf = &MessageBuffers->pBuffers[i];
+        else if (btype == SECBUFFER_DATA)
+            dataBuf = &MessageBuffers->pBuffers[i];
+        else if (btype == SECBUFFER_STREAM)
+            streamBuf = &MessageBuffers->pBuffers[i];
+    }
+
+    /* SECBUFFER_STREAM mode: entire encrypted blob in one buffer */
+    if (streamBuf && streamBuf->pvBuffer && streamBuf->cbBuffer >= TIDE_TOKEN_SIZE) {
+        PUCHAR stream = (PUCHAR)streamBuf->pvBuffer;
+        ULONG cbStream = streamBuf->cbBuffer;
+        const UCHAR *nonce = stream;
+        const UCHAR *tag   = stream + TIDE_GCM_NONCE_SIZE;
+        PUCHAR ciphertext  = stream + TIDE_TOKEN_SIZE;
+        ULONG cbCiphertext = cbStream - TIDE_TOKEN_SIZE;
+
+        tide_log("UnsealMessage STREAM: total=%u, ciphertext=%u", cbStream, cbCiphertext);
+
+        NTSTATUS status = tide_gcm_decrypt(uctx->SessionKey,
+            ciphertext, cbCiphertext, nonce, tag);
+
+        if (BCRYPT_SUCCESS(status)) {
+            /* Point DATA buffer to decrypted plaintext within the stream */
+            if (dataBuf) {
+                dataBuf->pvBuffer = ciphertext;
+                dataBuf->cbBuffer = cbCiphertext;
+                dataBuf->BufferType = SECBUFFER_DATA;
+            }
+            /* Shrink STREAM to just the token portion */
+            streamBuf->cbBuffer = TIDE_TOKEN_SIZE;
+            tide_log("UnsealMessage STREAM: OK, plaintext=%u bytes", cbCiphertext);
+            /* Log decrypted bytes for pubKeyAuth hash debugging */
+            if (cbCiphertext <= 64) {
+                char hex[129]; hex[0] = '\0';
+                for (ULONG j = 0; j < cbCiphertext && j < 64; j++) {
+                    char tmp[4]; sprintf(tmp, "%02x", ciphertext[j]);
+                    strcat(hex, tmp);
+                }
+                tide_log("UnsealMessage STREAM: plaintext hex: %s", hex);
+            }
+        } else {
+            tide_log("UnsealMessage STREAM: GCM decrypt failed 0x%08X", status);
+            return (NTSTATUS)SEC_E_MESSAGE_ALTERED;
+        }
+        return STATUS_SUCCESS;
+    }
+
+    /* TOKEN+DATA mode */
+    if (!tokenBuf || !dataBuf || !tokenBuf->pvBuffer || !dataBuf->pvBuffer) {
+        tide_log("UnsealMessage: missing TOKEN or DATA buffer");
         return SEC_E_INVALID_TOKEN;
-    if (tokenBuf->cbBuffer < TIDE_TOKEN_SIZE)
+    }
+    if (tokenBuf->cbBuffer < TIDE_TOKEN_SIZE) {
+        tide_log("UnsealMessage: TOKEN too small (%u < %u)", tokenBuf->cbBuffer, TIDE_TOKEN_SIZE);
         return SEC_E_INVALID_TOKEN;
+    }
 
     PUCHAR token = (PUCHAR)tokenBuf->pvBuffer;
     const UCHAR *nonce = token;
     const UCHAR *tag   = token + TIDE_GCM_NONCE_SIZE;
 
-    tide_log("UnsealMessage: decrypting %u bytes", dataBuf->cbBuffer);
+    tide_log("UnsealMessage TOKEN+DATA: decrypting %u bytes", dataBuf->cbBuffer);
 
     NTSTATUS status = tide_gcm_decrypt(
         uctx->SessionKey,
@@ -1169,7 +1251,7 @@ static NTSTATUS NTAPI TideSsp_UnsealMessage(
     if (BCRYPT_SUCCESS(status)) {
         tide_log("UnsealMessage: OK");
     } else {
-        tide_log("UnsealMessage: GCM decrypt failed 0x%08X (SEC_E_MESSAGE_ALTERED)", status);
+        tide_log("UnsealMessage: GCM decrypt failed 0x%08X", status);
         return (NTSTATUS)SEC_E_MESSAGE_ALTERED;
     }
     return STATUS_SUCCESS;
