@@ -130,6 +130,9 @@ export async function performCredSSP(
     throw new Error("CredSSP: no negoToken in server response");
   }
 
+  // Debug: log all SPNEGO NegTokenResp fields
+  logSpnegoFields("Server SPNEGO", serverSpnego1);
+
   const serverNegoex1 = extractSpnegoMechToken(serverSpnego1);
   if (!serverNegoex1 || serverNegoex1.length < 40) {
     throw new Error("CredSSP: invalid NEGOEX response from server");
@@ -329,6 +332,42 @@ export async function performCredSSP(
   tlsSocket.write(tsReq4);
 
   console.log("[CredSSP] NLA authentication completed successfully");
+}
+
+// ── SPNEGO Debug ────────────────────────────────────────────────
+
+function logSpnegoFields(label: string, spnego: Buffer): void {
+  try {
+    let reader: DerReader;
+    if (spnego[0] === 0x60) {
+      const appReader = new DerReader(spnego);
+      const { value: appContent } = appReader.readTlv();
+      const contentReader = new DerReader(appContent);
+      contentReader.readTlv(); // skip OID
+      const initWrapper = contentReader.readExplicit(0);
+      if (!initWrapper) return;
+      reader = initWrapper.readSequence();
+    } else if (spnego[0] === 0xa1) {
+      const respReader = new DerReader(spnego);
+      const { value: respContent } = respReader.readTlv();
+      reader = new DerReader(respContent).readSequence();
+    } else {
+      reader = new DerReader(spnego).readSequence();
+    }
+    const fields: string[] = [];
+    while (reader.hasMore()) {
+      const tag = reader.peekTag();
+      const { value } = reader.readTlv();
+      if (tag === contextTag(0)) fields.push(`negState=${value[0]}`);
+      else if (tag === contextTag(1)) fields.push(`supportedMech(${value.length}b)`);
+      else if (tag === contextTag(2)) fields.push(`responseToken(${value.length}b)`);
+      else if (tag === contextTag(3)) fields.push(`mechListMIC(${value.length}b)=${value.toString("hex").substring(0, 40)}`);
+      else fields.push(`tag=0x${tag.toString(16)}(${value.length}b)`);
+    }
+    console.log(`[CredSSP] ${label}: ${fields.join(", ")}`);
+  } catch (e) {
+    console.log(`[CredSSP] ${label}: parse error: ${e}`);
+  }
 }
 
 // ── SPNEGO Builders ─────────────────────────────────────────────
