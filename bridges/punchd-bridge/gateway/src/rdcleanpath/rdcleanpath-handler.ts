@@ -196,40 +196,42 @@ export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCle
       const certChain = extractCertChain(tlsSocket);
       console.log(`[RDCleanPath] TLS complete, ${certChain.length} cert(s) in chain`);
 
-      // Step 5.5: Perform CredSSP/NLA with TideSSP if backend uses EdDSA auth
+      // CredSSP/NLA with TideSSP via NEGOEX (NegoExtender)
       if (backend.auth === "eddsa") {
-        if (!opts.sendEddsaChallenge) {
-          throw new Error("EdDSA auth configured but no challenge relay callback");
-        }
+        console.log(`[RDCleanPath] Starting CredSSP with TideSSP/NEGOEX for "${backendName}"`);
         state = State.CREDSSP;
-        console.log(`[RDCleanPath] Starting CredSSP with TideSSP for "${backendName}"`);
 
-        // Extract username from JWT (prefer preferred_username, fall back to sub)
-        const eddsaUsername = (payload as any).preferred_username || (payload as any).sub || "user";
+        // Extract username from JWT (preferred_username or sub)
+        const username = (payload as any).preferred_username
+          || (payload as any).sub
+          || "user";
 
-        const credsspCallbacks: CredSSPCallbacks = {
-          onChallenge: (challenge: Buffer) => {
+        await performCredSSP(tlsSocket, username, {
+          async onChallenge(challenge: Buffer) {
             return new Promise<{ signature: Buffer; publicKey: Buffer }>((resolve, reject) => {
               pendingEddsaResolve = resolve;
               pendingEddsaReject = reject;
 
-              // Send challenge to browser via control channel
-              opts.sendEddsaChallenge!(opts.sessionId || "", challenge);
+              // Send challenge to browser for Ed25519 signing
+              if (opts.sendEddsaChallenge && opts.sessionId) {
+                opts.sendEddsaChallenge(opts.sessionId, challenge);
+              } else {
+                reject(new Error("No EdDSA challenge channel configured"));
+              }
 
-              // Timeout after 30 seconds
+              // Timeout if browser doesn't respond
               setTimeout(() => {
                 if (pendingEddsaReject) {
-                  pendingEddsaReject(new Error("EdDSA challenge timeout — no response from browser"));
+                  pendingEddsaReject(new Error("EdDSA challenge timeout"));
                   pendingEddsaResolve = null;
                   pendingEddsaReject = null;
                 }
               }, 30_000);
             });
           },
-        };
+        });
 
-        await performCredSSP(tlsSocket, eddsaUsername, credsspCallbacks);
-        console.log(`[RDCleanPath] CredSSP/TideSSP completed for "${backendName}"`);
+        console.log(`[RDCleanPath] CredSSP/NLA completed for "${backendName}"`);
       }
 
       // Step 6: Send RDCleanPath Response PDU

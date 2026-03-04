@@ -1,5 +1,5 @@
 /*
- * TideSSP — SSPI function implementations.
+ * TideSSP — SSPI function implementations with NegoExtender (NEGOEX) support.
  *
  * Wire protocol tokens:
  *   NEGOTIATE  [0x01][version:u8][username_len:u16LE][username:UTF-8]
@@ -9,6 +9,11 @@
  * Flow (server side — AcceptSecurityContext):
  *   1. Receive NEGOTIATE → extract username, generate challenge → return CHALLENGE
  *   2. Receive AUTHENTICATE → verify Ed25519(pubkey, challenge, sig) → logon user
+ *
+ * NegoEx integration:
+ *   - SECPKG_FLAG_NEGOTIABLE2 flag in SpGetInfo tells NegoExtender to include us
+ *   - SpGetExtendedInformation returns our AuthScheme GUID for NEGOEX negotiation
+ *   - Session key derived from SHA-256(challenge || signature || pubkey) for VERIFY
  */
 
 #define WIN32_LEAN_AND_MEAN
@@ -17,7 +22,6 @@
 #undef WIN32_NO_STATUS
 #include <ntstatus.h>
 
-/* NT_SUCCESS may not be defined in user-mode headers */
 #ifndef NT_SUCCESS
 #define NT_SUCCESS(Status) (((NTSTATUS)(Status)) >= 0)
 #endif
@@ -28,39 +32,57 @@
 #include <stdlib.h>
 #include <string.h>
 #include <wincrypt.h>
+#include <bcrypt.h>
 
 #include "ed25519.h"
 
-/* Package identity */
+/* ── Package identity ─────────────────────────────────────────── */
+
 #define TIDESSP_NAME      L"TideSSP"
 #define TIDESSP_NAME_A    "TideSSP"
 #define TIDESSP_COMMENT   L"Tide Ed25519 Authentication"
 #define TIDESSP_VERSION   1
 
-/* Token types */
+/* NegoEx flag — tells NegoExtender to discover this package */
+#ifndef SECPKG_FLAG_NEGOTIABLE2
+#define SECPKG_FLAG_NEGOTIABLE2 0x00200000
+#endif
+
+/* ── TideSSP AuthScheme GUID for NEGOEX ──────────────────────── */
+/* {7A4E8B2C-1F3D-4A5E-9C6B-8D7E0F1A2B3C} */
+static const GUID TIDESSP_AUTH_SCHEME = {
+    0x7A4E8B2C, 0x1F3D, 0x4A5E,
+    {0x9C, 0x6B, 0x8D, 0x7E, 0x0F, 0x1A, 0x2B, 0x3C}
+};
+
+/* ── Token types ──────────────────────────────────────────────── */
+
 #define TOKEN_NEGOTIATE    0x01
 #define TOKEN_CHALLENGE    0x02
 #define TOKEN_AUTHENTICATE 0x03
 
-/* Challenge size */
 #define CHALLENGE_SIZE     32
-
-/* Max username length */
+#define SESSION_KEY_SIZE   16
 #define MAX_USERNAME_LEN   256
 
-/* LSA dispatch table — set by SpInitialize */
+/* ── LSA dispatch table — set by SpInitialize ─────────────────── */
+
 static PLSA_SECPKG_FUNCTION_TABLE LsaDispatch = NULL;
 
-/* Context state for an in-progress authentication */
+/* ── Context state for in-progress authentication ─────────────── */
+
 typedef struct _TIDE_CONTEXT {
     ULONG_PTR ContextHandle;
     UCHAR     Challenge[CHALLENGE_SIZE];
+    UCHAR     SessionKey[SESSION_KEY_SIZE]; /* derived after AUTHENTICATE */
+    BOOLEAN   SessionKeyValid;
     WCHAR     Username[MAX_USERNAME_LEN + 1];
     USHORT    UsernameLen;
-    int       State;  /* 0 = awaiting NEGOTIATE, 1 = awaiting AUTHENTICATE */
+    int       State;  /* 0 = awaiting NEGOTIATE, 1 = awaiting AUTHENTICATE, 2 = done */
 } TIDE_CONTEXT, *PTIDE_CONTEXT;
 
-/* Forward declarations */
+/* ── Forward declarations ─────────────────────────────────────── */
+
 extern NTSTATUS TideLogonUser(
     PLSA_SECPKG_FUNCTION_TABLE LsaDispatch,
     const WCHAR *username,
@@ -68,7 +90,38 @@ extern NTSTATUS TideLogonUser(
     PVOID *TokenInformation,
     PULONG TokenInfoSize);
 
-/* ---- SSP Package Functions ---- */
+/* ── Helper: derive session key ───────────────────────────────── */
+/* SHA-256(challenge || signature || pubkey), truncated to 16 bytes */
+/* Must match the gateway's derivation exactly */
+
+static void deriveSessionKey(
+    const UCHAR challenge[CHALLENGE_SIZE],
+    const UCHAR signature[64],
+    const UCHAR pubkey[32],
+    UCHAR outKey[SESSION_KEY_SIZE])
+{
+    BCRYPT_ALG_HANDLE hAlg = NULL;
+    BCRYPT_HASH_HANDLE hHash = NULL;
+    UCHAR hash[32]; /* SHA-256 output */
+
+    if (BCRYPT_SUCCESS(BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_SHA256_ALGORITHM, NULL, 0))) {
+        if (BCRYPT_SUCCESS(BCryptCreateHash(hAlg, &hHash, NULL, 0, NULL, 0, 0))) {
+            BCryptHashData(hHash, (PUCHAR)challenge, CHALLENGE_SIZE, 0);
+            BCryptHashData(hHash, (PUCHAR)signature, 64, 0);
+            BCryptHashData(hHash, (PUCHAR)pubkey, 32, 0);
+            BCryptFinishHash(hHash, hash, sizeof(hash), 0);
+            BCryptDestroyHash(hHash);
+        }
+        BCryptCloseAlgorithmProvider(hAlg, 0);
+    }
+
+    memcpy(outKey, hash, SESSION_KEY_SIZE);
+    SecureZeroMemory(hash, sizeof(hash));
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ *  SSP Package Functions
+ * ══════════════════════════════════════════════════════════════════ */
 
 static NTSTATUS NTAPI TideSsp_Initialize(
     ULONG_PTR PackageId,
@@ -89,19 +142,18 @@ static NTSTATUS NTAPI TideSsp_Shutdown(void)
 static NTSTATUS NTAPI TideSsp_GetInfo(PSecPkgInfoW PackageInfo)
 {
     PackageInfo->fCapabilities = SECPKG_FLAG_ACCEPT_WIN32_NAME |
-                                SECPKG_FLAG_CONNECTION;
+                                SECPKG_FLAG_CONNECTION |
+                                SECPKG_FLAG_NEGOTIABLE2;
     PackageInfo->wVersion = TIDESSP_VERSION;
     PackageInfo->wRPCID = SECPKG_ID_NONE;
-    PackageInfo->cbMaxToken = 1 + 1 + 64 + 32; /* largest token: AUTHENTICATE */
+    PackageInfo->cbMaxToken = 1 + 1 + 64 + 32; /* AUTHENTICATE token size */
     PackageInfo->Name = TIDESSP_NAME;
     PackageInfo->Comment = TIDESSP_COMMENT;
     return STATUS_SUCCESS;
 }
 
-/*
- * AcceptSecurityContext — server-side context establishment.
- * Called by CredSSP/NLA to process incoming tokens.
- */
+/* ── AcceptSecurityContext — server-side context establishment ─── */
+
 static NTSTATUS NTAPI TideSsp_AcceptLsaModeContext(
     LSA_SEC_HANDLE CredentialHandle,
     LSA_SEC_HANDLE ContextHandle,
@@ -151,7 +203,7 @@ static NTSTATUS NTAPI TideSsp_AcceptLsaModeContext(
     PUCHAR token = (PUCHAR)inBuf->pvBuffer;
 
     if (token[0] == TOKEN_NEGOTIATE) {
-        /* ---- Step 1: NEGOTIATE ---- */
+        /* ── Step 1: NEGOTIATE ── */
         if (inBuf->cbBuffer < 4)
             return SEC_E_INVALID_TOKEN;
 
@@ -166,7 +218,7 @@ static NTSTATUS NTAPI TideSsp_AcceptLsaModeContext(
         ctx = (PTIDE_CONTEXT)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(TIDE_CONTEXT));
         if (!ctx) return SEC_E_INSUFFICIENT_MEMORY;
 
-        /* Store username (convert UTF-8 → UTF-16) */
+        /* Store username (UTF-8 → UTF-16) */
         int wLen = MultiByteToWideChar(CP_UTF8, 0,
             (LPCSTR)(token + 4), usernameLen,
             ctx->Username, MAX_USERNAME_LEN);
@@ -185,9 +237,10 @@ static NTSTATUS NTAPI TideSsp_AcceptLsaModeContext(
             return SEC_E_INTERNAL_ERROR;
         }
 
-        ctx->State = 1; /* next: expect AUTHENTICATE */
+        ctx->State = 1;
+        ctx->SessionKeyValid = FALSE;
 
-        /* Build CHALLENGE output token: [0x02][challenge:32] */
+        /* Build CHALLENGE output token */
         if (!outBuf || outBuf->cbBuffer < 1 + CHALLENGE_SIZE) {
             HeapFree(GetProcessHeap(), 0, ctx);
             return SEC_E_BUFFER_TOO_SMALL;
@@ -209,7 +262,7 @@ static NTSTATUS NTAPI TideSsp_AcceptLsaModeContext(
         return SEC_I_CONTINUE_NEEDED;
     }
     else if (token[0] == TOKEN_AUTHENTICATE) {
-        /* ---- Step 2: AUTHENTICATE ---- */
+        /* ── Step 2: AUTHENTICATE ── */
         if (inBuf->cbBuffer < 1 + 64 + 32)
             return SEC_E_INVALID_TOKEN;
 
@@ -226,9 +279,12 @@ static NTSTATUS NTAPI TideSsp_AcceptLsaModeContext(
             return SEC_E_LOGON_DENIED;
         }
 
-        /* Create Windows logon session for the user */
+        /* Derive session key for NEGOEX VERIFY */
+        deriveSessionKey(ctx->Challenge, signature, pubkey, ctx->SessionKey);
+        ctx->SessionKeyValid = TRUE;
+
+        /* Create Windows logon session */
         if (LsaDispatch) {
-            /* Use S4U logon to create a token for the username */
             LSA_TOKEN_INFORMATION_TYPE tokenType;
             PVOID tokenInfo = NULL;
             ULONG tokenInfoSize = 0;
@@ -246,7 +302,6 @@ static NTSTATUS NTAPI TideSsp_AcceptLsaModeContext(
                 LsaDispatch->FreeLsaHeap(tokenInfo);
         }
 
-        /* No output token needed — auth complete */
         if (outBuf) outBuf->cbBuffer = 0;
 
         *NewContextHandle = (LSA_SEC_HANDLE)ctx;
@@ -257,8 +312,7 @@ static NTSTATUS NTAPI TideSsp_AcceptLsaModeContext(
         }
         if (MappedContext) *MappedContext = TRUE;
 
-        ctx->State = 2; /* done */
-
+        ctx->State = 2;
         return SEC_E_OK;
     }
 
@@ -268,12 +322,126 @@ static NTSTATUS NTAPI TideSsp_AcceptLsaModeContext(
 static NTSTATUS NTAPI TideSsp_DeleteContext(LSA_SEC_HANDLE ContextHandle)
 {
     if (ContextHandle) {
-        HeapFree(GetProcessHeap(), 0, (PVOID)ContextHandle);
+        PTIDE_CONTEXT ctx = (PTIDE_CONTEXT)ContextHandle;
+        SecureZeroMemory(ctx->SessionKey, SESSION_KEY_SIZE);
+        HeapFree(GetProcessHeap(), 0, ctx);
     }
     return STATUS_SUCCESS;
 }
 
-/* Stubs for required but unused functions */
+/* ══════════════════════════════════════════════════════════════════
+ *  NegoEx-specific functions
+ * ══════════════════════════════════════════════════════════════════ */
+
+/*
+ * SpGetExtendedInformation — called by NegoExtender at boot to discover
+ * our AuthScheme GUID. This is how NegoExtender knows to include TideSSP
+ * in SPNEGO NEGOEX negotiation.
+ */
+static NTSTATUS NTAPI TideSsp_GetExtendedInformation(
+    SECPKG_EXTENDED_INFORMATION_CLASS InfoClass,
+    PSECPKG_EXTENDED_INFORMATION *ppInfo)
+{
+    if (InfoClass == SecpkgNego2Info) {
+        /* Allocate from LSA heap — required by the LSA API contract */
+        PSECPKG_EXTENDED_INFORMATION info = NULL;
+        if (LsaDispatch && LsaDispatch->AllocateLsaHeap) {
+            info = (PSECPKG_EXTENDED_INFORMATION)LsaDispatch->AllocateLsaHeap(
+                sizeof(SECPKG_EXTENDED_INFORMATION));
+        } else {
+            info = (PSECPKG_EXTENDED_INFORMATION)HeapAlloc(
+                GetProcessHeap(), HEAP_ZERO_MEMORY,
+                sizeof(SECPKG_EXTENDED_INFORMATION));
+        }
+        if (!info) return SEC_E_INSUFFICIENT_MEMORY;
+
+        info->Class = SecpkgNego2Info;
+        info->Info.Nego2Info.AuthSchemeID = TIDESSP_AUTH_SCHEME;
+        info->Info.Nego2Info.PackageFlags = 0;
+        *ppInfo = info;
+        return STATUS_SUCCESS;
+    }
+
+    return STATUS_NOT_FOUND;
+}
+
+/*
+ * SpQueryMetaData — NegoExtender calls during initial negotiation.
+ * TideSSP doesn't need metadata exchange, so return success with no data.
+ */
+static NTSTATUS NTAPI TideSsp_QueryMetaData(
+    LSA_SEC_HANDLE CredentialHandle,
+    PUNICODE_STRING TargetName,
+    ULONG ContextRequirements,
+    PULONG MetaDataLength,
+    PUCHAR *MetaData,
+    PLSA_SEC_HANDLE ContextHandle)
+{
+    (void)CredentialHandle;
+    (void)TargetName;
+    (void)ContextRequirements;
+    (void)ContextHandle;
+    if (MetaDataLength) *MetaDataLength = 0;
+    if (MetaData) *MetaData = NULL;
+    return STATUS_SUCCESS;
+}
+
+/*
+ * SpExchangeMetaData — accept and ignore metadata from the peer.
+ */
+static NTSTATUS NTAPI TideSsp_ExchangeMetaData(
+    LSA_SEC_HANDLE CredentialHandle,
+    PUNICODE_STRING TargetName,
+    ULONG ContextRequirements,
+    ULONG MetaDataLength,
+    PUCHAR MetaData,
+    PLSA_SEC_HANDLE ContextHandle)
+{
+    (void)CredentialHandle;
+    (void)TargetName;
+    (void)ContextRequirements;
+    (void)MetaDataLength;
+    (void)MetaData;
+    (void)ContextHandle;
+    return STATUS_SUCCESS;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ *  Query/Set Context Attributes (with session key support)
+ * ══════════════════════════════════════════════════════════════════ */
+
+static NTSTATUS NTAPI TideSsp_QueryContextAttributes(LSA_SEC_HANDLE h, ULONG attr, PVOID buf) {
+    if (attr == SECPKG_ATTR_SIZES) {
+        PSecPkgContext_Sizes sizes = (PSecPkgContext_Sizes)buf;
+        sizes->cbMaxToken = 1 + 64 + 32;
+        sizes->cbMaxSignature = 0;
+        sizes->cbBlockSize = 0;
+        sizes->cbSecurityTrailer = 0;
+        return STATUS_SUCCESS;
+    }
+    if (attr == SECPKG_ATTR_SESSION_KEY) {
+        PTIDE_CONTEXT ctx = (PTIDE_CONTEXT)h;
+        if (!ctx || !ctx->SessionKeyValid)
+            return SEC_E_INVALID_HANDLE;
+        SecPkgContext_SessionKey *sk = (SecPkgContext_SessionKey *)buf;
+        sk->SessionKeyLength = SESSION_KEY_SIZE;
+        /* Allocate key buffer from LSA heap */
+        if (LsaDispatch && LsaDispatch->AllocateLsaHeap) {
+            sk->SessionKey = (PUCHAR)LsaDispatch->AllocateLsaHeap(SESSION_KEY_SIZE);
+        } else {
+            sk->SessionKey = (PUCHAR)HeapAlloc(GetProcessHeap(), 0, SESSION_KEY_SIZE);
+        }
+        if (!sk->SessionKey) return SEC_E_INSUFFICIENT_MEMORY;
+        memcpy(sk->SessionKey, ctx->SessionKey, SESSION_KEY_SIZE);
+        return STATUS_SUCCESS;
+    }
+    return STATUS_NOT_IMPLEMENTED;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ *  Stubs for required but unused functions
+ * ══════════════════════════════════════════════════════════════════ */
+
 static NTSTATUS NTAPI TideSsp_LogonUser(void *a,void *b,void *c,void *d,void *e,void *f,void *g,void *h,void *i,void *j,void *k,void *l,void *m,void *n) {
     (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h;(void)i;(void)j;(void)k;(void)l;(void)m;(void)n;
     return STATUS_NOT_IMPLEMENTED;
@@ -322,7 +490,6 @@ static NTSTATUS NTAPI TideSsp_AcquireCredentialsHandle(
     PVOID f, PLSA_SEC_HANDLE g, PTimeStamp h)
 {
     (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;
-    /* Return a dummy credential handle */
     *g = 1;
     if (h) { h->LowPart = 0xFFFFFFFF; h->HighPart = 0x7FFFFFFF; }
     return STATUS_SUCCESS;
@@ -353,19 +520,6 @@ static NTSTATUS NTAPI TideSsp_DeleteCredentials(LSA_SEC_HANDLE a, PSecBuffer b) 
     return STATUS_NOT_IMPLEMENTED;
 }
 
-static NTSTATUS NTAPI TideSsp_QueryContextAttributes(LSA_SEC_HANDLE h, ULONG attr, PVOID buf) {
-    (void)h;
-    if (attr == SECPKG_ATTR_SIZES) {
-        PSecPkgContext_Sizes sizes = (PSecPkgContext_Sizes)buf;
-        sizes->cbMaxToken = 1 + 64 + 32;
-        sizes->cbMaxSignature = 0;
-        sizes->cbBlockSize = 0;
-        sizes->cbSecurityTrailer = 0;
-        return STATUS_SUCCESS;
-    }
-    return STATUS_NOT_IMPLEMENTED;
-}
-
 static NTSTATUS NTAPI TideSsp_SetContextAttributes(LSA_SEC_HANDLE h, ULONG a, PVOID b, ULONG c) {
     (void)h;(void)a;(void)b;(void)c;
     return STATUS_NOT_IMPLEMENTED;
@@ -376,29 +530,52 @@ static NTSTATUS NTAPI TideSsp_ApplyControlToken(LSA_SEC_HANDLE h, PSecBufferDesc
     return STATUS_NOT_IMPLEMENTED;
 }
 
-/* Function table exported to LSA */
+/* ══════════════════════════════════════════════════════════════════
+ *  Function table — V5+ layout for NegoExtender compatibility
+ *
+ *  The struct must have ALL fields in order through V5 so that
+ *  NegoExtender can find QueryMetaData/ExchangeMetaData at the
+ *  correct offsets.
+ * ══════════════════════════════════════════════════════════════════ */
+
 SECPKG_FUNCTION_TABLE TideSSP_FunctionTable = {
-    .InitializePackage = (PLSA_AP_INITIALIZE_PACKAGE)TideSsp_Initialize,
-    .LogonUser = NULL,
-    .CallPackage = (PLSA_AP_CALL_PACKAGE)TideSsp_CallPackage,
-    .LogonTerminated = (PLSA_AP_LOGON_TERMINATED)TideSsp_LogonTerminated,
-    .CallPackageUntrusted = (PLSA_AP_CALL_PACKAGE_PASSTHROUGH)TideSsp_CallPackageUntrusted,
-    .CallPackagePassthrough = (PLSA_AP_CALL_PACKAGE_PASSTHROUGH)TideSsp_CallPackagePassthrough,
-    .LogonUserEx = NULL,
-    .LogonUserEx2 = NULL,
-    .Initialize = (SpInitializeFn *)TideSsp_Initialize,
-    .Shutdown = (SpShutdownFn *)TideSsp_Shutdown,
-    .GetInfo = (SpGetInfoFn *)TideSsp_GetInfo,
-    .AcceptLsaModeContext = (SpAcceptLsaModeContextFn *)TideSsp_AcceptLsaModeContext,
-    .AcquireCredentialsHandle = (SpAcquireCredentialsHandleFn *)TideSsp_AcquireCredentialsHandle,
+    /* V1 — basic SSP */
+    .InitializePackage          = (PLSA_AP_INITIALIZE_PACKAGE)TideSsp_Initialize,
+    .LogonUser                  = NULL,
+    .CallPackage                = (PLSA_AP_CALL_PACKAGE)TideSsp_CallPackage,
+    .LogonTerminated            = (PLSA_AP_LOGON_TERMINATED)TideSsp_LogonTerminated,
+    .CallPackageUntrusted       = (PLSA_AP_CALL_PACKAGE_PASSTHROUGH)TideSsp_CallPackageUntrusted,
+    .CallPackagePassthrough     = (PLSA_AP_CALL_PACKAGE_PASSTHROUGH)TideSsp_CallPackagePassthrough,
+    .LogonUserEx                = NULL,
+    .LogonUserEx2               = NULL,
+    .Initialize                 = (SpInitializeFn *)TideSsp_Initialize,
+    .Shutdown                   = (SpShutdownFn *)TideSsp_Shutdown,
+    .GetInfo                    = (SpGetInfoFn *)TideSsp_GetInfo,
+    .AcceptCredentials          = NULL,
+    .AcquireCredentialsHandle   = (SpAcquireCredentialsHandleFn *)TideSsp_AcquireCredentialsHandle,
     .QueryCredentialsAttributes = (SpQueryCredentialsAttributesFn *)TideSsp_QueryCredentialsAttributes,
-    .FreeCredentialsHandle = (SpFreeCredentialsHandleFn *)TideSsp_FreeCredentialsHandle,
-    .SaveCredentials = (SpSaveCredentialsFn *)TideSsp_SaveCredentials,
-    .GetCredentials = (SpGetCredentialsFn *)TideSsp_GetCredentials,
-    .DeleteCredentials = (SpDeleteCredentialsFn *)TideSsp_DeleteCredentials,
-    .InitLsaModeContext = (SpInitLsaModeContextFn *)TideSsp_InitLsaModeContext,
-    .DeleteContext = (SpDeleteContextFn *)TideSsp_DeleteContext,
-    .ApplyControlToken = (SpApplyControlTokenFn *)TideSsp_ApplyControlToken,
-    .QueryContextAttributes = (SpQueryContextAttributesFn *)TideSsp_QueryContextAttributes,
-    .SetContextAttributes = (SpSetContextAttributesFn *)TideSsp_SetContextAttributes,
+    .FreeCredentialsHandle      = (SpFreeCredentialsHandleFn *)TideSsp_FreeCredentialsHandle,
+    .SaveCredentials            = (SpSaveCredentialsFn *)TideSsp_SaveCredentials,
+    .GetCredentials             = (SpGetCredentialsFn *)TideSsp_GetCredentials,
+    .DeleteCredentials          = (SpDeleteCredentialsFn *)TideSsp_DeleteCredentials,
+    .InitLsaModeContext         = (SpInitLsaModeContextFn *)TideSsp_InitLsaModeContext,
+    .AcceptLsaModeContext       = (SpAcceptLsaModeContextFn *)TideSsp_AcceptLsaModeContext,
+    .DeleteContext              = (SpDeleteContextFn *)TideSsp_DeleteContext,
+    .ApplyControlToken          = (SpApplyControlTokenFn *)TideSsp_ApplyControlToken,
+    .GetUserInfo                = NULL,
+    /* V2 */
+    .GetExtendedInformation     = (SpGetExtendedInformationFn *)TideSsp_GetExtendedInformation,
+    .QueryContextAttributes     = (SpQueryContextAttributesFn *)TideSsp_QueryContextAttributes,
+    /* V3 */
+    .AddCredentials             = NULL,
+    .SetExtendedInformation     = NULL,
+    /* V4 */
+    .SetContextAttributes       = (SpSetContextAttributesFn *)TideSsp_SetContextAttributes,
+    /* V5 — NegoExtender */
+    .SetCredentialsAttributes   = NULL,
+    .ChangeAccountPassword      = NULL,
+    .QueryMetaData              = (SpQueryMetaDataFn *)TideSsp_QueryMetaData,
+    .ExchangeMetaData           = (SpExchangeMetaDataFn *)TideSsp_ExchangeMetaData,
+    .GetCredUIContext            = NULL,
+    .UpdateCredentials           = NULL,
 };
