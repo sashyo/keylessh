@@ -318,26 +318,29 @@ export async function performCredSSP(
 
   // ── Step 5: Send pubKeyAuth (TLS channel binding) ──
   //
-  // CredSSP v6: pubKeyAuth = EncryptMessage(SHA-256("CredSSP Client-To-Server Binding Hash\0" + nonce + SHA-256(serverCertRaw)))
+  // CredSSP v5/v6 (MS-CSSP §3.1.5):
+  //   ClientServerHash = SHA-256("CredSSP Client-To-Server Binding Hash\0" + Nonce + SubjectPublicKey)
+  //   pubKeyAuth = EncryptMessage(ClientServerHash)
+  //
+  // SubjectPublicKey = raw public key bytes from the certificate's SubjectPublicKeyInfo
+  //   BIT STRING content (excluding the 0x00 unused-bits prefix).
+  //   For RSA, this is the DER-encoded RSAPublicKey { modulus, exponent }.
+  //   This matches Windows' CERT_PUBLIC_KEY_INFO.PublicKey.pbData and FreeRDP's i2d_PublicKey().
+  // NOTE: There is NO inner SHA-256 hash — the raw key bytes go directly into the outer hash.
 
   const serverCertRaw = extractTlsServerCert(tlsSocket);
   console.log(`[CredSSP] Server cert raw DER: ${serverCertRaw.length} bytes`);
 
-  // Extract SubjectPublicKeyInfo directly from the raw certificate DER.
-  // Node.js's x509.publicKey.export() re-encodes the key, which may differ
-  // from the exact bytes in the certificate. Windows CredSSP uses the raw bytes.
-  const spkiDer = extractSpkiFromCertDer(serverCertRaw);
-  console.log(`[CredSSP] SPKI DER (raw from cert): ${spkiDer.length} bytes, first16=${spkiDer.subarray(0, 16).toString("hex")}`);
-
-  const certHash = createHash("sha256").update(spkiDer).digest();
-  console.log(`[CredSSP] certHash (SHA256 of SPKI): ${certHash.toString("hex")}`);
+  // Extract raw SubjectPublicKey from the certificate (BIT STRING content minus unused-bits byte)
+  const subjectPublicKey = extractSubjectPublicKeyFromCertDer(serverCertRaw);
+  console.log(`[CredSSP] SubjectPublicKey: ${subjectPublicKey.length} bytes, first16=${subjectPublicKey.subarray(0, 16).toString("hex")}`);
 
   const hashMagic = Buffer.from("CredSSP Client-To-Server Binding Hash\0", "ascii");
   console.log(`[CredSSP] hashMagic: ${hashMagic.length} bytes`);
   console.log(`[CredSSP] clientNonce: ${clientNonce.toString("hex")}`);
 
-  const clientHashInput = Buffer.concat([hashMagic, clientNonce, certHash]);
-  console.log(`[CredSSP] hashInput: ${clientHashInput.length} bytes (${hashMagic.length}+${clientNonce.length}+${certHash.length})`);
+  const clientHashInput = Buffer.concat([hashMagic, clientNonce, subjectPublicKey]);
+  console.log(`[CredSSP] hashInput: ${clientHashInput.length} bytes (${hashMagic.length}+${clientNonce.length}+${subjectPublicKey.length})`);
 
   const clientHashEncData = createHash("sha256").update(clientHashInput).digest();
   console.log(`[CredSSP] pubKeyAuth plaintext (${clientHashEncData.length}b): ${clientHashEncData.toString("hex")}`);
@@ -359,11 +362,11 @@ export async function performCredSSP(
     throw new Error("CredSSP: server did not return pubKeyAuth confirmation");
   }
 
-  // Verify server's pubKeyAuth (SHA-256("CredSSP Server-To-Client Binding Hash\0" + nonce + certHash))
+  // Verify server's pubKeyAuth: SHA-256("CredSSP Server-To-Client Binding Hash\0" + nonce + SubjectPublicKey)
   const serverHashInput = Buffer.concat([
     Buffer.from("CredSSP Server-To-Client Binding Hash\0", "ascii"),
     clientNonce,
-    certHash,
+    subjectPublicKey,
   ]);
   const expectedServerHash = createHash("sha256").update(serverHashInput).digest();
   const serverPubKeyAuth = tideGcmDecrypt(sessionKey, tsResp3.pubKeyAuth);
@@ -664,9 +667,14 @@ function extractTlsServerCert(tlsSocket: TLSSocket): Buffer {
 }
 
 /**
- * Extract the raw SubjectPublicKeyInfo bytes directly from a DER-encoded
- * X.509 certificate. This preserves the exact encoding from the certificate,
- * unlike Node.js's x509.publicKey.export() which may re-encode the key.
+ * Extract the raw SubjectPublicKey bytes from a DER-encoded X.509 certificate.
+ *
+ * Returns the BIT STRING content of SubjectPublicKeyInfo.subjectPublicKey,
+ * EXCLUDING the unused-bits byte (0x00). For RSA, this is the DER-encoded
+ * RSAPublicKey { modulus INTEGER, exponent INTEGER }.
+ *
+ * This matches Windows' CERT_PUBLIC_KEY_INFO.PublicKey.pbData and
+ * FreeRDP's i2d_PublicKey() output used for CredSSP v5/v6 hash computation.
  *
  * Certificate ::= SEQUENCE { tbsCertificate, signatureAlgorithm, signatureValue }
  * TBSCertificate ::= SEQUENCE {
@@ -678,17 +686,21 @@ function extractTlsServerCert(tlsSocket: TLSSocket): Buffer {
  *   subject Name,
  *   subjectPublicKeyInfo SubjectPublicKeyInfo  ← target
  * }
+ * SubjectPublicKeyInfo ::= SEQUENCE {
+ *   algorithm AlgorithmIdentifier,
+ *   subjectPublicKey BIT STRING     ← extract content minus unused-bits byte
+ * }
  */
-function extractSpkiFromCertDer(certDer: Buffer): Buffer {
+function extractSubjectPublicKeyFromCertDer(certDer: Buffer): Buffer {
   let pos = 0;
 
   // Outer SEQUENCE (Certificate) — skip tag + length header
-  if (certDer[pos] !== 0x30) throw new Error("extractSPKI: expected SEQUENCE");
+  if (certDer[pos] !== 0x30) throw new Error("extractSPK: expected SEQUENCE");
   pos++;
   pos += derLenBytes(certDer, pos);
 
   // TBSCertificate SEQUENCE — skip tag + length header to enter contents
-  if (certDer[pos] !== 0x30) throw new Error("extractSPKI: expected TBS SEQUENCE");
+  if (certDer[pos] !== 0x30) throw new Error("extractSPK: expected TBS SEQUENCE");
   pos++;
   pos += derLenBytes(certDer, pos);
 
@@ -698,10 +710,35 @@ function extractSpkiFromCertDer(certDer: Buffer): Buffer {
   // Skip: serialNumber, signature, issuer, validity, subject (5 fields)
   for (let i = 0; i < 5; i++) pos = derSkipTlv(certDer, pos);
 
-  // subjectPublicKeyInfo starts at pos — capture entire TLV
-  const spkiStart = pos;
-  const spkiEnd = derSkipTlv(certDer, pos);
-  return certDer.subarray(spkiStart, spkiEnd);
+  // Now at SubjectPublicKeyInfo SEQUENCE — enter it
+  if (certDer[pos] !== 0x30) throw new Error("extractSPK: expected SPKI SEQUENCE");
+  pos++; // skip SEQUENCE tag
+  pos += derLenBytes(certDer, pos); // skip SEQUENCE length
+
+  // Skip AlgorithmIdentifier (first field)
+  pos = derSkipTlv(certDer, pos);
+
+  // Now at subjectPublicKey BIT STRING
+  if (certDer[pos] !== 0x03) throw new Error("extractSPK: expected BIT STRING");
+  pos++; // skip BIT STRING tag
+  const bitStringLenSize = derLenBytes(certDer, pos);
+  const first = certDer[pos];
+  let bitStringLen: number;
+  if (first < 0x80) {
+    bitStringLen = first;
+  } else {
+    const n = first & 0x7f;
+    bitStringLen = 0;
+    for (let i = 0; i < n; i++) bitStringLen = (bitStringLen << 8) | certDer[pos + 1 + i];
+  }
+  pos += bitStringLenSize;
+
+  // Skip unused-bits byte (should be 0x00)
+  pos++;
+  bitStringLen--;
+
+  // Return the raw public key bytes (RSAPublicKey DER for RSA)
+  return certDer.subarray(pos, pos + bitStringLen);
 }
 
 /** Read a DER length and return number of bytes consumed (length field only) */
