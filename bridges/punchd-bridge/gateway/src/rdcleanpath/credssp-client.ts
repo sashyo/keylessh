@@ -299,6 +299,10 @@ export async function performCredSSP(
   );
 
   const verifySpnego = buildSpnegoResponse(clientVerifyMsg);
+  console.log(`[CredSSP] Client NEGOEX VERIFY raw (${clientVerifyMsg.length}b): ${clientVerifyMsg.toString("hex")}`);
+  console.log(`[CredSSP] Client SPNEGO response raw (${verifySpnego.length}b): ${verifySpnego.toString("hex")}`);
+  // Also log the server's SPNEGO for comparison
+  console.log(`[CredSSP] Server SPNEGO raw (${serverSpnego1.length}b): ${serverSpnego1.subarray(0, 40).toString("hex")}...`);
   const tsReqVerify = buildTSRequest(CREDSSP_VERSION, verifySpnego);
   tlsSocket.write(tsReqVerify);
   console.log(`[CredSSP] Sent client VERIFY (checksumType=${serverCksumType}, ${clientChecksum.toString("hex")})`);
@@ -358,7 +362,11 @@ function logSpnegoFields(label: string, spnego: Buffer): void {
     while (reader.hasMore()) {
       const tag = reader.peekTag();
       const { value } = reader.readTlv();
-      if (tag === contextTag(0)) fields.push(`negState=${value[0]}`);
+      if (tag === contextTag(0)) {
+        // value is DER ENUMERATED: 0a 01 <val>
+        const nsVal = (value.length >= 3 && value[0] === 0x0a) ? value[2] : value[0];
+        fields.push(`negState=${nsVal}`);
+      }
       else if (tag === contextTag(1)) fields.push(`supportedMech(${value.length}b)`);
       else if (tag === contextTag(2)) fields.push(`responseToken(${value.length}b)`);
       else if (tag === contextTag(3)) fields.push(`mechListMIC(${value.length}b)=${value.toString("hex").substring(0, 40)}`);
@@ -385,10 +393,15 @@ function buildSpnegoInit(mechToken: Buffer): Buffer {
 
 /**
  * Build a SPNEGO NegTokenResp (client continuation).
- * Per RFC 4178, client should not set negState.
+ * MS-SPNG requires the initiator to include negState=accept-complete
+ * when the mechanism indicates success.
  */
 function buildSpnegoResponse(responseToken: Buffer): Buffer {
   const elements: Buffer[] = [];
+  // negState [0] ENUMERATED { accept-completed(0) }
+  const negStateEnum = encodeTlv(0x0a, Buffer.from([0x00])); // ENUMERATED { 0 }
+  elements.push(encodeExplicit(0, negStateEnum));
+  // responseToken [2] OCTET STRING
   elements.push(encodeExplicit(2, encodeOctetString(responseToken)));
   const negTokenResp = encodeSequence(elements);
   return encodeTlv(0xa1, negTokenResp);
