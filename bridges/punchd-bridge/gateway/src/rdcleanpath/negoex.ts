@@ -518,6 +518,54 @@ export function computeAes128ChecksumKi(
 }
 
 /**
+ * Build an RFC 4121 GSS_GetMIC token for SPNEGO mechListMIC.
+ *
+ * RFC 4121 section 4.2.6.1 MIC token format:
+ *   Byte 0-1:  TOK_ID    = 04 04
+ *   Byte 2:    Flags     (0x00 for initiator, 0x01 for acceptor)
+ *   Byte 3-7:  Filler    = FF FF FF FF FF
+ *   Byte 8-15: SND_SEQ   (big-endian sequence number)
+ *   Byte 16+:  SGN_CKSUM = HMAC-SHA1(Ki, header[0..15] || message)[0:12]
+ *
+ * Ki = DK(base_key, usage || 0x55)
+ *
+ * @param sessionKey - 16-byte AES-128 session key
+ * @param keyUsage - key usage (25 for initiator sign, 26 for acceptor sign)
+ * @param seqNum - sequence number (0 for first MIC)
+ * @param message - data to compute MIC over
+ */
+export function buildRfc4121Mic(
+  sessionKey: Buffer,
+  keyUsage: number,
+  seqNum: number,
+  message: Buffer,
+): Buffer {
+  // Build 16-byte header
+  const header = Buffer.alloc(16);
+  header.writeUInt16BE(0x0404, 0);    // TOK_ID
+  header[2] = 0x00;                    // Flags: sent by initiator
+  header.fill(0xff, 3, 8);            // Filler
+  // SND_SEQ at bytes 8-15 (big-endian)
+  header.writeUInt32BE(0, 8);          // high 32 bits
+  header.writeUInt32BE(seqNum, 12);    // low 32 bits
+
+  // Ki = DK(sessionKey, usage || 0x55)
+  const constant = Buffer.alloc(5);
+  constant.writeUInt32BE(keyUsage, 0);
+  constant[4] = 0x55;
+  const ki = dk(sessionKey, constant);
+
+  // SGN_CKSUM = HMAC-SHA1(Ki, header || message)[0:12]
+  const sgn = createHmac("sha1", ki)
+    .update(header)
+    .update(message)
+    .digest()
+    .subarray(0, 12);
+
+  return Buffer.concat([header, sgn]);
+}
+
+/**
  * Generate a random NEGOEX conversation ID (GUID).
  */
 export function generateConversationId(): Buffer {

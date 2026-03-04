@@ -40,6 +40,7 @@ import {
   deriveSessionKeyFromJwt,
   computeAes128Checksum,
   computeAes128ChecksumKi,
+  buildRfc4121Mic,
   md4,
   generateConversationId,
   NEGOEX_OID,
@@ -345,9 +346,17 @@ export async function performCredSSP(
   const mechListMIC = computeAes128Checksum(sessionKey, 23, mechTypesList);
   console.log(`[CredSSP] Using mechListMIC (ku=23): ${mechListMIC.toString("hex")}`);
 
-  // Don't include mechListMIC — our raw checksum may not match NegoExtender's
-  // GSS_GetMIC token format. Try without it first.
-  const verifySpnego = buildSpnegoResponse(clientVerifyMsg);
+  // Build RFC 4121 GSS_GetMIC token for mechListMIC
+  // Try multiple key usages: 25 (RFC 4121 initiator sign), 23 (NEGOEX verify)
+  const mic25 = buildRfc4121Mic(sessionKey, 25, 0, mechTypesList);
+  const mic23 = buildRfc4121Mic(sessionKey, 23, 0, mechTypesList);
+  console.log(`[CredSSP] RFC4121 MIC ku=25 (${mic25.length}b): ${mic25.toString("hex")}`);
+  console.log(`[CredSSP] RFC4121 MIC ku=23 (${mic23.length}b): ${mic23.toString("hex")}`);
+
+  // Use ku=25 (standard RFC 4121 initiator sign key usage)
+  const mechListMICToken = mic25;
+  console.log(`[CredSSP] Using RFC4121 mechListMIC (${mechListMICToken.length}b): ${mechListMICToken.toString("hex")}`);
+  const verifySpnego = buildSpnegoResponse(clientVerifyMsg, mechListMICToken);
   console.log(`[CredSSP] Client NEGOEX VERIFY raw (${clientVerifyMsg.length}b): ${clientVerifyMsg.toString("hex")}`);
   console.log(`[CredSSP] Client SPNEGO response raw (${verifySpnego.length}b): ${verifySpnego.toString("hex")}`);
   // Also log the server's SPNEGO for comparison
