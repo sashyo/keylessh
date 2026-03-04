@@ -21,6 +21,7 @@
  */
 
 import type { TLSSocket } from "tls";
+import { createHash } from "crypto";
 import {
   encodeSequence,
   encodeExplicit,
@@ -181,6 +182,13 @@ export async function performCredSSP(
 
   // Validate server's VERIFY checksum
   const transcriptData = Buffer.concat(transcript);
+  console.log(`[CredSSP] Transcript: ${transcript.length} parts, total ${transcriptData.length} bytes`);
+  for (let ti = 0; ti < transcript.length; ti++) {
+    const part = transcript[ti];
+    const msgType = part.length >= 12 ? part.readUInt32LE(8) : -1;
+    console.log(`[CredSSP]   part[${ti}]: type=${msgType}, len=${part.length}, first8=${part.subarray(0, 8).toString("hex")}`);
+  }
+  console.log(`[CredSSP] Transcript SHA256: ${createHash("sha256").update(transcriptData).digest().toString("hex")}`);
   let serverChecksumOk = false;
 
   if (serverCksumType === CHECKSUM_TYPE_HMAC_SHA1_96_AES128) {
