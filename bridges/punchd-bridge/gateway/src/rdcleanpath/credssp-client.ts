@@ -1,14 +1,18 @@
 /**
- * CredSSP client for TideSSP Ed25519 authentication.
+ * CredSSP client for TideSSP Ed25519 authentication via NEGOEX.
  *
  * Performs NLA (Network Level Authentication) with the RDP server using
- * the custom TideSSP security package instead of NTLM/Kerberos.
+ * NegoExtender (MS-NEGOEX) to carry TideSSP tokens through SPNEGO.
  *
  * Protocol flow:
- * 1. Client → Server: TSRequest with SPNEGO NegTokenInit containing TideSSP NEGOTIATE
- * 2. Server → Client: TSRequest with SPNEGO NegTokenResp containing TideSSP CHALLENGE
- * 3. Client → Server: TSRequest with SPNEGO NegTokenResp containing TideSSP AUTHENTICATE
- * 4. Server → Client: TSRequest with empty negoTokens (auth complete)
+ * 1. Client → Server: TSRequest with SPNEGO NegTokenInit { NEGOEX OID,
+ *    NEGOEX[INITIATOR_NEGO + AP_REQUEST(NEGOTIATE)] }
+ * 2. Server → Client: TSRequest with SPNEGO NegTokenResp { NEGOEX[ACCEPTOR_NEGO
+ *    + CHALLENGE(TideSSP challenge)] }
+ * 3. Client → Server: TSRequest with SPNEGO NegTokenResp { NEGOEX[AP_REQUEST
+ *    (AUTHENTICATE) + VERIFY] }
+ * 4. Server → Client: TSRequest with SPNEGO NegTokenResp { NEGOEX[VERIFY] }
+ *    + auth complete
  * 5. Client → Server: TSRequest with pubKeyAuth (TLS binding)
  * 6. Server → Client: TSRequest with pubKeyAuth confirmation
  * 7. Client → Server: TSRequest with authInfo (credentials blob)
@@ -27,6 +31,21 @@ import {
   TAG_SEQUENCE,
   contextTag,
 } from "./der-codec.js";
+import {
+  buildNegoMessage,
+  buildExchangeMessage,
+  buildVerifyMessage,
+  parseNegoexMessages,
+  deriveSessionKey,
+  computeVerifyChecksum,
+  generateConversationId,
+  NEGOEX_OID,
+  TIDESSP_AUTH_SCHEME,
+  MSG_INITIATOR_NEGO,
+  MSG_AP_REQUEST,
+  MSG_CHALLENGE,
+  MSG_VERIFY,
+} from "./negoex.js";
 
 // ── TideSSP Token Types ─────────────────────────────────────────
 
@@ -41,12 +60,6 @@ const CHALLENGE_SIZE = 32;
 
 // SPNEGO: 1.3.6.1.5.5.2
 const SPNEGO_OID = Buffer.from([0x06, 0x06, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x02]);
-
-// TideSSP: 1.3.6.1.4.1.59438.1.1 (private enterprise placeholder)
-// Encoded as: 06 0a 2b 06 01 04 01 83 d0 5e 01 01
-const TIDESSP_OID = Buffer.from([
-  0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x83, 0xd0, 0x5e, 0x01, 0x01,
-]);
 
 // ── CredSSP Constants ───────────────────────────────────────────
 
@@ -66,7 +79,7 @@ export interface CredSSPCallbacks {
 
 /**
  * Perform CredSSP/NLA authentication with a TLS-wrapped RDP server
- * using the TideSSP custom security package.
+ * using NEGOEX to carry TideSSP tokens through SPNEGO.
  *
  * @param tlsSocket - TLS socket connected to the RDP server
  * @param username - Windows username for the logon session
@@ -77,29 +90,82 @@ export async function performCredSSP(
   username: string,
   callbacks: CredSSPCallbacks,
 ): Promise<void> {
-  // Step 1: Send NEGOTIATE
+  // NEGOEX state
+  const conversationId = generateConversationId();
+  let seqNum = 0;
+  const transcript: Buffer[] = []; // all NEGOEX messages for VERIFY checksum
+
+  // ── Step 1: Send INITIATOR_NEGO + optimistic AP_REQUEST(NEGOTIATE) ──
+
+  const negoMsg = buildNegoMessage(
+    MSG_INITIATOR_NEGO,
+    conversationId,
+    seqNum++,
+    [TIDESSP_AUTH_SCHEME],
+  );
+
   const negotiateToken = buildNegotiateToken(username);
-  const spnegoInit = buildSpnegoInit(negotiateToken);
+  const apReqMsg = buildExchangeMessage(
+    MSG_AP_REQUEST,
+    conversationId,
+    seqNum++,
+    TIDESSP_AUTH_SCHEME,
+    negotiateToken,
+  );
+
+  // Concatenate NEGOEX messages
+  const initNegoex = Buffer.concat([negoMsg, apReqMsg]);
+  transcript.push(negoMsg, apReqMsg);
+
+  // Wrap in SPNEGO NegTokenInit with NEGOEX OID
+  const spnegoInit = buildSpnegoInit(initNegoex);
   const tsReq1 = buildTSRequest(CREDSSP_VERSION, spnegoInit);
   tlsSocket.write(tsReq1);
+  console.log("[CredSSP] Sent NEGOEX INITIATOR_NEGO + AP_REQUEST(NEGOTIATE)");
 
-  // Step 2: Read CHALLENGE
+  // ── Step 2: Read server response (ACCEPTOR_NEGO + CHALLENGE) ──
+
   const tsResp1 = await readTSRequest(tlsSocket);
   const challengeSpnego = extractNegoToken(tsResp1);
   if (!challengeSpnego) {
     throw new Error("CredSSP: no negoToken in server response");
   }
 
-  const challengeToken = extractSpnegoMechToken(challengeSpnego);
-  if (!challengeToken || challengeToken.length < 1 + CHALLENGE_SIZE) {
-    throw new Error("CredSSP: invalid challenge token");
+  const serverNegoex1 = extractSpnegoMechToken(challengeSpnego);
+  if (!serverNegoex1 || serverNegoex1.length < 40) {
+    throw new Error("CredSSP: invalid NEGOEX response from server");
   }
-  if (challengeToken[0] !== TOKEN_CHALLENGE) {
-    throw new Error(`CredSSP: expected CHALLENGE (0x02), got 0x${challengeToken[0].toString(16)}`);
-  }
-  const challenge = challengeToken.subarray(1, 1 + CHALLENGE_SIZE);
 
-  // Step 3: Relay challenge to browser, get signature
+  // Record server's NEGOEX messages in transcript
+  transcript.push(serverNegoex1);
+
+  // Parse NEGOEX messages to find CHALLENGE
+  const serverMsgs1 = parseNegoexMessages(serverNegoex1);
+  console.log(`[CredSSP] Server sent ${serverMsgs1.length} NEGOEX message(s): ${serverMsgs1.map(m => m.messageType).join(", ")}`);
+
+  // Use conversation ID from server if they set one
+  const serverConvId = serverMsgs1[0]?.conversationId;
+  if (serverConvId) {
+    serverConvId.copy(conversationId);
+  }
+
+  // Find the CHALLENGE message
+  const challengeMsg = serverMsgs1.find(m => m.messageType === MSG_CHALLENGE);
+  if (!challengeMsg?.exchange) {
+    throw new Error("CredSSP: no CHALLENGE in NEGOEX response");
+  }
+
+  const challengePayload = challengeMsg.exchange;
+  if (challengePayload.length < 1 + CHALLENGE_SIZE) {
+    throw new Error("CredSSP: invalid TideSSP challenge payload");
+  }
+  if (challengePayload[0] !== TOKEN_CHALLENGE) {
+    throw new Error(`CredSSP: expected CHALLENGE (0x02), got 0x${challengePayload[0].toString(16)}`);
+  }
+  const challenge = challengePayload.subarray(1, 1 + CHALLENGE_SIZE);
+
+  // ── Step 3: Relay challenge to browser, get Ed25519 signature ──
+
   console.log("[CredSSP] Relaying challenge to browser for Ed25519 signing");
   const { signature, publicKey } = await callbacks.onChallenge(Buffer.from(challenge));
 
@@ -110,13 +176,41 @@ export async function performCredSSP(
     throw new Error(`CredSSP: expected 32-byte public key, got ${publicKey.length}`);
   }
 
-  // Step 4: Send AUTHENTICATE
+  // ── Step 4: Send AP_REQUEST(AUTHENTICATE) + VERIFY ──
+
   const authToken = buildAuthenticateToken(signature, publicKey);
-  const spnegoResp = buildSpnegoResponse(authToken);
+  const authApReq = buildExchangeMessage(
+    MSG_AP_REQUEST,
+    conversationId,
+    seqNum++,
+    TIDESSP_AUTH_SCHEME,
+    authToken,
+  );
+
+  // Derive session key for VERIFY checksum
+  const sessionKey = deriveSessionKey(challenge, signature, publicKey);
+
+  // Compute VERIFY checksum over all prior NEGOEX messages + the auth AP_REQUEST
+  const verifyTranscript = Buffer.concat([...transcript, authApReq]);
+  const checksumValue = computeVerifyChecksum(sessionKey, 23, verifyTranscript); // 23 = initiator
+
+  const verifyMsg = buildVerifyMessage(
+    conversationId,
+    seqNum++,
+    TIDESSP_AUTH_SCHEME,
+    checksumValue,
+  );
+
+  const authNegoex = Buffer.concat([authApReq, verifyMsg]);
+  transcript.push(authApReq, verifyMsg);
+
+  const spnegoResp = buildSpnegoResponse(authNegoex);
   const tsReq2 = buildTSRequest(CREDSSP_VERSION, spnegoResp);
   tlsSocket.write(tsReq2);
+  console.log("[CredSSP] Sent NEGOEX AP_REQUEST(AUTHENTICATE) + VERIFY");
 
-  // Step 5: Read auth result
+  // ── Step 5: Read auth result ──
+
   const tsResp2 = await readTSRequest(tlsSocket);
 
   // Check for error
@@ -124,19 +218,37 @@ export async function performCredSSP(
     throw new Error(`CredSSP: authentication failed with error code ${tsResp2.errorCode}`);
   }
 
-  // Step 6: Send pubKeyAuth (TLS channel binding)
+  // Server may send VERIFY back — extract and verify if present
+  const authResultSpnego = extractNegoToken(tsResp2);
+  if (authResultSpnego) {
+    const serverNegoex2 = extractSpnegoMechToken(authResultSpnego);
+    if (serverNegoex2) {
+      const serverMsgs2 = parseNegoexMessages(serverNegoex2);
+      const serverVerify = serverMsgs2.find(m => m.messageType === MSG_VERIFY);
+      if (serverVerify) {
+        console.log("[CredSSP] Server sent VERIFY — authentication accepted");
+      }
+    }
+  }
+
+  console.log("[CredSSP] SPNEGO/NEGOEX authentication complete");
+
+  // ── Step 6: Send pubKeyAuth (TLS channel binding) ──
+
   const serverPubKey = extractTlsPublicKey(tlsSocket);
   const pubKeyAuth = buildPubKeyAuth(serverPubKey);
   const tsReq3 = buildTSRequest(CREDSSP_VERSION, undefined, undefined, pubKeyAuth);
   tlsSocket.write(tsReq3);
 
-  // Step 7: Read pubKeyAuth confirmation
+  // ── Step 7: Read pubKeyAuth confirmation ──
+
   const tsResp3 = await readTSRequest(tlsSocket);
   if (!tsResp3.pubKeyAuth) {
     throw new Error("CredSSP: server did not return pubKeyAuth confirmation");
   }
 
-  // Step 8: Send authInfo (TSCredentials)
+  // ── Step 8: Send authInfo (TSCredentials) ──
+
   const authInfo = buildAuthInfo(username);
   const tsReq4 = buildTSRequest(CREDSSP_VERSION, undefined, authInfo);
   tlsSocket.write(tsReq4);
@@ -167,7 +279,7 @@ function buildAuthenticateToken(signature: Buffer, publicKey: Buffer): Buffer {
 // ── SPNEGO Builders ─────────────────────────────────────────────
 
 /**
- * Build a SPNEGO NegTokenInit (initial token).
+ * Build a SPNEGO NegTokenInit with NEGOEX OID.
  *
  * NegTokenInit ::= SEQUENCE {
  *   mechTypes  [0] MechTypeList,        -- SEQUENCE OF OID
@@ -177,9 +289,9 @@ function buildAuthenticateToken(signature: Buffer, publicKey: Buffer): Buffer {
  * Wrapped in an APPLICATION [0] with SPNEGO OID.
  */
 function buildSpnegoInit(mechToken: Buffer): Buffer {
-  // MechTypeList: SEQUENCE OF { TideSSP OID }
-  const mechTypes = encodeExplicit(0, encodeTlv(TAG_SEQUENCE, TIDESSP_OID));
-  // mechToken: [2] OCTET STRING
+  // MechTypeList: SEQUENCE OF { NEGOEX OID }
+  const mechTypes = encodeExplicit(0, encodeTlv(TAG_SEQUENCE, NEGOEX_OID));
+  // mechToken: [2] OCTET STRING (contains concatenated NEGOEX messages)
   const mechTokenWrapped = encodeExplicit(2, encodeOctetString(mechToken));
 
   const negTokenInit = encodeSequence([mechTypes, mechTokenWrapped]);
@@ -203,7 +315,7 @@ function buildSpnegoResponse(responseToken: Buffer): Buffer {
   const elements: Buffer[] = [];
   // negState [0] ENUMERATED accept-incomplete (1)
   elements.push(encodeExplicit(0, encodeTlv(0x0a, Buffer.from([0x01]))));
-  // responseToken [2] OCTET STRING
+  // responseToken [2] OCTET STRING (contains concatenated NEGOEX messages)
   elements.push(encodeExplicit(2, encodeOctetString(responseToken)));
 
   const negTokenResp = encodeSequence(elements);

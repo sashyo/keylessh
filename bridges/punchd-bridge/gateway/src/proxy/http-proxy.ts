@@ -263,7 +263,10 @@ export function createProxy(options: ProxyOptions): {
       backendMap.set(b.name, new URL(b.url));
     }
   }
-  const defaultBackendUrl = new URL(options.backendUrl);
+  // Default backend may be an RDP URL (not valid for HTTP proxy) — handle gracefully
+  const defaultBackendUrl = /^https?:\/\//i.test(options.backendUrl)
+    ? new URL(options.backendUrl)
+    : backendMap.values().next().value ?? null;
 
   // No-auth backends: skip gateway JWT validation (backend handles its own auth)
   const noAuthBackends = new Set<string>();
@@ -319,7 +322,7 @@ export function createProxy(options: ProxyOptions): {
     );
   }
 
-  function resolveBackend(req: IncomingMessage, activeBackend?: string): URL {
+  function resolveBackend(req: IncomingMessage, activeBackend?: string): URL | null {
     // 1. Path-based /__b/<name> prefix (highest priority)
     if (activeBackend) {
       const found = backendMap.get(activeBackend);
@@ -1259,6 +1262,11 @@ export function createProxy(options: ProxyOptions): {
         req.socket.remoteAddress || "unknown";
 
       const targetBackend = resolveBackend(req, activeBackend);
+      if (!targetBackend) {
+        res.writeHead(502, { "Content-Type": "text/plain" });
+        res.end("No HTTP backend configured");
+        return;
+      }
       const targetIsHttps = targetBackend.protocol === "https:";
       const makeBackendReq = targetIsHttps ? httpsRequest : httpRequest;
 
