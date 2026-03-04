@@ -131,11 +131,23 @@ export async function performCredSSP(
     throw new Error("CredSSP: invalid NEGOEX response from server");
   }
 
-  // Record server's NEGOEX messages in transcript
-  transcript.push(serverNegoex1);
-
   const serverMsgs1 = parseNegoexMessages(serverNegoex1);
   console.log(`[CredSSP] Server sent ${serverMsgs1.length} NEGOEX message(s): types=[${serverMsgs1.map(m => m.messageType).join(", ")}]`);
+
+  // Record server's NEGOEX messages in transcript — EXCLUDE VERIFY messages.
+  // MS-NEGOEX: VERIFY checksum is computed over all messages except VERIFYs.
+  // We need to extract only the non-VERIFY message bytes from the server response.
+  {
+    let pos = 0;
+    while (pos + 40 <= serverNegoex1.length) {
+      const msgLen = serverNegoex1.readUInt32LE(pos + 20);
+      const msgType = serverNegoex1.readUInt32LE(pos + 8);
+      if (msgType !== MSG_VERIFY) {
+        transcript.push(Buffer.from(serverNegoex1.subarray(pos, pos + msgLen)));
+      }
+      pos += msgLen;
+    }
+  }
 
   // Use conversation ID from server
   const serverConvId = serverMsgs1[0]?.conversationId;

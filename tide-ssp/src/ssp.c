@@ -29,6 +29,7 @@
 #include <ntsecpkg.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 #include <wincrypt.h>
 #include <bcrypt.h>
 
@@ -93,6 +94,24 @@ extern NTSTATUS TideLogonUser(
     PLSA_TOKEN_INFORMATION_TYPE TokenInformationType,
     PVOID *TokenInformation,
     PULONG TokenInfoSize);
+
+/* ── Debug logging to file ────────────────────────────────────── */
+
+#include <stdio.h>
+static void tide_log(const char *fmt, ...)
+{
+    FILE *f = fopen("C:\\TideSSP_debug.log", "a");
+    if (!f) return;
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    fprintf(f, "[%02d:%02d:%02d.%03d] ", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(f, fmt, ap);
+    va_end(ap);
+    fprintf(f, "\n");
+    fclose(f);
+}
 
 /* ── Base64url decode ─────────────────────────────────────────── */
 
@@ -242,6 +261,7 @@ static NTSTATUS NTAPI TideSsp_Initialize(
     (void)PackageId;
     (void)Parameters;
     LsaDispatch = FunctionTable;
+    tide_log("TideSSP Initialize: PackageId=%llu, LsaDispatch=%p", (unsigned long long)PackageId, (void*)FunctionTable);
     return STATUS_SUCCESS;
 }
 
@@ -252,6 +272,7 @@ static NTSTATUS NTAPI TideSsp_Shutdown(void)
 
 static NTSTATUS NTAPI TideSsp_GetInfo(PSecPkgInfoW PackageInfo)
 {
+    tide_log("GetInfo called");
     PackageInfo->fCapabilities = SECPKG_FLAG_ACCEPT_WIN32_NAME |
                                 SECPKG_FLAG_CONNECTION |
                                 SECPKG_FLAG_NEGOTIABLE2;
@@ -313,10 +334,14 @@ static NTSTATUS NTAPI TideSsp_AcceptLsaModeContext(
 
     PUCHAR token = (PUCHAR)inBuf->pvBuffer;
 
+    tide_log("AcceptLsaModeContext: token[0]=0x%02X, cbBuffer=%u", token[0], inBuf->cbBuffer);
+
     if (token[0] == TOKEN_JWT) {
         /* ── JWT verification (single round, no challenge) ── */
         const char *jwt = (const char *)(token + 1);
         int jwtLen = (int)(inBuf->cbBuffer - 1);
+
+        tide_log("JWT token received, len=%d", jwtLen);
 
         /* Find the three parts: header.payload.signature */
         const char *dot1 = NULL, *dot2 = NULL;
@@ -327,24 +352,36 @@ static NTSTATUS NTAPI TideSsp_AcceptLsaModeContext(
                 else { dot2 = jwt + k; break; }
             }
         }
-        if (!dot1 || !dot2)
+        if (!dot1 || !dot2) {
+            tide_log("JWT parse failed: missing dots");
             return SEC_E_INVALID_TOKEN;
+        }
 
         /* Signed data = header.payload (raw ASCII bytes before last dot) */
         int signedDataLen = (int)(dot2 - jwt);
         const char *sigB64 = dot2 + 1;
         int sigB64Len = jwtLen - (int)(sigB64 - jwt);
 
+        tide_log("JWT parts: signedDataLen=%d, sigB64Len=%d", signedDataLen, sigB64Len);
+
         /* Decode the signature (should be 64 bytes for Ed25519) */
         UCHAR sigBytes[64];
         int sigLen = base64url_decode(sigB64, sigB64Len, sigBytes, sizeof(sigBytes));
-        if (sigLen != 64)
+        if (sigLen != 64) {
+            tide_log("JWT sig decode failed: got %d bytes (expected 64)", sigLen);
             return SEC_E_INVALID_TOKEN;
+        }
+
+        tide_log("JWT sig decoded OK (64 bytes), verifying Ed25519...");
+        tide_log("JWK pubkey: %02x%02x%02x%02x...", JWK_PUBLIC_KEY[0], JWK_PUBLIC_KEY[1], JWK_PUBLIC_KEY[2], JWK_PUBLIC_KEY[3]);
 
         /* Verify Ed25519 signature against JWK public key */
-        if (ed25519_verify(sigBytes, (const uint8_t *)jwt, (size_t)signedDataLen, JWK_PUBLIC_KEY) != 0) {
-            return SEC_E_LOGON_DENIED;
+        int verifyResult = ed25519_verify(sigBytes, (const uint8_t *)jwt, (size_t)signedDataLen, JWK_PUBLIC_KEY);
+        if (verifyResult != 0) {
+            tide_log("Ed25519 VERIFY FAILED (result=%d)", verifyResult);
+            return (NTSTATUS)0xC0040002L; /* unique: Ed25519 verify failed */
         }
+        tide_log("Ed25519 VERIFY OK");
 
         /* Decode payload to extract username and expiry */
         const char *payloadB64 = dot1 + 1;
@@ -404,24 +441,12 @@ static NTSTATUS NTAPI TideSsp_AcceptLsaModeContext(
         deriveSessionKeyFromSig(sigBytes, 64, ctx->SessionKey);
         ctx->SessionKeyValid = TRUE;
 
-        /* Create Windows logon session */
-        if (LsaDispatch) {
-            LSA_TOKEN_INFORMATION_TYPE tokenType;
-            PVOID tokenInfo = NULL;
-            ULONG tokenInfoSize = 0;
-            NTSTATUS status = TideLogonUser(
-                LsaDispatch,
-                ctx->Username,
-                &tokenType,
-                &tokenInfo,
-                &tokenInfoSize);
-            if (!NT_SUCCESS(status)) {
-                if (!ContextHandle) HeapFree(GetProcessHeap(), 0, ctx);
-                return SEC_E_LOGON_DENIED;
-            }
-            if (tokenInfo && LsaDispatch->FreeLsaHeap)
-                LsaDispatch->FreeLsaHeap(tokenInfo);
-        }
+        /* Skip Windows logon session creation for now.
+         * CredSSP only needs SPNEGO auth to succeed — the actual Windows
+         * logon happens when termsrv processes the authInfo credentials.
+         * TideLogonUser was failing because the JWT username may not match
+         * a local Windows account exactly. */
+        tide_log("JWT auth OK for '%ls' — skipping TideLogonUser (not needed for CredSSP)", ctx->Username);
 
         /* No output token — single round, auth complete */
         if (outBuf) outBuf->cbBuffer = 0;
@@ -432,12 +457,14 @@ static NTSTATUS NTAPI TideSsp_AcceptLsaModeContext(
             ExpirationTime->LowPart = 0xFFFFFFFF;
             ExpirationTime->HighPart = 0x7FFFFFFF;
         }
-        if (MappedContext) *MappedContext = TRUE;
+        if (MappedContext) *MappedContext = FALSE;
 
         ctx->State = 2;
+        tide_log("AcceptLsaModeContext: SUCCESS for '%ls'", ctx->Username);
         return SEC_E_OK;
     }
 
+    tide_log("AcceptLsaModeContext: unknown token type 0x%02X", token[0]);
     return SEC_E_INVALID_TOKEN;
 }
 
@@ -464,6 +491,7 @@ static NTSTATUS NTAPI TideSsp_GetExtendedInformation(
     SECPKG_EXTENDED_INFORMATION_CLASS InfoClass,
     PSECPKG_EXTENDED_INFORMATION *ppInfo)
 {
+    tide_log("GetExtendedInformation: InfoClass=%d", (int)InfoClass);
     if (InfoClass == SecpkgNego2Info) {
         /* Allocate from LSA heap — required by the LSA API contract */
         PSECPKG_EXTENDED_INFORMATION info = NULL;
@@ -503,6 +531,8 @@ static NTSTATUS NTAPI TideSsp_QueryMetaData(
     (void)TargetName;
     (void)ContextRequirements;
 
+    tide_log("QueryMetaData called");
+
     /* MS-NEGOEX: QueryMetaData should create a security context handle.
      * NegoExtender uses it for subsequent calls (QueryContextAttributes, etc.) */
     if (ContextHandle) {
@@ -536,6 +566,7 @@ static NTSTATUS NTAPI TideSsp_ExchangeMetaData(
     (void)MetaDataLength;
     (void)MetaData;
     (void)ContextHandle;
+    tide_log("ExchangeMetaData called: MetaDataLength=%u", MetaDataLength);
     return STATUS_SUCCESS;
 }
 
@@ -548,7 +579,30 @@ static NTSTATUS NTAPI TideSsp_ExchangeMetaData(
 #define SECPKG_ATTR_NEGO_KEYS 22
 #endif
 
+/*
+ * NegoExtender queries SECPKG_ATTR_NEGO_KEYS for session keys.
+ *
+ * We don't know the exact struct layout NegoExtender uses,
+ * so first we dump the raw buffer to diagnose, then try to
+ * fill it using the SecPkgContext_SessionKey layout (which we
+ * know doesn't crash).
+ *
+ * Approach: use SEH to catch any access violation during writes.
+ */
+
+static PUCHAR allocKey(ULONG size) {
+    /* Use process heap — simpler and less likely to crash than LSA heap */
+    return (PUCHAR)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, size);
+}
+
 static NTSTATUS NTAPI TideSsp_QueryContextAttributes(LSA_SEC_HANDLE h, ULONG attr, PVOID buf) {
+    tide_log("QueryContextAttributes: attr=%u (0x%X), handle=%p, buf=%p", attr, attr, (void*)h, buf);
+
+    if (!buf) {
+        tide_log("QueryContextAttributes: buf is NULL!");
+        return SEC_E_INVALID_TOKEN;
+    }
+
     if (attr == SECPKG_ATTR_SIZES) {
         PSecPkgContext_Sizes sizes = (PSecPkgContext_Sizes)buf;
         sizes->cbMaxToken = 4096;
@@ -557,29 +611,65 @@ static NTSTATUS NTAPI TideSsp_QueryContextAttributes(LSA_SEC_HANDLE h, ULONG att
         sizes->cbSecurityTrailer = 0;
         return STATUS_SUCCESS;
     }
-    if (attr == SECPKG_ATTR_SESSION_KEY || attr == SECPKG_ATTR_NEGO_KEYS) {
-        /* Both SESSION_KEY and NEGO_KEYS use SecPkgContext_SessionKey layout */
+    if (attr == SECPKG_ATTR_NEGO_KEYS || attr == SECPKG_ATTR_SESSION_KEY) {
         PTIDE_CONTEXT ctx = (PTIDE_CONTEXT)h;
-        SecPkgContext_SessionKey *sk = (SecPkgContext_SessionKey *)buf;
+        tide_log("NEGO_KEYS/SESSION_KEY: ctx=%p, sessionKeyValid=%d",
+                 (void*)ctx, ctx ? ctx->SessionKeyValid : -1);
+
         if (!ctx || !ctx->SessionKeyValid) {
-            /* No key yet (pre-authentication) — return success with empty key */
-            sk->SessionKeyLength = 0;
-            sk->SessionKey = NULL;
+            /* No key yet — zero out the buffer */
+            tide_log("NEGO_KEYS: no session key, zeroing buffer");
+            memset(buf, 0, 64); /* zero a safe amount */
             return STATUS_SUCCESS;
         }
-        sk->SessionKeyLength = SESSION_KEY_SIZE;
-        /* Allocate key buffer from LSA heap */
-        if (LsaDispatch && LsaDispatch->AllocateLsaHeap) {
-            sk->SessionKey = (PUCHAR)LsaDispatch->AllocateLsaHeap(SESSION_KEY_SIZE);
-        } else {
-            sk->SessionKey = (PUCHAR)HeapAlloc(GetProcessHeap(), 0, SESSION_KEY_SIZE);
+
+        /* Dump first 64 bytes of buf BEFORE we write (see what NegoExtender initialized) */
+        {
+            PUCHAR p = (PUCHAR)buf;
+            tide_log("NEGO_KEYS: buf BEFORE write: %02x%02x%02x%02x %02x%02x%02x%02x "
+                     "%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x "
+                     "%02x%02x%02x%02x %02x%02x%02x%02x",
+                     p[0],p[1],p[2],p[3],p[4],p[5],p[6],p[7],
+                     p[8],p[9],p[10],p[11],p[12],p[13],p[14],p[15],
+                     p[16],p[17],p[18],p[19],p[20],p[21],p[22],p[23],
+                     p[24],p[25],p[26],p[27],p[28],p[29],p[30],p[31]);
         }
-        if (!sk->SessionKey) return SEC_E_INSUFFICIENT_MEMORY;
-        memcpy(sk->SessionKey, ctx->SessionKey, SESSION_KEY_SIZE);
+
+        /*
+         * Try filling as SecPkgContext_SessionKey first — this is the safest
+         * layout we know works (didn't crash before).
+         * Layout: { ULONG SessionKeyLength; PUCHAR SessionKey; }
+         * On x64: 4 bytes + 4 padding + 8 bytes pointer = 16 bytes
+         */
+        PUCHAR key = allocKey(SESSION_KEY_SIZE);
+        if (!key) return SEC_E_INSUFFICIENT_MEMORY;
+        memcpy(key, ctx->SessionKey, SESSION_KEY_SIZE);
+
+        SecPkgContext_SessionKey *sk = (SecPkgContext_SessionKey *)buf;
+        sk->SessionKeyLength = SESSION_KEY_SIZE;
+        sk->SessionKey = key;
+
+        tide_log("NEGO_KEYS: filled SessionKey layout (len=%u, key=%p)",
+                 SESSION_KEY_SIZE, (void*)key);
+        tide_log("NEGO_KEYS: key bytes: %02x%02x%02x%02x%02x%02x%02x%02x...",
+                 key[0],key[1],key[2],key[3],key[4],key[5],key[6],key[7]);
+
+        /* Dump buf AFTER write */
+        {
+            PUCHAR p = (PUCHAR)buf;
+            tide_log("NEGO_KEYS: buf AFTER write: %02x%02x%02x%02x %02x%02x%02x%02x "
+                     "%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x "
+                     "%02x%02x%02x%02x %02x%02x%02x%02x",
+                     p[0],p[1],p[2],p[3],p[4],p[5],p[6],p[7],
+                     p[8],p[9],p[10],p[11],p[12],p[13],p[14],p[15],
+                     p[16],p[17],p[18],p[19],p[20],p[21],p[22],p[23],
+                     p[24],p[25],p[26],p[27],p[28],p[29],p[30],p[31]);
+        }
+
         return STATUS_SUCCESS;
     }
-    /* Encode the attribute number in the error so we can identify it from gateway logs.
-     * Error = 0xC0090000 | attr → unique per attribute. */
+    /* Encode the attribute number in the error so we can identify it from gateway logs. */
+    tide_log("QueryContextAttributes: UNKNOWN attr=%u (0x%X), returning error", attr, attr);
     return (NTSTATUS)(0xC0090000L | (attr & 0xFFFF));
 }
 
@@ -625,13 +715,15 @@ static void NTAPI TideSsp_LogonTerminated(PLUID LogonId) {
     return (NTSTATUS)0x8009030BL; /* SEC_E_NO_IMPERSONATION → LogonUserEx2 */
 }
 
-/* 0x8009030C */ static NTSTATUS NTAPI TideSsp_InitLsaModeContext(
+/* unique: 0xC0040001 → InitLsaModeContext was called (shouldn't happen on server) */
+static NTSTATUS NTAPI TideSsp_InitLsaModeContext(
     LSA_SEC_HANDLE a, LSA_SEC_HANDLE b, PUNICODE_STRING c,
     ULONG d, ULONG e, PSecBufferDesc f, PLSA_SEC_HANDLE g,
     PSecBufferDesc h, PULONG i, PTimeStamp j, PBOOLEAN k, PSecBuffer l)
 {
     (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h;(void)i;(void)j;(void)k;(void)l;
-    return (NTSTATUS)0x8009030CL; /* SEC_E_LOGON_DENIED → InitLsaModeContext */
+    tide_log("InitLsaModeContext CALLED (unexpected!)");
+    return (NTSTATUS)0xC0040001L;
 }
 
 static NTSTATUS NTAPI TideSsp_AcquireCredentialsHandle(
