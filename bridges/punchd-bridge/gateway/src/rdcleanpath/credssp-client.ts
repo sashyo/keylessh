@@ -312,10 +312,9 @@ export async function performCredSSP(
     console.log(`[CredSSP]   +svrVerify ku=25: ${ck25wv.toString("hex")}`);
   }
 
-  // RFC 4121 key usages: 23 = KG_USAGE_ACCEPTOR_SIGN, 25 = KG_USAGE_INITIATOR_SIGN
-  // Server (acceptor) used ku=23; client (initiator) must use ku=25.
-  // Transcript excludes VERIFY messages (both sides checksum the same non-VERIFY messages).
-  const KU_CLIENT_VERIFY = 25;
+  // Server (acceptor) used ku=23 for its VERIFY — client uses the same ku=23.
+  // Both sides checksum the same non-VERIFY messages in the transcript.
+  const KU_CLIENT_VERIFY = 23;
   let clientChecksum: Buffer;
   if (serverCksumType === CHECKSUM_TYPE_HMAC_SHA1_96_AES128) {
     clientChecksum = computeAes128Checksum(sessionKey, KU_CLIENT_VERIFY, transcriptData);
@@ -332,32 +331,27 @@ export async function performCredSSP(
     serverCksumType,
   );
 
-  // Compute SPNEGO mechListMIC over the MechTypeList from our NegTokenInit.
-  // The MechTypeList is: SEQUENCE { NEGOEX_OID }
+  // SPNEGO mechListMIC: MIC over the MechTypeList from our NegTokenInit.
   const mechTypesList = encodeTlv(TAG_SEQUENCE, NEGOEX_OID);
-  console.log(`[CredSSP] MechTypesList (${mechTypesList.length}b): ${mechTypesList.toString("hex")}`);
 
-  // Try mechListMIC with multiple key usages for debugging
+  // Try multiple mechListMIC formats for debugging
   if (serverCksumType === CHECKSUM_TYPE_HMAC_SHA1_96_AES128) {
+    // Raw checksums (Kc-based, like NEGOEX VERIFY)
     for (const ku of [23, 25, 22, 15]) {
       const mic = computeAes128Checksum(sessionKey, ku, mechTypesList);
-      console.log(`[CredSSP]   mechListMIC ku=${ku}: ${mic.toString("hex")}`);
+      console.log(`[CredSSP]   raw mechListMIC ku=${ku}: ${mic.toString("hex")}`);
+    }
+    // RFC 4121 MIC tokens (Kc-based, now fixed)
+    for (const ku of [23, 25]) {
+      const mic = buildRfc4121Mic(sessionKey, ku, 0, mechTypesList);
+      console.log(`[CredSSP]   RFC4121 MIC ku=${ku} (${mic.length}b): ${mic.toString("hex")}`);
     }
   }
 
-  // Use ku=23 for mechListMIC (same as VERIFY)
-  const mechListMIC = computeAes128Checksum(sessionKey, 23, mechTypesList);
-  console.log(`[CredSSP] Using mechListMIC (ku=23): ${mechListMIC.toString("hex")}`);
-
-  // Build RFC 4121 GSS_GetMIC token for mechListMIC
-  // Try multiple key usages: 25 (RFC 4121 initiator sign), 23 (NEGOEX verify)
-  const mic25 = buildRfc4121Mic(sessionKey, 25, 0, mechTypesList);
-  const mic23 = buildRfc4121Mic(sessionKey, 23, 0, mechTypesList);
-  console.log(`[CredSSP] RFC4121 MIC ku=25 (${mic25.length}b): ${mic25.toString("hex")}`);
-  console.log(`[CredSSP] RFC4121 MIC ku=23 (${mic23.length}b): ${mic23.toString("hex")}`);
-
-  // Skip mechListMIC for now to isolate VERIFY fix
-  const verifySpnego = buildSpnegoResponse(clientVerifyMsg);
+  // Use raw 12-byte checksum with ku=25 (KG_USAGE_INITIATOR_SIGN)
+  const mechListMICValue = computeAes128Checksum(sessionKey, 25, mechTypesList);
+  console.log(`[CredSSP] Using raw mechListMIC ku=25: ${mechListMICValue.toString("hex")}`);
+  const verifySpnego = buildSpnegoResponse(clientVerifyMsg, mechListMICValue);
   console.log(`[CredSSP] Client NEGOEX VERIFY raw (${clientVerifyMsg.length}b): ${clientVerifyMsg.toString("hex")}`);
   console.log(`[CredSSP] Client SPNEGO response raw (${verifySpnego.length}b): ${verifySpnego.toString("hex")}`);
   // Also log the server's SPNEGO for comparison

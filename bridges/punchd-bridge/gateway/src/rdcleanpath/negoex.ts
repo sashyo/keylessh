@@ -525,9 +525,9 @@ export function computeAes128ChecksumKi(
  *   Byte 2:    Flags     (0x00 for initiator, 0x01 for acceptor)
  *   Byte 3-7:  Filler    = FF FF FF FF FF
  *   Byte 8-15: SND_SEQ   (big-endian sequence number)
- *   Byte 16+:  SGN_CKSUM = HMAC-SHA1(Ki, header[0..15] || message)[0:12]
+ *   Byte 16+:  SGN_CKSUM = HMAC-SHA1(Kc, header[0..15] || message)[0:12]
  *
- * Ki = DK(base_key, usage || 0x55)
+ * Kc = DK(base_key, usage || 0x99)  (RFC 3961: Kc for checksums, NOT Ki)
  *
  * @param sessionKey - 16-byte AES-128 session key
  * @param keyUsage - key usage (25 for initiator sign, 26 for acceptor sign)
@@ -549,14 +549,14 @@ export function buildRfc4121Mic(
   header.writeUInt32BE(0, 8);          // high 32 bits
   header.writeUInt32BE(seqNum, 12);    // low 32 bits
 
-  // Ki = DK(sessionKey, usage || 0x55)
+  // Kc = DK(sessionKey, usage || 0x99) — RFC 3961 checksum key
   const constant = Buffer.alloc(5);
   constant.writeUInt32BE(keyUsage, 0);
-  constant[4] = 0x55;
-  const ki = dk(sessionKey, constant);
+  constant[4] = 0x99;
+  const kc = dk(sessionKey, constant);
 
-  // SGN_CKSUM = HMAC-SHA1(Ki, header || message)[0:12]
-  const sgn = createHmac("sha1", ki)
+  // SGN_CKSUM = HMAC-SHA1(Kc, header || message)[0:12]
+  const sgn = createHmac("sha1", kc)
     .update(header)
     .update(message)
     .digest()
