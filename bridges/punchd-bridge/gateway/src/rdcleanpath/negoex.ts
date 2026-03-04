@@ -277,9 +277,14 @@ export function parseNegoexMessages(data: Buffer): NegoexMessage[] {
       // VERIFY_MESSAGE
       if (cbMessageLength >= 76) {
         msg.authScheme = Buffer.from(data.subarray(pos + 40, pos + 56));
+        // Raw hex dump of CHECKSUM structure (offset 56-76 from message start)
+        console.log(`[NEGOEX] VERIFY raw bytes [56..76]: ${data.subarray(pos + 56, pos + 76).toString("hex")}`);
+        const cksumHeaderLen = data.readUInt32LE(pos + 56);
+        const cksumScheme = data.readUInt32LE(pos + 60);
         msg.checksumType = data.readInt32LE(pos + 64);
         const checksumOffset = data.readUInt32LE(pos + 68);
         const checksumLength = data.readUInt32LE(pos + 72);
+        console.log(`[NEGOEX] VERIFY checksum: hdrLen=${cksumHeaderLen}, scheme=${cksumScheme}, type=${msg.checksumType}, valueOffset=${checksumOffset}, valueLen=${checksumLength}`);
         if (checksumOffset + checksumLength <= cbMessageLength) {
           msg.checksum = Buffer.from(data.subarray(pos + checksumOffset, pos + checksumOffset + checksumLength));
         }
