@@ -1662,8 +1662,14 @@ static NTSTATUS NTAPI TideSsp_UserQueryContextAttributes(
         PTIDE_USER_CONTEXT uctx = tide_user_ctx_find(ContextHandle);
         if (!uctx) return SEC_E_INVALID_HANDLE;
         if (uctx->LogonToken) {
-            *(HANDLE *)Buffer = uctx->LogonToken;
-            tide_log("User ACCESS_TOKEN: returning %p", uctx->LogonToken);
+            HANDLE dup = NULL;
+            if (!DuplicateHandle(GetCurrentProcess(), uctx->LogonToken,
+                                 GetCurrentProcess(), &dup, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
+                tide_log("User ACCESS_TOKEN: DuplicateHandle failed");
+                return SEC_E_INTERNAL_ERROR;
+            }
+            *(HANDLE *)Buffer = dup;
+            tide_log("User ACCESS_TOKEN: returning %p (dup of %p)", dup, uctx->LogonToken);
             return STATUS_SUCCESS;
         }
         tide_log("User ACCESS_TOKEN: no token");
@@ -1739,8 +1745,15 @@ static NTSTATUS NTAPI TideSsp_GetContextToken(
         tide_log("GetContextToken: no logon token");
         return SEC_E_NO_CREDENTIALS;
     }
-    *Token = uctx->LogonToken;
-    tide_log("GetContextToken: returning %p", uctx->LogonToken);
+    /* Duplicate so caller owns the handle (survives DeleteUserModeContext) */
+    HANDLE dup = NULL;
+    if (!DuplicateHandle(GetCurrentProcess(), uctx->LogonToken,
+                         GetCurrentProcess(), &dup, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
+        tide_log("GetContextToken: DuplicateHandle failed (%lu)", GetLastError());
+        return SEC_E_INTERNAL_ERROR;
+    }
+    *Token = dup;
+    tide_log("GetContextToken: returning %p (dup of %p)", dup, uctx->LogonToken);
     return STATUS_SUCCESS;
 }
 

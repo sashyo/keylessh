@@ -290,12 +290,19 @@ export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCle
             // but IronRDP echoes that value in MCS CS_CORE. The server expects PROTOCOL_HYBRID (2).
             if (needsMcsPatch) {
               needsMcsPatch = false;
+              // Log full MCS hex before patching for diagnosis
+              console.log(`[RDCleanPath] MCS Connect Initial BEFORE patch (${data.length} bytes):`);
+              for (let off = 0; off < data.length; off += 48) {
+                const slice = data.subarray(off, Math.min(off + 48, data.length));
+                console.log(`[RDCleanPath]   +${off.toString().padStart(3, "0")}: ${slice.toString("hex")}`);
+              }
               patchMcsSelectedProtocol(data);
+              decodeMcsConnectInitial(data);
             }
             relayBytesFromClient += data.length;
-            const hex = data.subarray(0, Math.min(64, data.length)).toString("hex");
-            console.log(`[RDCleanPath] Relay client→RDP: ${data.length} bytes (total: ${relayBytesFromClient}) hex: ${hex}`);
-            tlsSocket.write(data);
+            console.log(`[RDCleanPath] Relay client→RDP: ${data.length} bytes (total: ${relayBytesFromClient}), tls: readable=${tlsSocket.readable} writable=${tlsSocket.writable}`);
+            const writeOk = tlsSocket.write(data);
+            console.log(`[RDCleanPath] tlsSocket.write returned ${writeOk}`);
           }
           break;
 
@@ -505,4 +512,87 @@ function patchMcsSelectedProtocol(data: Buffer): void {
     }
   }
   console.warn("[RDCleanPath] Could not find CS_CORE in MCS Connect Initial");
+}
+
+/**
+ * Decode and log the GCC user data blocks from an MCS Connect Initial PDU.
+ * Helps diagnose what IronRDP is sending vs what the server expects.
+ */
+function decodeMcsConnectInitial(data: Buffer): void {
+  // Find GCC Conference Create Request inside MCS Connect Initial
+  // Look for the T.124 GCC key: 00 05 00 14 7c 00 01
+  const gccKey = Buffer.from([0x00, 0x05, 0x00, 0x14, 0x7c, 0x00, 0x01]);
+  let gccPos = -1;
+  for (let i = 7; i < data.length - gccKey.length; i++) {
+    if (data.subarray(i, i + gccKey.length).equals(gccKey)) {
+      gccPos = i;
+      break;
+    }
+  }
+  if (gccPos < 0) {
+    console.log("[RDCleanPath] MCS decode: GCC key not found");
+    return;
+  }
+  console.log(`[RDCleanPath] MCS decode: GCC key at offset ${gccPos}`);
+
+  // Skip past GCC header to find user data blocks
+  // After the GCC key, there's conference name + PER-encoded user data
+  // Look for the first CS_ block header (0xC0xx LE)
+  let udPos = -1;
+  for (let i = gccPos + gccKey.length; i < data.length - 4; i++) {
+    if (data[i + 1] === 0xC0 && data[i] >= 0x01 && data[i] <= 0x0A) {
+      udPos = i;
+      break;
+    }
+  }
+  if (udPos < 0) {
+    console.log("[RDCleanPath] MCS decode: no user data blocks found");
+    return;
+  }
+
+  // Parse user data blocks
+  let pos = udPos;
+  while (pos + 4 <= data.length) {
+    const type = data.readUInt16LE(pos);
+    const len = data.readUInt16LE(pos + 2);
+    if (len < 4 || pos + len > data.length) break;
+    const typeName =
+      type === 0xC001 ? "CS_CORE" :
+      type === 0xC002 ? "CS_SECURITY" :
+      type === 0xC003 ? "CS_NET" :
+      type === 0xC004 ? "CS_CLUSTER" :
+      type === 0xC005 ? "CS_MONITOR" :
+      type === 0xC006 ? "CS_MCS_MSGCHANNEL" :
+      type === 0xC008 ? "CS_MONITOR_EX" :
+      type === 0xC00A ? "CS_MULTITRANSPORT" :
+      `0x${type.toString(16)}`;
+    console.log(`[RDCleanPath] MCS block: ${typeName} (type=0x${type.toString(16)}, len=${len})`);
+
+    if (type === 0xC001 && len >= 216) {
+      // CS_CORE details
+      const ver = data.readUInt32LE(pos + 4);
+      const width = data.readUInt16LE(pos + 8);
+      const height = data.readUInt16LE(pos + 10);
+      const colorDepth = data.readUInt16LE(pos + 12);
+      const sasSeq = data.readUInt16LE(pos + 14);
+      const kbLayout = data.readUInt32LE(pos + 16);
+      const clientBuild = data.readUInt32LE(pos + 20);
+      // clientName is at offset 28 (24 bytes from pos+4), 32 bytes UTF-16LE
+      const clientName = data.subarray(pos + 28, pos + 60).toString("utf16le").replace(/\0+$/, "");
+      const earlyCapFlags = len >= 212 ? data.readUInt32LE(pos + 200) : 0;
+      const selProto = len >= 216 ? data.readUInt32LE(pos + 212) : -1;
+      console.log(`[RDCleanPath]   CS_CORE: ver=0x${ver.toString(16)}, ${width}x${height}, colorDepth=${colorDepth}, sas=${sasSeq}`);
+      console.log(`[RDCleanPath]   CS_CORE: kbLayout=0x${kbLayout.toString(16)}, build=${clientBuild}, client="${clientName}"`);
+      console.log(`[RDCleanPath]   CS_CORE: earlyCapFlags=0x${earlyCapFlags.toString(16)}, serverSelectedProtocol=${selProto}`);
+    }
+
+    if (type === 0xC002) {
+      // CS_SECURITY
+      const encMethods = data.readUInt32LE(pos + 4);
+      const extEncMethods = len >= 12 ? data.readUInt32LE(pos + 8) : 0;
+      console.log(`[RDCleanPath]   CS_SECURITY: encMethods=0x${encMethods.toString(16)}, extEncMethods=0x${extEncMethods.toString(16)}`);
+    }
+
+    pos += len;
+  }
 }

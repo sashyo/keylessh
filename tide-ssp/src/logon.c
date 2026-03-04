@@ -114,7 +114,7 @@ NTSTATUS TideLogonUser(
                     authDataSize,
                     SecurityImpersonation,
                     &tokenSource,
-                    Interactive,       /* Use Interactive; TideAddLogonSids adds S-1-5-14 after */
+                    RemoteInteractive, /* User must be in Remote Desktop Users group */
                     &authority,
                     &tokenHandle,
                     &logonId,
