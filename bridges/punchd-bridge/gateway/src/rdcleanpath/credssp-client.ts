@@ -393,15 +393,9 @@ function buildSpnegoInit(mechToken: Buffer): Buffer {
 
 /**
  * Build a SPNEGO NegTokenResp (client continuation).
- * MS-SPNG requires the initiator to include negState=accept-complete
- * when the mechanism indicates success.
  */
 function buildSpnegoResponse(responseToken: Buffer): Buffer {
   const elements: Buffer[] = [];
-  // negState [0] ENUMERATED { accept-completed(0) }
-  const negStateEnum = encodeTlv(0x0a, Buffer.from([0x00])); // ENUMERATED { 0 }
-  elements.push(encodeExplicit(0, negStateEnum));
-  // responseToken [2] OCTET STRING
   elements.push(encodeExplicit(2, encodeOctetString(responseToken)));
   const negTokenResp = encodeSequence(elements);
   return encodeTlv(0xa1, negTokenResp);
