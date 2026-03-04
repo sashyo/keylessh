@@ -95,7 +95,7 @@ export async function performCredSSP(
   let seqNum = 0;
   const transcript: Buffer[] = []; // all NEGOEX messages for VERIFY checksum
 
-  // ── Step 1: Send INITIATOR_NEGO + optimistic AP_REQUEST(NEGOTIATE) ──
+  // ── Step 1: Send INITIATOR_NEGO only (no optimistic token) ──
 
   const negoMsg = buildNegoMessage(
     MSG_INITIATOR_NEGO,
@@ -104,38 +104,33 @@ export async function performCredSSP(
     [TIDESSP_AUTH_SCHEME],
   );
 
-  const negotiateToken = buildNegotiateToken(username);
-  const apReqMsg = buildExchangeMessage(
-    MSG_AP_REQUEST,
-    conversationId,
-    seqNum++,
-    TIDESSP_AUTH_SCHEME,
-    negotiateToken,
-  );
-
-  // Concatenate NEGOEX messages
-  const initNegoex = Buffer.concat([negoMsg, apReqMsg]);
-  transcript.push(negoMsg, apReqMsg);
+  transcript.push(negoMsg);
 
   // Wrap in SPNEGO NegTokenInit with NEGOEX OID
-  const spnegoInit = buildSpnegoInit(initNegoex);
+  const spnegoInit = buildSpnegoInit(negoMsg);
+  console.log(`[CredSSP] NEGOEX INITIATOR_NEGO: ${negoMsg.length} bytes, hex: ${negoMsg.subarray(0, 40).toString("hex")}...`);
+  console.log(`[CredSSP] SPNEGO NegTokenInit: ${spnegoInit.length} bytes, hex: ${spnegoInit.subarray(0, 40).toString("hex")}...`);
   const tsReq1 = buildTSRequest(CREDSSP_VERSION, spnegoInit);
+  console.log(`[CredSSP] TSRequest: ${tsReq1.length} bytes, hex: ${tsReq1.subarray(0, 20).toString("hex")}...`);
   tlsSocket.write(tsReq1);
-  console.log("[CredSSP] Sent NEGOEX INITIATOR_NEGO + AP_REQUEST(NEGOTIATE)");
+  console.log("[CredSSP] Sent NEGOEX INITIATOR_NEGO");
 
-  // ── Step 2: Read server response (ACCEPTOR_NEGO + CHALLENGE) ──
+  // ── Step 2: Read server response (ACCEPTOR_NEGO) ──
 
   const tsResp1 = await readTSRequest(tlsSocket);
   console.log(`[CredSSP] Server TSRequest: version=${tsResp1.version}, hasNegoToken=${!!tsResp1.negoToken}, errorCode=${tsResp1.errorCode ?? "none"}, hasPubKeyAuth=${!!tsResp1.pubKeyAuth}`);
   if (tsResp1.negoToken) {
     console.log(`[CredSSP] Server negoToken: ${tsResp1.negoToken.length} bytes, first bytes: ${tsResp1.negoToken.subarray(0, 20).toString("hex")}`);
   }
-  const challengeSpnego = extractNegoToken(tsResp1);
-  if (!challengeSpnego) {
+  if (tsResp1.errorCode) {
+    throw new Error(`CredSSP: server error 0x${tsResp1.errorCode.toString(16)} (${tsResp1.errorCode})`);
+  }
+  const challengeSpnego1 = extractNegoToken(tsResp1);
+  if (!challengeSpnego1) {
     throw new Error("CredSSP: no negoToken in server response");
   }
 
-  const serverNegoex1 = extractSpnegoMechToken(challengeSpnego);
+  const serverNegoex1 = extractSpnegoMechToken(challengeSpnego1);
   if (!serverNegoex1 || serverNegoex1.length < 40) {
     throw new Error("CredSSP: invalid NEGOEX response from server");
   }
@@ -143,18 +138,56 @@ export async function performCredSSP(
   // Record server's NEGOEX messages in transcript
   transcript.push(serverNegoex1);
 
-  // Parse NEGOEX messages to find CHALLENGE
+  // Parse NEGOEX messages
   const serverMsgs1 = parseNegoexMessages(serverNegoex1);
-  console.log(`[CredSSP] Server sent ${serverMsgs1.length} NEGOEX message(s): ${serverMsgs1.map(m => m.messageType).join(", ")}`);
+  console.log(`[CredSSP] Server sent ${serverMsgs1.length} NEGOEX message(s): types=[${serverMsgs1.map(m => m.messageType).join(", ")}]`);
 
-  // Use conversation ID from server if they set one
+  // Use conversation ID from server
   const serverConvId = serverMsgs1[0]?.conversationId;
   if (serverConvId) {
     serverConvId.copy(conversationId);
   }
 
-  // Find the CHALLENGE message
-  const challengeMsg = serverMsgs1.find(m => m.messageType === MSG_CHALLENGE);
+  // Check if server already sent a CHALLENGE (optimistic response)
+  let challengeMsg = serverMsgs1.find(m => m.messageType === MSG_CHALLENGE);
+
+  // If no CHALLENGE yet, send NEGOTIATE token as AP_REQUEST
+  if (!challengeMsg) {
+    console.log("[CredSSP] No CHALLENGE yet — sending AP_REQUEST(NEGOTIATE)");
+    const negotiateToken = buildNegotiateToken(username);
+    const apReqMsg = buildExchangeMessage(
+      MSG_AP_REQUEST,
+      conversationId,
+      seqNum++,
+      TIDESSP_AUTH_SCHEME,
+      negotiateToken,
+    );
+    transcript.push(apReqMsg);
+
+    const spnegoResp1 = buildSpnegoResponse(apReqMsg);
+    const tsReq1b = buildTSRequest(CREDSSP_VERSION, spnegoResp1);
+    tlsSocket.write(tsReq1b);
+
+    // Read CHALLENGE response
+    const tsResp1b = await readTSRequest(tlsSocket);
+    console.log(`[CredSSP] Server TSRequest (round 2): version=${tsResp1b.version}, hasNegoToken=${!!tsResp1b.negoToken}, errorCode=${tsResp1b.errorCode ?? "none"}`);
+    if (tsResp1b.errorCode) {
+      throw new Error(`CredSSP: server error 0x${tsResp1b.errorCode.toString(16)} (${tsResp1b.errorCode})`);
+    }
+    const challengeSpnego2 = extractNegoToken(tsResp1b);
+    if (!challengeSpnego2) {
+      throw new Error("CredSSP: no negoToken in round 2 response");
+    }
+    const serverNegoex2 = extractSpnegoMechToken(challengeSpnego2);
+    if (!serverNegoex2 || serverNegoex2.length < 40) {
+      throw new Error("CredSSP: invalid NEGOEX round 2 response");
+    }
+    transcript.push(serverNegoex2);
+    const serverMsgs2 = parseNegoexMessages(serverNegoex2);
+    console.log(`[CredSSP] Server round 2: ${serverMsgs2.length} NEGOEX message(s): types=[${serverMsgs2.map(m => m.messageType).join(", ")}]`);
+    challengeMsg = serverMsgs2.find(m => m.messageType === MSG_CHALLENGE);
+  }
+
   if (!challengeMsg?.exchange) {
     throw new Error("CredSSP: no CHALLENGE in NEGOEX response");
   }
