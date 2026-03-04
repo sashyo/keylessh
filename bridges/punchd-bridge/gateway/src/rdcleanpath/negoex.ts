@@ -355,6 +355,57 @@ export function computeVerifyChecksum(
 }
 
 /**
+ * Pure JS MD4 (RFC 1320) — needed because OpenSSL 3.x removed MD4.
+ * checksumType=2 in NEGOEX VERIFY is rsa-md4.
+ */
+export function md4(data: Buffer): Buffer {
+  const F = (x: number, y: number, z: number) => (x & y) | (~x & z);
+  const G = (x: number, y: number, z: number) => (x & y) | (x & z) | (y & z);
+  const H = (x: number, y: number, z: number) => x ^ y ^ z;
+  const rotl = (x: number, n: number) => ((x << n) | (x >>> (32 - n))) >>> 0;
+
+  // Padding
+  const bitLen = data.length * 8;
+  const padLen = (data.length % 64 < 56) ? 56 - (data.length % 64) : 120 - (data.length % 64);
+  const padded = Buffer.alloc(data.length + padLen + 8);
+  data.copy(padded);
+  padded[data.length] = 0x80;
+  padded.writeUInt32LE(bitLen >>> 0, padded.length - 8);
+  padded.writeUInt32LE(Math.floor(bitLen / 0x100000000), padded.length - 4);
+
+  let a0 = 0x67452301, b0 = 0xefcdab89, c0 = 0x98badcfe, d0 = 0x10325476;
+
+  for (let i = 0; i < padded.length; i += 64) {
+    const X: number[] = [];
+    for (let j = 0; j < 16; j++) X[j] = padded.readUInt32LE(i + j * 4);
+
+    let a = a0, b = b0, c = c0, d = d0;
+
+    // Round 1
+    for (const [k, s] of [[0,3],[1,7],[2,11],[3,19],[4,3],[5,7],[6,11],[7,19],[8,3],[9,7],[10,11],[11,19],[12,3],[13,7],[14,11],[15,19]]) {
+      const t = ((a + F(b, c, d) + X[k]) & 0xffffffff) >>> 0;
+      a = d; d = c; c = b; b = rotl(t, s);
+    }
+    // Round 2
+    for (const [k, s] of [[0,3],[4,5],[8,9],[12,13],[1,3],[5,5],[9,9],[13,13],[2,3],[6,5],[10,9],[14,13],[3,3],[7,5],[11,9],[15,13]]) {
+      const t = ((a + G(b, c, d) + X[k] + 0x5A827999) & 0xffffffff) >>> 0;
+      a = d; d = c; c = b; b = rotl(t, s);
+    }
+    // Round 3
+    for (const [k, s] of [[0,3],[8,9],[4,11],[12,15],[2,3],[10,9],[6,11],[14,15],[1,3],[9,9],[5,11],[13,15],[3,3],[11,9],[7,11],[15,15]]) {
+      const t = ((a + H(b, c, d) + X[k] + 0x6ED9EBA1) & 0xffffffff) >>> 0;
+      a = d; d = c; c = b; b = rotl(t, s);
+    }
+
+    a0 = (a0 + a) >>> 0; b0 = (b0 + b) >>> 0; c0 = (c0 + c) >>> 0; d0 = (d0 + d) >>> 0;
+  }
+
+  const out = Buffer.alloc(16);
+  out.writeUInt32LE(a0, 0); out.writeUInt32LE(b0, 4); out.writeUInt32LE(c0, 8); out.writeUInt32LE(d0, 12);
+  return out;
+}
+
+/**
  * Generate a random NEGOEX conversation ID (GUID).
  */
 export function generateConversationId(): Buffer {
