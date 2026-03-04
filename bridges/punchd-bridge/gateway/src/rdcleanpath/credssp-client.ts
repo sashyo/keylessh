@@ -251,18 +251,13 @@ export async function performCredSSP(
     console.log("[CredSSP] WARNING: server VERIFY checksum mismatch — continuing anyway for debugging");
   }
 
-  // ── Step 3: Send client VERIFY + mechListMIC ──
+  // ── Step 3: Send client VERIFY + mechListMIC + negState ──
   //
-  // New hypothesis: ALL VERIFY checksum variants are accepted by NEGOEX,
-  // but the SPNEGO layer rejects the token because mechListMIC is missing.
-  // Both NEGOEX checksum failure and SPNEGO mechListMIC failure return
-  // SEC_E_MESSAGE_ALTERED (0x8009030f), making them indistinguishable.
-  //
-  // VERIFY: ku=23 over 3-msg transcript (same checksum as server's VERIFY).
-  // mechListMIC: RFC 4121 MIC token, ku=25 (initiator sign per RFC 4121),
-  //   computed over the mechTypes DER from the initial NegTokenInit.
+  // VERIFY: ku=25 over 3-msg (initiator makes per MIT krb5 convention).
+  // mechListMIC: RFC 4121 MIC, ku=25 (KG_USAGE_INITIATOR_SIGN), over mechTypes DER.
+  // negState: accept-completed (0) — might be required by Windows SPNEGO.
 
-  const KU_CLIENT_VERIFY = 23;
+  const KU_CLIENT_VERIFY = 25;
   const clientChecksum = computeAes128Checksum(sessionKey, KU_CLIENT_VERIFY, transcriptData);
   console.log(`[CredSSP] Client VERIFY checksum (ku=${KU_CLIENT_VERIFY}, 3-msg): ${clientChecksum.toString("hex")}`);
 
@@ -280,15 +275,21 @@ export async function performCredSSP(
   console.log(`[CredSSP] mechTypes DER (${mechTypesDer.length}b): ${mechTypesDer.toString("hex")}`);
 
   // RFC 4121 MIC: ku=25 (KG_USAGE_INITIATOR_SIGN), seqNum=0
-  const KU_MIC_INITIATOR = 25;
-  const mechListMIC = buildRfc4121Mic(sessionKey, KU_MIC_INITIATOR, 0, mechTypesDer);
-  console.log(`[CredSSP] mechListMIC (${mechListMIC.length}b, ku=${KU_MIC_INITIATOR}): ${mechListMIC.toString("hex")}`);
+  const KU_MIC = 25;
+  const mechListMIC = buildRfc4121Mic(sessionKey, KU_MIC, 0, mechTypesDer);
+  console.log(`[CredSSP] mechListMIC RFC4121 (${mechListMIC.length}b, ku=${KU_MIC}): ${mechListMIC.toString("hex")}`);
 
-  const verifySpnego = buildSpnegoResponse(clientVerify, mechListMIC);
+  // Also log raw checksum variant for debugging
+  const rawMIC = computeAes128Checksum(sessionKey, KU_MIC, mechTypesDer);
+  console.log(`[CredSSP] mechListMIC raw (${rawMIC.length}b, ku=${KU_MIC}): ${rawMIC.toString("hex")}`);
+
+  // SPNEGO NegTokenResp with negState=accept-completed(0)
+  const SPNEGO_ACCEPT_COMPLETED = 0;
+  const verifySpnego = buildSpnegoResponse(clientVerify, mechListMIC, SPNEGO_ACCEPT_COMPLETED);
   console.log(`[CredSSP] SPNEGO response (${verifySpnego.length}b): ${verifySpnego.toString("hex")}`);
   const tsReqVerify = buildTSRequest(CREDSSP_VERSION, verifySpnego, undefined, undefined, clientNonce);
   tlsSocket.write(tsReqVerify);
-  console.log(`[CredSSP] Sent VERIFY ku=${KU_CLIENT_VERIFY}/3-msg + mechListMIC ku=${KU_MIC_INITIATOR}`);
+  console.log(`[CredSSP] Sent VERIFY ku=${KU_CLIENT_VERIFY}/3-msg + mechListMIC ku=${KU_MIC} + negState=accept-completed`);
 
   // ── Step 4: Read server's SPNEGO accept-complete ──
   const tsRespComplete = await readTSRequest(tlsSocket);
@@ -297,7 +298,7 @@ export async function performCredSSP(
     logSpnegoFields("Server step4 SPNEGO", tsRespComplete.negoToken);
   }
   if (tsRespComplete.errorCode) {
-    console.log(`[CredSSP] FAILED with error 0x${tsRespComplete.errorCode.toString(16)} — VERIFY ku=23/3-msg + mechListMIC ku=25`);
+    console.log(`[CredSSP] FAILED with error 0x${tsRespComplete.errorCode.toString(16)} — VERIFY ku=25/3-msg + mechListMIC ku=25 + negState=accept-completed`);
     throw new Error(`CredSSP: server error after step3 0x${tsRespComplete.errorCode.toString(16)}`);
   }
   console.log("[CredSSP] SPNEGO/NEGOEX authentication complete");
@@ -379,10 +380,19 @@ function buildSpnegoInit(mechToken: Buffer): Buffer {
 }
 
 /**
- * Build a SPNEGO NegTokenResp (client continuation) with optional mechListMIC.
+ * Build a SPNEGO NegTokenResp (client continuation) with optional fields.
  */
-function buildSpnegoResponse(responseToken?: Buffer, mechListMIC?: Buffer): Buffer {
+function buildSpnegoResponse(
+  responseToken?: Buffer,
+  mechListMIC?: Buffer,
+  negState?: number,
+): Buffer {
   const elements: Buffer[] = [];
+  if (negState !== undefined) {
+    // ENUMERATED value wrapped in EXPLICIT [0]
+    const enumVal = Buffer.from([0x0a, 0x01, negState]);
+    elements.push(encodeExplicit(0, enumVal));
+  }
   if (responseToken) {
     elements.push(encodeExplicit(2, encodeOctetString(responseToken)));
   }
