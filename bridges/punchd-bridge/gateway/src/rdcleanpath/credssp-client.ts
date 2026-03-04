@@ -171,19 +171,26 @@ export async function performCredSSP(
 
   if (serverVerify1) {
     console.log("[CredSSP] Server sent VERIFY — JWT authentication accepted");
+    console.log(`[CredSSP] VERIFY checksumType=${serverVerify1.checksumType}, authScheme=${serverVerify1.authScheme?.toString("hex")}`);
     if (serverVerify1.checksum) {
-      // Verify server's checksum (keyUsage=25 for acceptor)
-      const serverTranscript = Buffer.concat(transcript);
-      console.log(`[CredSSP] Transcript: ${transcript.length} messages, ${serverTranscript.length} bytes`);
-      console.log(`[CredSSP] Transcript: first 40 bytes: ${serverTranscript.subarray(0, 40).toString("hex")}`);
-      const expectedChecksum = computeVerifyChecksum(sessionKey, 25, serverTranscript);
       const serverChecksum = serverVerify1.checksum;
       console.log(`[CredSSP] Server VERIFY checksum: ${serverChecksum.toString("hex")}`);
-      console.log(`[CredSSP] Expected (computed):     ${expectedChecksum.toString("hex")}`);
-      if (!serverChecksum.equals(expectedChecksum)) {
-        console.warn("[CredSSP] Server VERIFY checksum MISMATCH — session keys may differ");
-      } else {
-        console.log("[CredSSP] Server VERIFY checksum OK — session keys match");
+
+      // Log each transcript message
+      const serverTranscript = Buffer.concat(transcript);
+      for (let i = 0; i < transcript.length; i++) {
+        const m = transcript[i];
+        const mType = m.readUInt32LE(8);
+        const mSeq = m.readUInt32LE(12);
+        console.log(`[CredSSP] Transcript msg[${i}]: type=${mType}, seq=${mSeq}, len=${m.length}`);
+      }
+      console.log(`[CredSSP] Transcript total: ${serverTranscript.length} bytes`);
+
+      // Try multiple keyUsage values to find which one matches
+      for (const ku of [23, 24, 25, 26]) {
+        const ck = computeVerifyChecksum(sessionKey, ku, serverTranscript);
+        const match = serverChecksum.equals(ck) ? " *** MATCH ***" : "";
+        console.log(`[CredSSP] keyUsage=${ku}: ${ck.toString("hex")}${match}`);
       }
     }
   }
