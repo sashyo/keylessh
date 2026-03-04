@@ -345,7 +345,9 @@ export async function performCredSSP(
   const mechListMIC = computeAes128Checksum(sessionKey, 23, mechTypesList);
   console.log(`[CredSSP] Using mechListMIC (ku=23): ${mechListMIC.toString("hex")}`);
 
-  const verifySpnego = buildSpnegoResponse(clientVerifyMsg, mechListMIC);
+  // Don't include mechListMIC — our raw checksum may not match NegoExtender's
+  // GSS_GetMIC token format. Try without it first.
+  const verifySpnego = buildSpnegoResponse(clientVerifyMsg);
   console.log(`[CredSSP] Client NEGOEX VERIFY raw (${clientVerifyMsg.length}b): ${clientVerifyMsg.toString("hex")}`);
   console.log(`[CredSSP] Client SPNEGO response raw (${verifySpnego.length}b): ${verifySpnego.toString("hex")}`);
   // Also log the server's SPNEGO for comparison
