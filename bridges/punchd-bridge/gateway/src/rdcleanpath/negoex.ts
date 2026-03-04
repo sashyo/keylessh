@@ -415,30 +415,33 @@ function gcd(a: number, b: number): number {
 
 /**
  * RFC 3961 n-fold: fold input bytes to outBits bits.
- * Replicates input with 13-bit rotation per cycle, then ones-complement sums
- * successive output-sized chunks.
+ * Replicates input with 13-bit RIGHT rotation per copy, then ones-complement
+ * sums successive output-sized chunks.
  */
 function nfold(input: Buffer, outBits: number): Buffer {
   const inLen = input.length;
+  const inBits = inLen * 8;
   const outLen = outBits / 8;
-  const lcm = (inLen * outLen) / gcd(inLen, outLen);
+  const lcmBytes = (inLen * outLen) / gcd(inLen, outLen);
 
   const out = Buffer.alloc(outLen, 0);
   let carry = 0;
 
-  for (let i = lcm - 1; i >= 0; i--) {
-    const rep = Math.floor(i / inLen);
+  for (let i = lcmBytes - 1; i >= 0; i--) {
+    const copy = Math.floor(i / inLen);
     const offset = i % inLen;
-    const totalRot = 13 * rep;
-    const byteRot = Math.floor(totalRot / 8);
-    const bitRot = totalRot % 8;
+    const rotation = (13 * copy) % inBits;
 
-    const s1 = (offset + byteRot) % inLen;
-    const s2 = (offset + byteRot + 1) % inLen;
+    // RIGHT rotation: output bit q comes from input bit (q - rotation) mod inBits
+    const srcStart = ((offset * 8 - rotation) % inBits + inBits) % inBits;
+    const srcByte = Math.floor(srcStart / 8);
+    const srcBit = srcStart % 8;
 
-    const val = bitRot === 0
-      ? input[s1]
-      : ((input[s1] << bitRot) | (input[s2] >>> (8 - bitRot))) & 0xff;
+    const b1 = input[srcByte % inLen];
+    const b2 = input[(srcByte + 1) % inLen];
+    const val = srcBit === 0
+      ? b1
+      : ((b1 << srcBit) | (b2 >>> (8 - srcBit))) & 0xff;
 
     carry += val + out[i % outLen];
     out[i % outLen] = carry & 0xff;
