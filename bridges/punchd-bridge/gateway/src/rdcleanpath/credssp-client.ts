@@ -252,14 +252,17 @@ export async function performCredSSP(
 
   // ── Step 3: Send client VERIFY ──
   //
-  // The client's VERIFY transcript includes the server's VERIFY message.
-  // Server verifies our checksum over: [INIT_NEGO, EXCHANGE, ACCEPT_NEGO, SERVER_VERIFY]
-  // (The VERIFY being verified is excluded, but prior VERIFYs are included.)
+  // Key usage: initiator makes with ku=25 (MIT krb5 convention,
+  // confirmed by server/acceptor using ku=23 to make).
+  // Server verifies client's VERIFY with ku=25.
   //
-  // Key usage: initiator makes with ku=25 (MIT krb5 "wrong way around" convention,
-  // confirmed by server/acceptor using ku=23).
+  // Transcript: all non-VERIFY messages [INIT_NEGO, EXCHANGE, ACCEPT_NEGO].
 
-  // Extract server's raw VERIFY bytes and add to transcript for client's VERIFY
+  const KU_INITIATOR_MAKE = 25;
+  const clientChecksum = computeAes128Checksum(sessionKey, KU_INITIATOR_MAKE, transcriptData);
+  console.log(`[CredSSP] Client VERIFY checksum (ku=${KU_INITIATOR_MAKE}, 3-msg): ${clientChecksum.toString("hex")}`);
+
+  // Also log 4-msg variant for debugging (transcript + server VERIFY)
   const serverVerifyRaw = (() => {
     let pos = 0;
     while (pos + 40 <= serverNegoex1.length) {
@@ -272,28 +275,17 @@ export async function performCredSSP(
     }
     return null;
   })();
-
-  if (!serverVerifyRaw) {
-    throw new Error("CredSSP: could not extract server's raw VERIFY bytes");
+  if (serverVerifyRaw) {
+    const transcript4 = Buffer.concat([transcriptData, serverVerifyRaw]);
+    const ck25_4 = computeAes128Checksum(sessionKey, 25, transcript4);
+    const ck23_4 = computeAes128Checksum(sessionKey, 23, transcript4);
+    console.log(`[CredSSP] Alt: ku=25 4-msg: ${ck25_4.toString("hex")}, ku=23 4-msg: ${ck23_4.toString("hex")}`);
   }
 
-  // Client VERIFY transcript = all messages including server's VERIFY
-  const clientTranscript = Buffer.concat([...transcript, serverVerifyRaw]);
-  console.log(`[CredSSP] Client VERIFY transcript: ${transcript.length + 1} parts, ${clientTranscript.length} bytes (includes server VERIFY)`);
-
-  const KU_INITIATOR_MAKE = 25;
-  const clientChecksum = computeAes128Checksum(sessionKey, KU_INITIATOR_MAKE, clientTranscript);
-  console.log(`[CredSSP] Client VERIFY checksum (ku=${KU_INITIATOR_MAKE}, 4-msg): ${clientChecksum.toString("hex")}`);
-
-  // Also log what ku=23 over 4-msg would be, for debugging
-  const clientCk23 = computeAes128Checksum(sessionKey, 23, clientTranscript);
-  console.log(`[CredSSP] Client VERIFY checksum (ku=23, 4-msg): ${clientCk23.toString("hex")}`);
-
-  const authScheme = serverMsgs1[0]?.authScheme ?? conversationId;
   const clientVerify = buildVerifyMessage(
     conversationId,
     seqNum++,
-    authScheme,
+    TIDESSP_AUTH_SCHEME,
     clientChecksum,
     CHECKSUM_TYPE_HMAC_SHA1_96_AES128,
   );
@@ -302,7 +294,7 @@ export async function performCredSSP(
   const verifySpnego = buildSpnegoResponse(clientVerify);
   const tsReqVerify = buildTSRequest(CREDSSP_VERSION, verifySpnego, undefined, undefined, clientNonce);
   tlsSocket.write(tsReqVerify);
-  console.log(`[CredSSP] Sent VERIFY ku=${KU_INITIATOR_MAKE}, 4-msg transcript (includes server VERIFY), no mechListMIC`);
+  console.log(`[CredSSP] Sent VERIFY ku=${KU_INITIATOR_MAKE}, 3-msg transcript, no mechListMIC`);
 
   // ── Step 4: Read server's SPNEGO accept-complete ──
   const tsRespComplete = await readTSRequest(tlsSocket);
@@ -311,7 +303,7 @@ export async function performCredSSP(
     logSpnegoFields("Server step4 SPNEGO", tsRespComplete.negoToken);
   }
   if (tsRespComplete.errorCode) {
-    console.log(`[CredSSP] FAILED with error 0x${tsRespComplete.errorCode.toString(16)} — VERIFY ku=25, 4-msg transcript (includes server VERIFY), no mechListMIC`);
+    console.log(`[CredSSP] FAILED with error 0x${tsRespComplete.errorCode.toString(16)} — VERIFY ku=25, 3-msg transcript, no mechListMIC`);
     throw new Error(`CredSSP: server error after step3 0x${tsRespComplete.errorCode.toString(16)}`);
   }
   console.log("[CredSSP] SPNEGO/NEGOEX authentication complete");
