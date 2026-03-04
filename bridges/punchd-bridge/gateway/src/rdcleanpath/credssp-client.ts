@@ -312,14 +312,21 @@ export async function performCredSSP(
     console.log(`[CredSSP]   +svrVerify ku=25: ${ck25wv.toString("hex")}`);
   }
 
+  // Client's VERIFY transcript must include the server's VERIFY message.
+  // "All previously exchanged NEGOEX messages" before the client's own VERIFY
+  // includes the server's VERIFY (which was received before the client sends its own).
+  const clientTranscript = serverVerifyBytes
+    ? Buffer.concat([transcriptData, serverVerifyBytes])
+    : transcriptData;
+
   const KU_CLIENT_VERIFY = 23;
   let clientChecksum: Buffer;
   if (serverCksumType === CHECKSUM_TYPE_HMAC_SHA1_96_AES128) {
-    clientChecksum = computeAes128Checksum(sessionKey, KU_CLIENT_VERIFY, transcriptData);
+    clientChecksum = computeAes128Checksum(sessionKey, KU_CLIENT_VERIFY, clientTranscript);
   } else {
-    clientChecksum = md4(transcriptData);
+    clientChecksum = md4(clientTranscript);
   }
-  console.log(`[CredSSP] Client VERIFY: ku=${KU_CLIENT_VERIFY}, checksum=${clientChecksum.toString("hex")}`);
+  console.log(`[CredSSP] Client VERIFY: ku=${KU_CLIENT_VERIFY}, transcript=${clientTranscript.length}b, checksum=${clientChecksum.toString("hex")}`);
 
   const clientVerifyMsg = buildVerifyMessage(
     conversationId,
