@@ -592,26 +592,16 @@ static NTSTATUS NTAPI TideSsp_ExchangeMetaData(
 #endif
 
 /*
- * SecPkgContext_NegoKeys — the structure NegoExtender uses for
- * SECPKG_ATTR_NEGO_KEYS. Has two key slots: one for encryption
- * and one for VERIFY checksum computation.
+ * SECPKG_ATTR_NEGO_KEYS buffer layout (x64, 32 bytes).
+ * Written at raw byte offsets to avoid any struct padding ambiguity.
  *
- * On x64 with default packing (total 32 bytes):
- *   Offset 0:  KeyType (ULONG, 4)
- *   Offset 4:  KeyLength (USHORT, 2) + padding (2)
- *   Offset 8:  KeyValue (PUCHAR, 8)
- *   Offset 16: VerifyKeyType (ULONG, 4)
- *   Offset 20: VerifyKeyLength (USHORT, 2) + padding (2)
- *   Offset 24: VerifyKeyValue (PUCHAR, 8)
+ *   Offset 0:  KeyType        (ULONG, 4 bytes)
+ *   Offset 4:  KeyLength      (ULONG, 4 bytes)
+ *   Offset 8:  KeyValue       (pointer, 8 bytes)
+ *   Offset 16: VerifyKeyType  (ULONG, 4 bytes)
+ *   Offset 20: VerifyKeyLength (ULONG, 4 bytes)
+ *   Offset 24: VerifyKeyValue (pointer, 8 bytes)
  */
-typedef struct _TIDE_NEGO_KEYS {
-    ULONG  KeyType;
-    USHORT KeyLength;
-    PUCHAR KeyValue;
-    ULONG  VerifyKeyType;
-    USHORT VerifyKeyLength;
-    PUCHAR VerifyKeyValue;
-} TIDE_NEGO_KEYS;
 
 static NTSTATUS NTAPI TideSsp_QueryContextAttributes(LSA_SEC_HANDLE h, ULONG attr, PVOID buf) {
     tide_log("QueryContextAttributes: attr=%u (0x%X), handle=%p, buf=%p", attr, attr, (void*)h, buf);
@@ -641,7 +631,6 @@ static NTSTATUS NTAPI TideSsp_QueryContextAttributes(LSA_SEC_HANDLE h, ULONG att
         /* Allocate key buffers from process heap */
         PUCHAR key1 = (PUCHAR)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, SESSION_KEY_SIZE);
         PUCHAR key2 = (PUCHAR)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, SESSION_KEY_SIZE);
-        tide_log("NEGO_KEYS: allocated key1=%p, key2=%p", (void*)key1, (void*)key2);
         if (!key1 || !key2) return SEC_E_INSUFFICIENT_MEMORY;
 
         memcpy(key1, ctx->SessionKey, SESSION_KEY_SIZE);
@@ -651,21 +640,19 @@ static NTSTATUS NTAPI TideSsp_QueryContextAttributes(LSA_SEC_HANDLE h, ULONG att
                  key1[0],key1[1],key1[2],key1[3],key1[4],key1[5],key1[6],key1[7],
                  key1[8],key1[9],key1[10],key1[11],key1[12],key1[13],key1[14],key1[15]);
 
-        /* Fill NegoKeys structure */
-        tide_log("NEGO_KEYS: writing struct fields...");
-        TIDE_NEGO_KEYS *nk = (TIDE_NEGO_KEYS *)buf;
-        nk->KeyType = 23;              /* rc4-hmac */
-        tide_log("NEGO_KEYS: wrote KeyType=23");
-        nk->KeyLength = SESSION_KEY_SIZE;
-        tide_log("NEGO_KEYS: wrote KeyLength=%u", SESSION_KEY_SIZE);
-        nk->KeyValue = key1;
-        tide_log("NEGO_KEYS: wrote KeyValue=%p", (void*)key1);
-        nk->VerifyKeyType = 23;
-        tide_log("NEGO_KEYS: wrote VerifyKeyType=23");
-        nk->VerifyKeyLength = SESSION_KEY_SIZE;
-        tide_log("NEGO_KEYS: wrote VerifyKeyLength=%u", SESSION_KEY_SIZE);
-        nk->VerifyKeyValue = key2;
-        tide_log("NEGO_KEYS: wrote VerifyKeyValue=%p — DONE", (void*)key2);
+        /* Write at raw byte offsets — zero the buffer first to eliminate
+         * any padding garbage that could confuse NegoExtender. */
+        PUCHAR p = (PUCHAR)buf;
+        memset(p, 0, 32);
+
+        *(ULONG  *)(p + 0)  = 23;              /* KeyType: rc4-hmac */
+        *(ULONG  *)(p + 4)  = SESSION_KEY_SIZE; /* KeyLength */
+        *(PUCHAR *)(p + 8)  = key1;             /* KeyValue */
+        *(ULONG  *)(p + 16) = 23;              /* VerifyKeyType: rc4-hmac */
+        *(ULONG  *)(p + 20) = SESSION_KEY_SIZE; /* VerifyKeyLength */
+        *(PUCHAR *)(p + 24) = key2;             /* VerifyKeyValue */
+
+        tide_log("NEGO_KEYS: wrote 32 bytes at raw offsets, key1=%p, key2=%p", (void*)key1, (void*)key2);
 
         return STATUS_SUCCESS;
     }

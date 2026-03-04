@@ -175,7 +175,7 @@ export async function performCredSSP(
       // Verify server's checksum (keyUsage=25 for acceptor)
       const serverTranscript = Buffer.concat(transcript);
       console.log(`[CredSSP] Transcript: ${transcript.length} messages, ${serverTranscript.length} bytes`);
-      console.log(`[CredSSP] Transcript SHA256: ${require("crypto").createHash("sha256").update(serverTranscript).digest("hex").substring(0, 32)}`);
+      console.log(`[CredSSP] Transcript: first 40 bytes: ${serverTranscript.subarray(0, 40).toString("hex")}`);
       const expectedChecksum = computeVerifyChecksum(sessionKey, 25, serverTranscript);
       const serverChecksum = serverVerify1.checksum;
       console.log(`[CredSSP] Server VERIFY checksum: ${serverChecksum.toString("hex")}`);
