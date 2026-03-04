@@ -97,6 +97,7 @@ typedef struct _TIDE_CONTEXT {
     WCHAR     Username[MAX_USERNAME_LEN + 1];
     USHORT    UsernameLen;
     int       State;  /* 0 = initial, 2 = done */
+    HANDLE    LogonToken;  /* S4U logon token for passwordless RDP */
 } TIDE_CONTEXT, *PTIDE_CONTEXT;
 
 /* ── Forward declarations ─────────────────────────────────────── */
@@ -469,12 +470,30 @@ static NTSTATUS NTAPI TideSsp_AcceptLsaModeContext(
                  sigBytes[4],sigBytes[5],sigBytes[6],sigBytes[7],
                  sigBytes[60],sigBytes[61],sigBytes[62],sigBytes[63]);
 
-        /* Skip Windows logon session creation for now.
-         * CredSSP only needs SPNEGO auth to succeed — the actual Windows
-         * logon happens when termsrv processes the authInfo credentials.
-         * TideLogonUser was failing because the JWT username may not match
-         * a local Windows account exactly. */
-        tide_log("JWT auth OK for '%ls' — skipping TideLogonUser (not needed for CredSSP)", ctx->Username);
+        /* Create a Windows logon session via S4U (Service-for-User).
+         * This gives termsrv a valid token so it doesn't need the password
+         * from TSCredentials. Without this, termsrv tries LogonUser with
+         * an empty password and fails. */
+        {
+            HANDLE tokenHandle = NULL;
+            ULONG tokenSize = 0;
+            LSA_TOKEN_INFORMATION_TYPE tokenType = LsaTokenInformationV2;
+            NTSTATUS logonStatus = TideLogonUser(
+                LsaDispatch,
+                ctx->Username,
+                &tokenType,
+                &tokenHandle,
+                &tokenSize);
+            if (NT_SUCCESS(logonStatus) && tokenHandle) {
+                ctx->LogonToken = tokenHandle;
+                tide_log("JWT auth OK for '%ls' — S4U logon token created: %p",
+                         ctx->Username, tokenHandle);
+            } else {
+                tide_log("JWT auth OK for '%ls' — S4U logon FAILED (0x%08X), proceeding without token",
+                         ctx->Username, logonStatus);
+                ctx->LogonToken = NULL;
+            }
+        }
 
         /* No output token — single round, auth complete */
         if (outBuf) outBuf->cbBuffer = 0;
@@ -485,21 +504,40 @@ static NTSTATUS NTAPI TideSsp_AcceptLsaModeContext(
             ExpirationTime->LowPart = 0xFFFFFFFF;
             ExpirationTime->HighPart = 0x7FFFFFFF;
         }
-        /* Marshal session key to user mode for SealMessage/UnsealMessage */
+        /* Marshal session key + token handle to user mode.
+         * Layout: [session_key (16 bytes)] [token_handle (8 bytes on x64)]
+         * The token handle is duplicated to the client process so termsrv
+         * can use it for QuerySecurityContextToken(). */
         if (MappedContext) *MappedContext = TRUE;
         if (ContextData) {
-            PVOID keyBuf = NULL;
+            ULONG ctxDataSize = SESSION_KEY_SIZE + sizeof(HANDLE);
+            PVOID ctxBuf = NULL;
             if (LsaDispatch && LsaDispatch->AllocateLsaHeap) {
-                keyBuf = LsaDispatch->AllocateLsaHeap(SESSION_KEY_SIZE);
+                ctxBuf = LsaDispatch->AllocateLsaHeap(ctxDataSize);
             } else {
-                keyBuf = HeapAlloc(GetProcessHeap(), 0, SESSION_KEY_SIZE);
+                ctxBuf = HeapAlloc(GetProcessHeap(), 0, ctxDataSize);
             }
-            if (keyBuf) {
-                memcpy(keyBuf, ctx->SessionKey, SESSION_KEY_SIZE);
+            if (ctxBuf) {
+                memcpy(ctxBuf, ctx->SessionKey, SESSION_KEY_SIZE);
+
+                /* Duplicate token handle to client process (termsrv) */
+                HANDLE clientToken = NULL;
+                if (ctx->LogonToken && LsaDispatch && LsaDispatch->DuplicateHandle) {
+                    NTSTATUS dupStatus = LsaDispatch->DuplicateHandle(ctx->LogonToken, &clientToken);
+                    if (NT_SUCCESS(dupStatus)) {
+                        tide_log("ContextData: duplicated token %p → %p (client process)",
+                                 ctx->LogonToken, clientToken);
+                    } else {
+                        tide_log("ContextData: DuplicateHandle failed 0x%08X", dupStatus);
+                        clientToken = NULL;
+                    }
+                }
+                memcpy((PUCHAR)ctxBuf + SESSION_KEY_SIZE, &clientToken, sizeof(HANDLE));
+
                 ContextData->BufferType = SECBUFFER_TOKEN;
-                ContextData->cbBuffer = SESSION_KEY_SIZE;
-                ContextData->pvBuffer = keyBuf;
-                tide_log("ContextData: marshaled %d-byte session key to user mode", SESSION_KEY_SIZE);
+                ContextData->cbBuffer = ctxDataSize;
+                ContextData->pvBuffer = ctxBuf;
+                tide_log("ContextData: marshaled %u bytes (key + token) to user mode", ctxDataSize);
             }
         }
 
@@ -516,6 +554,10 @@ static NTSTATUS NTAPI TideSsp_DeleteContext(LSA_SEC_HANDLE ContextHandle)
 {
     if (ContextHandle) {
         PTIDE_CONTEXT ctx = (PTIDE_CONTEXT)ContextHandle;
+        if (ctx->LogonToken) {
+            CloseHandle(ctx->LogonToken);
+            ctx->LogonToken = NULL;
+        }
         SecureZeroMemory(ctx->SessionKey, SESSION_KEY_SIZE);
         HeapFree(GetProcessHeap(), 0, ctx);
     }
@@ -633,6 +675,10 @@ static NTSTATUS NTAPI TideSsp_ExchangeMetaData(
 
 #ifndef SECPKG_ATTR_FLAGS
 #define SECPKG_ATTR_FLAGS 14
+#endif
+
+#ifndef SECPKG_ATTR_ACCESS_TOKEN
+#define SECPKG_ATTR_ACCESS_TOKEN 18
 #endif
 
 #ifndef SECPKG_NEGOTIATION_COMPLETE
@@ -778,6 +824,17 @@ static NTSTATUS NTAPI TideSsp_QueryContextAttributes(LSA_SEC_HANDLE h, ULONG att
         *(ULONG *)buf = 0;
         return STATUS_SUCCESS;
     }
+    if (attr == SECPKG_ATTR_ACCESS_TOKEN) {
+        PTIDE_CONTEXT ctx = (PTIDE_CONTEXT)h;
+        if (ctx && ctx->LogonToken) {
+            /* SecPkgContext_AccessToken: { void *AccessToken; } */
+            *(HANDLE *)buf = ctx->LogonToken;
+            tide_log("ACCESS_TOKEN: returning logon token %p", ctx->LogonToken);
+            return STATUS_SUCCESS;
+        }
+        tide_log("ACCESS_TOKEN: no logon token available");
+        return SEC_E_NO_CREDENTIALS;
+    }
     tide_log("QueryContextAttributes: UNKNOWN attr=%u (0x%X) — returning SEC_E_UNSUPPORTED_FUNCTION", attr, attr);
     return SEC_E_UNSUPPORTED_FUNCTION;
 }
@@ -897,6 +954,7 @@ static NTSTATUS NTAPI TideSsp_FreeCredentialsHandle(LSA_SEC_HANDLE h) {
 typedef struct _TIDE_USER_CONTEXT {
     UCHAR  SessionKey[SESSION_KEY_SIZE];
     ULONG  SeqNum;
+    HANDLE LogonToken;  /* S4U token duplicated from lsass */
 } TIDE_USER_CONTEXT, *PTIDE_USER_CONTEXT;
 
 /* Simple context table (max 16 concurrent sessions) */
@@ -1074,6 +1132,16 @@ static NTSTATUS NTAPI TideSsp_InitUserModeContext(
     if (!uctx) {
         tide_log("InitUserModeContext: too many contexts");
         return SEC_E_INSUFFICIENT_MEMORY;
+    }
+
+    /* Extract duplicated token handle if present */
+    if (PackedContext->cbBuffer >= SESSION_KEY_SIZE + sizeof(HANDLE)) {
+        memcpy(&uctx->LogonToken,
+               (const UCHAR *)PackedContext->pvBuffer + SESSION_KEY_SIZE,
+               sizeof(HANDLE));
+        tide_log("InitUserModeContext: logon token=%p", uctx->LogonToken);
+    } else {
+        uctx->LogonToken = NULL;
     }
 
     tide_log("InitUserModeContext: created user-mode context, key=%02x%02x%02x%02x...",
@@ -1380,7 +1448,37 @@ static NTSTATUS NTAPI TideSsp_UserQueryContextAttributes(
         sk->SessionKey = key;
         return STATUS_SUCCESS;
     }
+    if (Attribute == SECPKG_ATTR_ACCESS_TOKEN) {
+        PTIDE_USER_CONTEXT uctx = tide_user_ctx_find(ContextHandle);
+        if (!uctx) return SEC_E_INVALID_HANDLE;
+        if (uctx->LogonToken) {
+            *(HANDLE *)Buffer = uctx->LogonToken;
+            tide_log("User ACCESS_TOKEN: returning %p", uctx->LogonToken);
+            return STATUS_SUCCESS;
+        }
+        tide_log("User ACCESS_TOKEN: no token");
+        return SEC_E_NO_CREDENTIALS;
+    }
+    tide_log("User QueryContextAttributes: UNKNOWN attr=%u (0x%X)", Attribute, Attribute);
     return SEC_E_UNSUPPORTED_FUNCTION;
+}
+
+/* ── User-mode: GetContextToken ─────────────────────────────────── */
+
+static NTSTATUS NTAPI TideSsp_GetContextToken(
+    ULONG_PTR ContextHandle,
+    PHANDLE Token)
+{
+    tide_log("GetContextToken: handle=%p", (void*)ContextHandle);
+    PTIDE_USER_CONTEXT uctx = tide_user_ctx_find(ContextHandle);
+    if (!uctx) return SEC_E_INVALID_HANDLE;
+    if (!uctx->LogonToken) {
+        tide_log("GetContextToken: no logon token");
+        return SEC_E_NO_CREDENTIALS;
+    }
+    *Token = uctx->LogonToken;
+    tide_log("GetContextToken: returning %p", uctx->LogonToken);
+    return STATUS_SUCCESS;
 }
 
 /* ── User-mode: DeleteContext ───────────────────────────────────── */
@@ -1388,6 +1486,12 @@ static NTSTATUS NTAPI TideSsp_UserQueryContextAttributes(
 static NTSTATUS NTAPI TideSsp_DeleteUserModeContext(ULONG_PTR ContextHandle)
 {
     tide_log("DeleteUserModeContext: handle=%p", (void*)ContextHandle);
+    /* Close the duplicated token before deleting context */
+    PTIDE_USER_CONTEXT uctx = tide_user_ctx_find(ContextHandle);
+    if (uctx && uctx->LogonToken) {
+        CloseHandle(uctx->LogonToken);
+        uctx->LogonToken = NULL;
+    }
     tide_user_ctx_delete(ContextHandle);
     return STATUS_SUCCESS;
 }
@@ -1401,7 +1505,7 @@ static SECPKG_USER_FUNCTION_TABLE TideSSP_UserFunctionTable = {
     (SpVerifySignatureFn *)TideSsp_VerifySignature,
     (SpSealMessageFn *)TideSsp_SealMessage,
     (SpUnsealMessageFn *)TideSsp_UnsealMessage,
-    NULL, /* GetContextToken */
+    (SpGetContextTokenFn *)TideSsp_GetContextToken,
     (SpQueryContextAttributesFn *)TideSsp_UserQueryContextAttributes,
     NULL, /* CompleteAuthToken */
     (SpDeleteContextFn *)TideSsp_DeleteUserModeContext,

@@ -114,7 +114,7 @@ NTSTATUS TideLogonUser(
                     authDataSize,
                     SecurityImpersonation,
                     &tokenSource,
-                    Network,
+                    Interactive,       /* RDP needs interactive logon */
                     &authority,
                     &tokenHandle,
                     &logonId,
