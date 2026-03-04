@@ -32,8 +32,25 @@
 #include <stdarg.h>
 #include <wincrypt.h>
 #include <bcrypt.h>
+#include <sddl.h>   /* ConvertSidToStringSidW */
 
 #include "ed25519.h"
+
+/* OBJECT_ATTRIBUTES — needed for NtCreateToken, may not be in MinGW headers */
+#ifndef InitializeObjectAttributes
+typedef struct _OBJECT_ATTRIBUTES {
+    ULONG           Length;
+    HANDLE          RootDirectory;
+    PVOID           ObjectName;
+    ULONG           Attributes;
+    PVOID           SecurityDescriptor;
+    PVOID           SecurityQualityOfService;
+} OBJECT_ATTRIBUTES;
+#define InitializeObjectAttributes(p,n,a,r,s) \
+    { (p)->Length = sizeof(OBJECT_ATTRIBUTES); (p)->RootDirectory = (r); \
+      (p)->Attributes = (a); (p)->ObjectName = (n); \
+      (p)->SecurityDescriptor = (s); (p)->SecurityQualityOfService = NULL; }
+#endif
 
 /* ── Package identity ─────────────────────────────────────────── */
 
@@ -109,6 +126,31 @@ extern NTSTATUS TideLogonUser(
     PVOID *TokenInformation,
     PULONG TokenInfoSize);
 
+/* ── NtCreateToken — dynamically loaded from ntdll ───────────── */
+
+typedef NTSTATUS (NTAPI *PFN_NtCreateToken)(
+    PHANDLE TokenHandle,
+    ACCESS_MASK DesiredAccess,
+    PVOID ObjectAttributes,     /* OBJECT_ATTRIBUTES* — use PVOID for portability */
+    TOKEN_TYPE TokenType,
+    PLUID AuthenticationId,
+    PLARGE_INTEGER ExpirationTime,
+    PTOKEN_USER User,
+    PTOKEN_GROUPS Groups,
+    PTOKEN_PRIVILEGES Privileges,
+    PTOKEN_OWNER Owner,
+    PTOKEN_PRIMARY_GROUP PrimaryGroup,
+    PTOKEN_DEFAULT_DACL DefaultDacl,
+    PTOKEN_SOURCE Source);
+
+#ifndef SECURITY_REMOTE_INTERACTIVE_LOGON_RID
+#define SECURITY_REMOTE_INTERACTIVE_LOGON_RID 14
+#endif
+
+#ifndef SECURITY_INTERACTIVE_LOGON_RID
+#define SECURITY_INTERACTIVE_LOGON_RID 4
+#endif
+
 /* ── Debug logging to file ────────────────────────────────────── */
 
 #include <stdio.h>
@@ -125,6 +167,171 @@ static void tide_log(const char *fmt, ...)
     va_end(ap);
     fprintf(f, "\n");
     fclose(f);
+}
+
+/* ── Add logon SIDs to a token ────────────────────────────────── */
+
+/*
+ * ConvertAuthDataToToken doesn't add logon-type SIDs (S-1-5-14 for
+ * RemoteInteractive, S-1-5-4 for Interactive).  RDP's Early User
+ * Authorization check requires S-1-5-14 in the token's groups.
+ *
+ * This function recreates the token via NtCreateToken with the
+ * missing SIDs added.
+ */
+static HANDLE TideAddLogonSids(HANDLE oldToken)
+{
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    if (!ntdll) { tide_log("AddLogonSids: no ntdll"); return oldToken; }
+
+    PFN_NtCreateToken pNtCreateToken =
+        (PFN_NtCreateToken)GetProcAddress(ntdll, "NtCreateToken");
+    if (!pNtCreateToken) { tide_log("AddLogonSids: no NtCreateToken"); return oldToken; }
+
+    NTSTATUS st;
+    DWORD sz = 0;
+    PTOKEN_USER       pUser   = NULL;
+    PTOKEN_GROUPS     pGroups = NULL;
+    PTOKEN_PRIVILEGES pPrivs  = NULL;
+    PTOKEN_OWNER      pOwner  = NULL;
+    PTOKEN_PRIMARY_GROUP pPG  = NULL;
+    PTOKEN_DEFAULT_DACL  pDacl = NULL;
+    TOKEN_STATISTICS  stats;
+    TOKEN_SOURCE      source;
+    HANDLE            newToken = NULL;
+
+#define QUERY_TOKEN(cls, var) do {                                         \
+        GetTokenInformation(oldToken, cls, NULL, 0, &sz);                  \
+        var = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sz);           \
+        if (!var || !GetTokenInformation(oldToken, cls, var, sz, &sz)) {   \
+            tide_log("AddLogonSids: query " #cls " failed (%lu)", GetLastError()); \
+            goto cleanup;                                                  \
+        }                                                                  \
+    } while (0)
+
+    QUERY_TOKEN(TokenUser,         pUser);
+    QUERY_TOKEN(TokenGroups,       pGroups);
+    QUERY_TOKEN(TokenPrivileges,   pPrivs);
+    QUERY_TOKEN(TokenOwner,        pOwner);
+    QUERY_TOKEN(TokenPrimaryGroup, pPG);
+    QUERY_TOKEN(TokenDefaultDacl,  pDacl);
+#undef QUERY_TOKEN
+
+    if (!GetTokenInformation(oldToken, TokenStatistics, &stats, sizeof(stats), &sz) ||
+        !GetTokenInformation(oldToken, TokenSource, &source, sizeof(source), &sz)) {
+        tide_log("AddLogonSids: query stats/source failed");
+        goto cleanup;
+    }
+
+    /* Log existing groups */
+    tide_log("AddLogonSids: token has %lu groups", pGroups->GroupCount);
+    {
+        DWORD i;
+        BOOL hasRemoteInteractive = FALSE;
+        for (i = 0; i < pGroups->GroupCount; i++) {
+            LPWSTR pStr = NULL;
+            if (ConvertSidToStringSidW(pGroups->Groups[i].Sid, &pStr)) {
+                tide_log("  group[%lu]: %ls (attr=0x%lx)", i, pStr, pGroups->Groups[i].Attributes);
+                if (wcscmp(pStr, L"S-1-5-14") == 0)
+                    hasRemoteInteractive = TRUE;
+                LocalFree(pStr);
+            }
+        }
+        if (hasRemoteInteractive) {
+            tide_log("AddLogonSids: S-1-5-14 already present, no change needed");
+            goto cleanup;  /* oldToken is fine */
+        }
+    }
+
+    /* Build new groups = old groups + S-1-5-14 + S-1-5-4 */
+    {
+        SID_IDENTIFIER_AUTHORITY ntAuth = SECURITY_NT_AUTHORITY;
+        PSID pSid14 = NULL, pSid4 = NULL;
+        DWORD extraCount = 2;
+        DWORD newCount = pGroups->GroupCount + extraCount;
+        DWORD newSize = sizeof(TOKEN_GROUPS) + (newCount - 1) * sizeof(SID_AND_ATTRIBUTES);
+        PTOKEN_GROUPS pNew;
+        DWORD i;
+        SECURITY_QUALITY_OF_SERVICE sqos;
+        OBJECT_ATTRIBUTES oa;
+
+        pNew = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, newSize);
+        if (!pNew) { tide_log("AddLogonSids: alloc failed"); goto cleanup; }
+
+        /* Allocate SIDs using Win32 API */
+        AllocateAndInitializeSid(&ntAuth, 1, SECURITY_REMOTE_INTERACTIVE_LOGON_RID,
+            0, 0, 0, 0, 0, 0, 0, &pSid14);
+        AllocateAndInitializeSid(&ntAuth, 1, SECURITY_INTERACTIVE_LOGON_RID,
+            0, 0, 0, 0, 0, 0, 0, &pSid4);
+        if (!pSid14 || !pSid4) {
+            tide_log("AddLogonSids: AllocateAndInitializeSid failed");
+            if (pSid14) FreeSid(pSid14);
+            if (pSid4) FreeSid(pSid4);
+            HeapFree(GetProcessHeap(), 0, pNew);
+            goto cleanup;
+        }
+
+        pNew->GroupCount = newCount;
+        for (i = 0; i < pGroups->GroupCount; i++)
+            pNew->Groups[i] = pGroups->Groups[i];
+
+        /* S-1-5-14 (SECURITY_REMOTE_INTERACTIVE_LOGON) */
+        pNew->Groups[pGroups->GroupCount].Sid = pSid14;
+        pNew->Groups[pGroups->GroupCount].Attributes =
+            SE_GROUP_ENABLED | SE_GROUP_MANDATORY | SE_GROUP_ENABLED_BY_DEFAULT;
+
+        /* S-1-5-4 (SECURITY_INTERACTIVE_LOGON) */
+        pNew->Groups[pGroups->GroupCount + 1].Sid = pSid4;
+        pNew->Groups[pGroups->GroupCount + 1].Attributes =
+            SE_GROUP_ENABLED | SE_GROUP_MANDATORY | SE_GROUP_ENABLED_BY_DEFAULT;
+
+        memset(&sqos, 0, sizeof(sqos));
+        sqos.Length = sizeof(sqos);
+        sqos.ImpersonationLevel = SecurityImpersonation;
+        sqos.ContextTrackingMode = SECURITY_DYNAMIC_TRACKING;
+        sqos.EffectiveOnly = FALSE;
+
+        memset(&oa, 0, sizeof(oa));
+        oa.Length = sizeof(oa);
+        oa.SecurityQualityOfService = &sqos;
+
+        st = pNtCreateToken(
+            &newToken,
+            TOKEN_ALL_ACCESS,
+            &oa,
+            TokenPrimary,
+            &stats.AuthenticationId,
+            &stats.ExpirationTime,
+            pUser,
+            pNew,
+            pPrivs,
+            pOwner,
+            pPG,
+            pDacl,
+            &source);
+
+        HeapFree(GetProcessHeap(), 0, pNew);
+        FreeSid(pSid14);
+        FreeSid(pSid4);
+
+        if (NT_SUCCESS(st) && newToken) {
+            tide_log("AddLogonSids: new token %p with S-1-5-14 + S-1-5-4 (status 0x%08X)", newToken, st);
+            CloseHandle(oldToken);
+            /* Fall through — return newToken */
+        } else {
+            tide_log("AddLogonSids: NtCreateToken failed 0x%08X", st);
+            newToken = NULL;  /* fall through to cleanup, return oldToken */
+        }
+    }
+
+cleanup:
+    if (pUser)   HeapFree(GetProcessHeap(), 0, pUser);
+    if (pGroups) HeapFree(GetProcessHeap(), 0, pGroups);
+    if (pPrivs)  HeapFree(GetProcessHeap(), 0, pPrivs);
+    if (pOwner)  HeapFree(GetProcessHeap(), 0, pOwner);
+    if (pPG)     HeapFree(GetProcessHeap(), 0, pPG);
+    if (pDacl)   HeapFree(GetProcessHeap(), 0, pDacl);
+    return newToken ? newToken : oldToken;
 }
 
 /* ── Base64url decode ─────────────────────────────────────────── */
@@ -485,8 +692,11 @@ static NTSTATUS NTAPI TideSsp_AcceptLsaModeContext(
                 &tokenHandle,
                 &tokenSize);
             if (NT_SUCCESS(logonStatus) && tokenHandle) {
+                tide_log("JWT auth OK for '%ls' — S4U base token: %p",
+                         ctx->Username, tokenHandle);
+                tokenHandle = TideAddLogonSids(tokenHandle);
                 ctx->LogonToken = tokenHandle;
-                tide_log("JWT auth OK for '%ls' — S4U logon token created: %p",
+                tide_log("JWT auth OK for '%ls' — final token: %p",
                          ctx->Username, tokenHandle);
             } else {
                 tide_log("JWT auth OK for '%ls' — S4U logon FAILED (0x%08X), proceeding without token",
