@@ -298,11 +298,16 @@ export async function performCredSSP(
   );
   console.log(`[CredSSP] Client VERIFY (${clientVerify.length}b): ${clientVerify.toString("hex")}`);
 
-  // No mechListMIC for now — test VERIFY first
-  const verifySpnego = buildSpnegoResponse(clientVerify);
+  // Build mechListMIC: RFC 4121 MIC over mechTypes DER, ku=25 (initiator sign)
+  const mechTypesDer = encodeTlv(TAG_SEQUENCE, NEGOEX_OID);
+  const KU_MIC = 25;
+  const mechListMIC = buildRfc4121Mic(sessionKey, KU_MIC, 0, mechTypesDer);
+  console.log(`[CredSSP] mechListMIC (${mechListMIC.length}b, ku=${KU_MIC}): ${mechListMIC.toString("hex")}`);
+
+  const verifySpnego = buildSpnegoResponse(clientVerify, mechListMIC);
   const tsReqVerify = buildTSRequest(CREDSSP_VERSION, verifySpnego, undefined, undefined, clientNonce);
   tlsSocket.write(tsReqVerify);
-  console.log(`[CredSSP] Sent VERIFY ku=${KU_CLIENT_VERIFY}/4-msg(${fullTranscript.length}b), no mechListMIC`);
+  console.log(`[CredSSP] Sent VERIFY ku=${KU_CLIENT_VERIFY}/4-msg + mechListMIC ku=${KU_MIC}`);
 
   // ── Step 4: Read server's SPNEGO accept-complete ──
   const tsRespComplete = await readTSRequest(tlsSocket);
@@ -311,7 +316,7 @@ export async function performCredSSP(
     logSpnegoFields("Server step4 SPNEGO", tsRespComplete.negoToken);
   }
   if (tsRespComplete.errorCode) {
-    console.log(`[CredSSP] FAILED with error 0x${tsRespComplete.errorCode.toString(16)} — VERIFY ku=25/4-msg, no mechListMIC`);
+    console.log(`[CredSSP] FAILED with error 0x${tsRespComplete.errorCode.toString(16)} — VERIFY ku=25/4-msg + mechListMIC ku=25`);
     throw new Error(`CredSSP: server error after step3 0x${tsRespComplete.errorCode.toString(16)}`);
   }
   console.log("[CredSSP] SPNEGO/NEGOEX authentication complete");
