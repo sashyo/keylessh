@@ -1108,14 +1108,16 @@ static NTSTATUS NTAPI TideSsp_SealMessage(
                  MessageBuffers->pBuffers[i].pvBuffer);
     }
 
-    /* Find TOKEN and DATA buffers */
-    PSecBuffer tokenBuf = NULL, dataBuf = NULL;
+    /* Find TOKEN, DATA, and PADDING buffers */
+    PSecBuffer tokenBuf = NULL, dataBuf = NULL, paddingBuf = NULL;
     for (ULONG i = 0; i < MessageBuffers->cBuffers; i++) {
         ULONG btype = MessageBuffers->pBuffers[i].BufferType & 0x0FFFFFFF;
         if (btype == SECBUFFER_TOKEN)
             tokenBuf = &MessageBuffers->pBuffers[i];
         else if (btype == SECBUFFER_DATA)
             dataBuf = &MessageBuffers->pBuffers[i];
+        else if (btype == SECBUFFER_PADDING)
+            paddingBuf = &MessageBuffers->pBuffers[i];
     }
 
     if (!tokenBuf || !dataBuf || !tokenBuf->pvBuffer || !dataBuf->pvBuffer) {
@@ -1141,6 +1143,11 @@ static NTSTATUS NTAPI TideSsp_SealMessage(
 
     if (BCRYPT_SUCCESS(status)) {
         tokenBuf->cbBuffer = TIDE_TOKEN_SIZE;
+        /* AES-GCM is a stream cipher — no padding needed.
+         * Set PADDING buffer to 0 so CredSSP doesn't include extra bytes. */
+        if (paddingBuf) {
+            paddingBuf->cbBuffer = 0;
+        }
         tide_log("SealMessage: OK, nonce=%02x%02x%02x%02x, tag=%02x%02x%02x%02x",
                  nonce[0],nonce[1],nonce[2],nonce[3],
                  tag[0],tag[1],tag[2],tag[3]);
