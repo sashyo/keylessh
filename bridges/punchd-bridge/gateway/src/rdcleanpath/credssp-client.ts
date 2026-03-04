@@ -40,7 +40,6 @@ import {
   deriveSessionKeyFromJwt,
   computeAes128Checksum,
   computeAes128ChecksumKi,
-  buildRfc4121Mic,
   md4,
   generateConversationId,
   NEGOEX_OID,
@@ -285,36 +284,29 @@ export async function performCredSSP(
     console.log("[CredSSP] WARNING: server VERIFY checksum mismatch — continuing anyway for debugging");
   }
 
-  // ── Step 3: Send client response ──
+  // ── Step 3: Send client VERIFY ──
   //
-  // Previous attempts (all SEC_E_MESSAGE_ALTERED = 0x8009030f):
-  //   1. VERIFY ku=23, no mechListMIC
-  //   2. VERIFY ku=23, 4-msg transcript, RFC4121 mechListMIC (buggy Ki)
-  //   3. VERIFY ku=25, no mechListMIC
-  //   4. VERIFY ku=23, raw mechListMIC ku=25
-  //   5. VERIFY ku=23, RFC4121 mechListMIC Kc ku=25
-  //   6. No VERIFY, no mechListMIC → SEC_E_INVALID_TOKEN (0x80090308)
+  // NEGOEX key usage (draft-zhu-negoex-04 + MIT krb5 "wrong way around"):
+  //   Acceptor (server) MAKES with ku=23  — confirmed by server VERIFY match
+  //   Initiator (client) MAKES with ku=25
+  //   Acceptor VERIFIES initiator's with ku=25
   //
-  // Approach 6 proved the server REQUIRES a VERIFY. The SEC_E_MESSAGE_ALTERED
-  // in attempts 1-5 may come from SPNEGO's mechListMIC check, not the VERIFY.
-  //
-  // APPROACH 7: VERIFY ku=25 (initiator sign) + RFC4121 mechListMIC ku=25
-  // Per RFC 4121: acceptor uses ku=23, initiator uses ku=25.
-  // Server VERIFY confirmed ku=23 (acceptor). Client should use ku=25 (initiator).
-  // This is the first time we test VERIFY ku=25 WITH mechListMIC.
+  // NEGOEX VERIFY replaces SPNEGO mechListMIC — do NOT send mechListMIC.
 
-  const KU_INITIATOR_SIGN = 25;
+  const KU_NEGOEX_INITIATOR_MAKE = 25; // NEGOEX_KEYUSAGE_ACCEPTOR_CHECKSUM per MIT krb5
   let clientChecksum: Buffer;
   if (serverCksumType === CHECKSUM_TYPE_HMAC_SHA1_96_AES128) {
-    clientChecksum = computeAes128Checksum(sessionKey, KU_INITIATOR_SIGN, transcriptData);
+    clientChecksum = computeAes128Checksum(sessionKey, KU_NEGOEX_INITIATOR_MAKE, transcriptData);
   } else {
     clientChecksum = md4(transcriptData);
   }
-  console.log(`[CredSSP] Client VERIFY: ku=${KU_INITIATOR_SIGN}, transcript=${transcriptData.length}b, checksum=${clientChecksum.toString("hex")}`);
+  console.log(`[CredSSP] Client VERIFY: ku=${KU_NEGOEX_INITIATOR_MAKE}, transcript=${transcriptData.length}b, checksum=${clientChecksum.toString("hex")}`);
 
-  // Also log ku=23 for comparison
-  const ck23 = computeAes128Checksum(sessionKey, 23, transcriptData);
-  console.log(`[CredSSP] Client VERIFY alt ku=23: ${ck23.toString("hex")} (matches server: ${ck23.equals(serverVerify1.checksum)})`);
+  // Log all key usage variants for diagnostics
+  for (const ku of [23, 25]) {
+    const ck = computeAes128Checksum(sessionKey, ku, transcriptData);
+    console.log(`[CredSSP]   ku=${ku}: ${ck.toString("hex")}${ck.equals(serverVerify1.checksum) ? " (=server)" : ""}`);
+  }
 
   const clientVerifyMsg = buildVerifyMessage(
     conversationId,
@@ -324,19 +316,20 @@ export async function performCredSSP(
     serverCksumType,
   );
 
-  // SPNEGO mechListMIC: RFC 4121 MIC over the MechTypeList, ku=25 (initiator sign)
-  const mechTypesList = encodeTlv(TAG_SEQUENCE, NEGOEX_OID);
-  const mechListMICToken = buildRfc4121Mic(sessionKey, KU_INITIATOR_SIGN, 0, mechTypesList);
-  console.log(`[CredSSP] mechListMIC (RFC4121, ku=${KU_INITIATOR_SIGN}, ${mechListMICToken.length}b): ${mechListMICToken.toString("hex")}`);
-  console.log(`[CredSSP] mechTypesList (${mechTypesList.length}b): ${mechTypesList.toString("hex")}`);
+  // Dump VERIFY structure byte-by-byte for debugging
+  console.log(`[CredSSP] Client VERIFY msg (${clientVerifyMsg.length}b):`);
+  console.log(`[CredSSP]   bytes[56..76] CHECKSUM: ${clientVerifyMsg.subarray(56, 76).toString("hex")}`);
+  console.log(`[CredSSP]   bytes[76..80] padding:  ${clientVerifyMsg.subarray(76, 80).toString("hex")}`);
+  console.log(`[CredSSP]   bytes[80..92] value:    ${clientVerifyMsg.subarray(80, 92).toString("hex")}`);
+  console.log(`[CredSSP]   offset68(ByteArrayOffset)=${clientVerifyMsg.readUInt32LE(68)}, offset72(ByteArrayLength)=${clientVerifyMsg.readUInt32LE(72)}`);
 
-  const verifySpnego = buildSpnegoResponse(clientVerifyMsg, mechListMICToken);
-  console.log(`[CredSSP] Client NEGOEX VERIFY (${clientVerifyMsg.length}b): ${clientVerifyMsg.toString("hex")}`);
+  // Send VERIFY only — no mechListMIC (NEGOEX VERIFY replaces SPNEGO mechListMIC)
+  const verifySpnego = buildSpnegoResponse(clientVerifyMsg);
   console.log(`[CredSSP] Client SPNEGO response (${verifySpnego.length}b): ${verifySpnego.toString("hex")}`);
 
   const tsReqVerify = buildTSRequest(CREDSSP_VERSION, verifySpnego, undefined, undefined, clientNonce);
   tlsSocket.write(tsReqVerify);
-  console.log(`[CredSSP] Sent approach 7: VERIFY ku=25 + RFC4121 mechListMIC ku=25`);
+  console.log(`[CredSSP] Sent VERIFY ku=${KU_NEGOEX_INITIATOR_MAKE}, no mechListMIC`);
 
   // ── Step 4: Read server's SPNEGO accept-complete ──
   const tsRespComplete = await readTSRequest(tlsSocket);
@@ -345,7 +338,7 @@ export async function performCredSSP(
     logSpnegoFields("Server step4 SPNEGO", tsRespComplete.negoToken);
   }
   if (tsRespComplete.errorCode) {
-    console.log(`[CredSSP] FAILED with error 0x${tsRespComplete.errorCode.toString(16)} — approach 7 (VERIFY ku=25 + RFC4121 mechListMIC ku=25)`);
+    console.log(`[CredSSP] FAILED with error 0x${tsRespComplete.errorCode.toString(16)} — VERIFY ku=${KU_NEGOEX_INITIATOR_MAKE}, no mechListMIC`);
     throw new Error(`CredSSP: server error after step3 0x${tsRespComplete.errorCode.toString(16)}`);
   }
   console.log("[CredSSP] SPNEGO/NEGOEX authentication complete");
