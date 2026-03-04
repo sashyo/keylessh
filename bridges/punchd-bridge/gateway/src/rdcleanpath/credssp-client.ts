@@ -39,7 +39,6 @@ import {
   parseNegoexMessages,
   deriveSessionKeyFromJwt,
   computeAes128Checksum,
-  computeAes128ChecksumKi,
   md4,
   generateConversationId,
   NEGOEX_OID,
@@ -219,43 +218,10 @@ export async function performCredSSP(
   }
   console.log(`[CredSSP] Transcript SHA256: ${createHash("sha256").update(transcriptData).digest().toString("hex")}`);
 
-  // Debug: try multiple transcript compositions to find the correct one
+  // Verify server's checksum: ku=23 over 3-msg transcript (INIT_NEGO, EXCHANGE, ACCEPT_NEGO)
   if (serverCksumType === CHECKSUM_TYPE_HMAC_SHA1_96_AES128) {
-    const serverCksum = serverVerify1.checksum;
-    const tryChecksum = (label: string, data: Buffer) => {
-      const cksum = computeAes128Checksum(sessionKey, 25, data);
-      const match = serverCksum.equals(cksum);
-      if (match) console.log(`[CredSSP] *** MATCH *** ${label}: ${cksum.toString("hex")}`);
-      else console.log(`[CredSSP]   ${label}: ${cksum.toString("hex")}`);
-      return match;
-    };
-    // Full transcript (current)
-    tryChecksum("all 3 msgs", transcriptData);
-    // Without ACCEPTOR_NEGO
-    tryChecksum("INIT+APREQ only", Buffer.concat([transcript[0], transcript[1]]));
-    // Without INITIATOR_NEGO
-    tryChecksum("APREQ+ACCEPT only", Buffer.concat([transcript[1], transcript[2]]));
-    // Only AP_REQUEST
-    tryChecksum("APREQ only", transcript[1]);
-    // Only INIT_NEGO+ACCEPT_NEGO
-    tryChecksum("INIT+ACCEPT only", Buffer.concat([transcript[0], transcript[2]]));
-    // All 3 msgs + server VERIFY message
-    const verifyBuf = serverNegoex1;
-    tryChecksum("all msgs + raw server", verifyBuf);
-    // Try with key usage 23 instead of 25
-    const cksum23 = computeAes128Checksum(sessionKey, 23, transcriptData);
-    console.log(`[CredSSP]   ku=23 all 3: ${cksum23.toString("hex")}${serverCksum.equals(cksum23) ? " *** MATCH ***" : ""}`);
-    // Try with Ki (0x55) instead of Kc (0x99) for all transcript combos
-    const tryKi = (label: string, data: Buffer, ku: number) => {
-      const cksum = computeAes128ChecksumKi(sessionKey, ku, data);
-      const match = serverCksum.equals(cksum);
-      if (match) console.log(`[CredSSP] *** MATCH *** Ki ${label}: ${cksum.toString("hex")}`);
-      return match;
-    };
-    tryKi("ku=25 all3", transcriptData, 25);
-    tryKi("ku=23 all3", transcriptData, 23);
-    tryKi("ku=25 INIT+APREQ", Buffer.concat([transcript[0], transcript[1]]), 25);
-    tryKi("ku=25 APREQ only", transcript[1], 25);
+    const ck23 = computeAes128Checksum(sessionKey, 23, transcriptData);
+    console.log(`[CredSSP] Server VERIFY ku=23: ${ck23.toString("hex")} (match: ${ck23.equals(serverVerify1.checksum)})`);
   }
 
   let serverChecksumOk = false;
@@ -286,13 +252,14 @@ export async function performCredSSP(
 
   // ── Step 3: Send client VERIFY ──
   //
-  // DIAGNOSTIC: Copy the server's VERIFY byte-for-byte, only changing seqNum.
-  // If this works → issue is in our VERIFY construction.
-  // If this fails → issue is key usage or something else entirely.
+  // The client's VERIFY transcript includes the server's VERIFY message.
+  // Server verifies our checksum over: [INIT_NEGO, EXCHANGE, ACCEPT_NEGO, SERVER_VERIFY]
+  // (The VERIFY being verified is excluded, but prior VERIFYs are included.)
   //
-  // Also try building our own VERIFY with ku=23 (same checksum as server).
+  // Key usage: initiator makes with ku=25 (MIT krb5 "wrong way around" convention,
+  // confirmed by server/acceptor using ku=23).
 
-  // Extract server's raw VERIFY message bytes
+  // Extract server's raw VERIFY bytes and add to transcript for client's VERIFY
   const serverVerifyRaw = (() => {
     let pos = 0;
     while (pos + 40 <= serverNegoex1.length) {
@@ -310,28 +277,32 @@ export async function performCredSSP(
     throw new Error("CredSSP: could not extract server's raw VERIFY bytes");
   }
 
-  console.log(`[CredSSP] Server VERIFY raw (${serverVerifyRaw.length}b): ${serverVerifyRaw.toString("hex")}`);
+  // Client VERIFY transcript = all messages including server's VERIFY
+  const clientTranscript = Buffer.concat([...transcript, serverVerifyRaw]);
+  console.log(`[CredSSP] Client VERIFY transcript: ${transcript.length + 1} parts, ${clientTranscript.length} bytes (includes server VERIFY)`);
 
-  // Clone server's VERIFY and change seqNum to 4
-  const echoVerify = Buffer.from(serverVerifyRaw);
-  echoVerify.writeUInt32LE(seqNum++, 12); // seqNum at offset 12
-  console.log(`[CredSSP] Echo VERIFY (server copy, seqNum=4): ${echoVerify.toString("hex")}`);
-  console.log(`[CredSSP] Echo VERIFY checksum value: ${echoVerify.subarray(80, 92).toString("hex")}`);
-  console.log(`[CredSSP] Echo vs Server identical (except seqNum): seqNum=${echoVerify.readUInt32LE(12)}`);
+  const KU_INITIATOR_MAKE = 25;
+  const clientChecksum = computeAes128Checksum(sessionKey, KU_INITIATOR_MAKE, clientTranscript);
+  console.log(`[CredSSP] Client VERIFY checksum (ku=${KU_INITIATOR_MAKE}, 4-msg): ${clientChecksum.toString("hex")}`);
 
-  // Compare with our own VERIFY built from scratch with ku=23
-  const ck23 = computeAes128Checksum(sessionKey, 23, transcriptData);
-  const ck25 = computeAes128Checksum(sessionKey, 25, transcriptData);
-  console.log(`[CredSSP] Computed ku=23: ${ck23.toString("hex")} (matches server: ${ck23.equals(serverVerify1.checksum)})`);
-  console.log(`[CredSSP] Computed ku=25: ${ck25.toString("hex")}`);
+  // Also log what ku=23 over 4-msg would be, for debugging
+  const clientCk23 = computeAes128Checksum(sessionKey, 23, clientTranscript);
+  console.log(`[CredSSP] Client VERIFY checksum (ku=23, 4-msg): ${clientCk23.toString("hex")}`);
 
-  // Use the ECHO VERIFY (server's exact bytes with seqNum changed)
-  const verifySpnego = buildSpnegoResponse(echoVerify);
-  console.log(`[CredSSP] Client SPNEGO response (${verifySpnego.length}b): ${verifySpnego.toString("hex")}`);
+  const authScheme = serverMsgs1[0]?.authScheme ?? conversationId;
+  const clientVerify = buildVerifyMessage(
+    conversationId,
+    seqNum++,
+    authScheme,
+    clientChecksum,
+    CHECKSUM_TYPE_HMAC_SHA1_96_AES128,
+  );
+  console.log(`[CredSSP] Client VERIFY (${clientVerify.length}b): ${clientVerify.toString("hex")}`);
 
+  const verifySpnego = buildSpnegoResponse(clientVerify);
   const tsReqVerify = buildTSRequest(CREDSSP_VERSION, verifySpnego, undefined, undefined, clientNonce);
   tlsSocket.write(tsReqVerify);
-  console.log(`[CredSSP] Sent ECHO VERIFY (server's VERIFY with seqNum=4), no mechListMIC`);
+  console.log(`[CredSSP] Sent VERIFY ku=${KU_INITIATOR_MAKE}, 4-msg transcript (includes server VERIFY), no mechListMIC`);
 
   // ── Step 4: Read server's SPNEGO accept-complete ──
   const tsRespComplete = await readTSRequest(tlsSocket);
@@ -340,7 +311,7 @@ export async function performCredSSP(
     logSpnegoFields("Server step4 SPNEGO", tsRespComplete.negoToken);
   }
   if (tsRespComplete.errorCode) {
-    console.log(`[CredSSP] FAILED with error 0x${tsRespComplete.errorCode.toString(16)} — ECHO VERIFY (server's bytes, seqNum=4), no mechListMIC`);
+    console.log(`[CredSSP] FAILED with error 0x${tsRespComplete.errorCode.toString(16)} — VERIFY ku=25, 4-msg transcript (includes server VERIFY), no mechListMIC`);
     throw new Error(`CredSSP: server error after step3 0x${tsRespComplete.errorCode.toString(16)}`);
   }
   console.log("[CredSSP] SPNEGO/NEGOEX authentication complete");
