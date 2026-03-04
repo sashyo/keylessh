@@ -21,7 +21,7 @@
  */
 
 import type { TLSSocket } from "tls";
-import { createCipheriv, createDecipheriv, createHash, randomBytes, X509Certificate } from "crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from "crypto";
 import {
   encodeSequence,
   encodeExplicit,
@@ -323,10 +323,11 @@ export async function performCredSSP(
   const serverCertRaw = extractTlsServerCert(tlsSocket);
   console.log(`[CredSSP] Server cert raw DER: ${serverCertRaw.length} bytes`);
 
-  // Extract SubjectPublicKeyInfo DER from the certificate (per MS-CSSP spec)
-  const x509 = new X509Certificate(serverCertRaw);
-  const spkiDer = Buffer.from(x509.publicKey.export({ type: "spki", format: "der" }));
-  console.log(`[CredSSP] SPKI DER: ${spkiDer.length} bytes, first16=${spkiDer.subarray(0, 16).toString("hex")}`);
+  // Extract SubjectPublicKeyInfo directly from the raw certificate DER.
+  // Node.js's x509.publicKey.export() re-encodes the key, which may differ
+  // from the exact bytes in the certificate. Windows CredSSP uses the raw bytes.
+  const spkiDer = extractSpkiFromCertDer(serverCertRaw);
+  console.log(`[CredSSP] SPKI DER (raw from cert): ${spkiDer.length} bytes, first16=${spkiDer.subarray(0, 16).toString("hex")}`);
 
   const certHash = createHash("sha256").update(spkiDer).digest();
   console.log(`[CredSSP] certHash (SHA256 of SPKI): ${certHash.toString("hex")}`);
@@ -660,6 +661,67 @@ function extractTlsServerCert(tlsSocket: TLSSocket): Buffer {
     throw new Error("CredSSP: cannot get server TLS certificate");
   }
   return cert.raw;
+}
+
+/**
+ * Extract the raw SubjectPublicKeyInfo bytes directly from a DER-encoded
+ * X.509 certificate. This preserves the exact encoding from the certificate,
+ * unlike Node.js's x509.publicKey.export() which may re-encode the key.
+ *
+ * Certificate ::= SEQUENCE { tbsCertificate, signatureAlgorithm, signatureValue }
+ * TBSCertificate ::= SEQUENCE {
+ *   version [0] EXPLICIT INTEGER,  -- optional
+ *   serialNumber INTEGER,
+ *   signature AlgorithmIdentifier,
+ *   issuer Name,
+ *   validity Validity,
+ *   subject Name,
+ *   subjectPublicKeyInfo SubjectPublicKeyInfo  ← target
+ * }
+ */
+function extractSpkiFromCertDer(certDer: Buffer): Buffer {
+  let pos = 0;
+
+  // Outer SEQUENCE (Certificate) — skip tag + length header
+  if (certDer[pos] !== 0x30) throw new Error("extractSPKI: expected SEQUENCE");
+  pos++;
+  pos += derLenBytes(certDer, pos);
+
+  // TBSCertificate SEQUENCE — skip tag + length header to enter contents
+  if (certDer[pos] !== 0x30) throw new Error("extractSPKI: expected TBS SEQUENCE");
+  pos++;
+  pos += derLenBytes(certDer, pos);
+
+  // Skip version [0] EXPLICIT if present
+  if (certDer[pos] === 0xa0) pos = derSkipTlv(certDer, pos);
+
+  // Skip: serialNumber, signature, issuer, validity, subject (5 fields)
+  for (let i = 0; i < 5; i++) pos = derSkipTlv(certDer, pos);
+
+  // subjectPublicKeyInfo starts at pos — capture entire TLV
+  const spkiStart = pos;
+  const spkiEnd = derSkipTlv(certDer, pos);
+  return certDer.subarray(spkiStart, spkiEnd);
+}
+
+/** Read a DER length and return number of bytes consumed (length field only) */
+function derLenBytes(buf: Buffer, pos: number): number {
+  const first = buf[pos];
+  if (first < 0x80) return 1;
+  return 1 + (first & 0x7f);
+}
+
+/** Skip an entire TLV element starting at pos, return position after it */
+function derSkipTlv(buf: Buffer, pos: number): number {
+  pos++; // skip tag byte
+  const first = buf[pos];
+  if (first < 0x80) {
+    return pos + 1 + first;
+  }
+  const n = first & 0x7f;
+  let len = 0;
+  for (let i = 0; i < n; i++) len = (len << 8) | buf[pos + 1 + i];
+  return pos + 1 + n + len;
 }
 
 // ── TideSSP AES-128-GCM encryption (matches TideSSP SealMessage) ──
