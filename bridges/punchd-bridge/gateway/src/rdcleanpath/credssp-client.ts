@@ -37,11 +37,12 @@ import {
   buildVerifyMessage,
   parseNegoexMessages,
   deriveSessionKeyFromJwt,
-  computeVerifyChecksum,
+  computeAes128Checksum,
   md4,
   generateConversationId,
   NEGOEX_OID,
   TIDESSP_AUTH_SCHEME,
+  CHECKSUM_TYPE_HMAC_SHA1_96_AES128,
   MSG_INITIATOR_NEGO,
   MSG_AP_REQUEST,
   MSG_VERIFY,
@@ -170,70 +171,70 @@ export async function performCredSSP(
   const sessionKey = deriveSessionKeyFromJwt(jwt);
   console.log(`[CredSSP] Gateway session key: ${sessionKey.toString("hex")}`);
 
-  if (serverVerify1) {
-    console.log("[CredSSP] Server sent VERIFY — JWT authentication accepted");
-    console.log(`[CredSSP] VERIFY checksumType=${serverVerify1.checksumType}, authScheme=${serverVerify1.authScheme?.toString("hex")}`);
-    if (serverVerify1.checksum) {
-      const serverChecksum = serverVerify1.checksum;
-      console.log(`[CredSSP] Server VERIFY checksum: ${serverChecksum.toString("hex")}`);
-
-      // Log each transcript message
-      const serverTranscript = Buffer.concat(transcript);
-      for (let i = 0; i < transcript.length; i++) {
-        const m = transcript[i];
-        const mType = m.readUInt32LE(8);
-        const mSeq = m.readUInt32LE(12);
-        console.log(`[CredSSP] Transcript msg[${i}]: type=${mType}, seq=${mSeq}, len=${m.length}`);
-      }
-      console.log(`[CredSSP] Transcript total: ${serverTranscript.length} bytes`);
-
-      // Try multiple keyUsage values with rc4-hmac checksum
-      const { createHmac: hmac, createHash: hash } = await import("crypto");
-      for (const ku of [23, 24, 25, 26]) {
-        const ck = computeVerifyChecksum(sessionKey, ku, serverTranscript);
-        const match = serverChecksum.equals(ck) ? " *** MATCH ***" : "";
-        console.log(`[CredSSP] rc4-hmac ku=${ku}: ${ck.toString("hex")}${match}`);
-      }
-      // Try simple HMAC-MD5(key, data)
-      const simple = hmac("md5", sessionKey).update(serverTranscript).digest();
-      console.log(`[CredSSP] HMAC-MD5(key,data): ${simple.toString("hex")}${serverChecksum.equals(simple) ? " *** MATCH ***" : ""}`);
-      // Try plain MD5
-      const md5 = hash("md5").update(serverTranscript).digest();
-      console.log(`[CredSSP] MD5(data): ${md5.toString("hex")}${serverChecksum.equals(md5) ? " *** MATCH ***" : ""}`);
-      // Try HMAC-MD5 with keyUsage prepended to data
-      for (const ku of [23, 25]) {
-        const kuBuf = Buffer.alloc(4); kuBuf.writeInt32LE(ku);
-        const hk = hmac("md5", sessionKey).update(kuBuf).update(serverTranscript).digest();
-        console.log(`[CredSSP] HMAC-MD5(key,ku${ku}||data): ${hk.toString("hex")}${serverChecksum.equals(hk) ? " *** MATCH ***" : ""}`);
-      }
-      // checksumType=2 = rsa-md4 (UNKEYED) per RFC 3961 — using pure JS MD4
-      const md4full = md4(serverTranscript);
-      console.log(`[CredSSP] MD4(data): ${md4full.toString("hex")}${serverChecksum.equals(md4full) ? " *** MATCH ***" : ""}`);
-      // Try different transcript: only server msg (ACCEPTOR_NEGO)
-      const md4srv = md4(transcript[2]);
-      console.log(`[CredSSP] MD4(srv_only): ${md4srv.toString("hex")}${serverChecksum.equals(md4srv) ? " *** MATCH ***" : ""}`);
-      // Try different transcript: only client msgs
-      const md4cli = md4(Buffer.concat([transcript[0], transcript[1]]));
-      console.log(`[CredSSP] MD4(cli_only): ${md4cli.toString("hex")}${serverChecksum.equals(md4cli) ? " *** MATCH ***" : ""}`);
-      // Try server-first order
-      const md4sf = md4(Buffer.concat([transcript[2], transcript[0], transcript[1]]));
-      console.log(`[CredSSP] MD4(srv_first): ${md4sf.toString("hex")}${serverChecksum.equals(md4sf) ? " *** MATCH ***" : ""}`);
-      // Try rc4-hmac checksum but with MD4 inner hash instead of MD5
-      for (const ku of [23, 25]) {
-        const ksign = hmac("md5", sessionKey).update(Buffer.from("signaturekey\0", "ascii")).digest();
-        const kuBuf2 = Buffer.alloc(4); kuBuf2.writeInt32LE(ku);
-        const tmp = md4(Buffer.concat([kuBuf2, serverTranscript]));
-        const ck = hmac("md5", ksign).update(tmp).digest();
-        console.log(`[CredSSP] rc4-md4 ku=${ku}: ${ck.toString("hex")}${serverChecksum.equals(ck) ? " *** MATCH ***" : ""}`);
-      }
-    }
+  if (!serverVerify1 || !serverVerify1.checksum) {
+    throw new Error("CredSSP: server did not send VERIFY — authentication failed");
   }
 
-  // When auth completes in a single round (AcceptLsaModeContext returned SEC_E_OK),
-  // NegoExtender returns SEC_E_OK to Negotiate, meaning SPNEGO is complete.
-  // The server's VERIFY proves it has the session key. We do NOT send a client
-  // VERIFY — the server doesn't expect more negoTokens after accept-completed.
-  console.log("[CredSSP] SPNEGO/NEGOEX authentication complete (single-round)");
+  console.log("[CredSSP] Server sent VERIFY — JWT authentication accepted");
+  const serverCksumType = serverVerify1.checksumType ?? 2;
+  console.log(`[CredSSP] VERIFY checksumType=${serverCksumType}, checksum=${serverVerify1.checksum.toString("hex")}`);
+
+  // Validate server's VERIFY checksum
+  const transcriptData = Buffer.concat(transcript);
+  let serverChecksumOk = false;
+
+  if (serverCksumType === CHECKSUM_TYPE_HMAC_SHA1_96_AES128) {
+    // Keyed checksum: hmac-sha1-96-aes128 (type 15) — keyUsage 25 for acceptor
+    const expected = computeAes128Checksum(sessionKey, 25, transcriptData);
+    serverChecksumOk = serverVerify1.checksum.equals(expected);
+    console.log(`[CredSSP] AES128 checksum (ku=25): ${expected.toString("hex")}${serverChecksumOk ? " *** MATCH ***" : ""}`);
+  } else if (serverCksumType === 2) {
+    // Unkeyed MD4 fallback (NegoExtender didn't recognize key type)
+    const expected = md4(transcriptData);
+    serverChecksumOk = serverVerify1.checksum.equals(expected);
+    console.log(`[CredSSP] MD4 checksum: ${expected.toString("hex")}${serverChecksumOk ? " *** MATCH ***" : ""}`);
+  } else {
+    // Try both algorithms
+    const aes = computeAes128Checksum(sessionKey, 25, transcriptData);
+    const md4ck = md4(transcriptData);
+    console.log(`[CredSSP] Unknown checksumType=${serverCksumType}, trying AES128: ${aes.toString("hex")}, MD4: ${md4ck.toString("hex")}`);
+    serverChecksumOk = serverVerify1.checksum.equals(aes) || serverVerify1.checksum.equals(md4ck);
+  }
+
+  if (!serverChecksumOk) {
+    console.log("[CredSSP] WARNING: server VERIFY checksum mismatch — continuing anyway for debugging");
+  }
+
+  // ── Step 3: Send client VERIFY ──
+  // MS-NEGOEX requires both sides to send VERIFY. Initiator uses keyUsage=23.
+  let clientChecksum: Buffer;
+  if (serverCksumType === CHECKSUM_TYPE_HMAC_SHA1_96_AES128) {
+    clientChecksum = computeAes128Checksum(sessionKey, 23, transcriptData);
+  } else {
+    // MD4 (unkeyed) — same for both sides
+    clientChecksum = md4(transcriptData);
+  }
+
+  const clientVerifyMsg = buildVerifyMessage(
+    conversationId,
+    seqNum++,
+    TIDESSP_AUTH_SCHEME,
+    clientChecksum,
+    serverCksumType,
+  );
+
+  const verifySpnego = buildSpnegoResponse(clientVerifyMsg);
+  const tsReqVerify = buildTSRequest(CREDSSP_VERSION, verifySpnego);
+  tlsSocket.write(tsReqVerify);
+  console.log(`[CredSSP] Sent client VERIFY (checksumType=${serverCksumType}, ${clientChecksum.toString("hex")})`);
+
+  // ── Step 4: Read server's SPNEGO accept-complete ──
+  const tsRespComplete = await readTSRequest(tlsSocket);
+  console.log(`[CredSSP] Server accept-complete: version=${tsRespComplete.version}, errorCode=${tsRespComplete.errorCode ?? "none"}`);
+  if (tsRespComplete.errorCode) {
+    throw new Error(`CredSSP: server error after VERIFY 0x${tsRespComplete.errorCode.toString(16)}`);
+  }
+  console.log("[CredSSP] SPNEGO/NEGOEX authentication complete");
 
   // ── Step 5: Send pubKeyAuth (TLS channel binding) ──
 

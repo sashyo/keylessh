@@ -645,10 +645,10 @@ static NTSTATUS NTAPI TideSsp_QueryContextAttributes(LSA_SEC_HANDLE h, ULONG att
         PUCHAR p = (PUCHAR)buf;
         memset(p, 0, 32);
 
-        *(ULONG  *)(p + 0)  = 23;              /* KeyType: rc4-hmac */
+        *(ULONG  *)(p + 0)  = 17;              /* KeyType: aes128-cts-hmac-sha1-96 */
         *(ULONG  *)(p + 4)  = SESSION_KEY_SIZE; /* KeyLength */
         *(PUCHAR *)(p + 8)  = key1;             /* KeyValue */
-        *(ULONG  *)(p + 16) = 23;              /* VerifyKeyType: rc4-hmac */
+        *(ULONG  *)(p + 16) = 17;              /* VerifyKeyType: aes128-cts-hmac-sha1-96 */
         *(ULONG  *)(p + 20) = SESSION_KEY_SIZE; /* VerifyKeyLength */
         *(PUCHAR *)(p + 24) = key2;             /* VerifyKeyValue */
 
