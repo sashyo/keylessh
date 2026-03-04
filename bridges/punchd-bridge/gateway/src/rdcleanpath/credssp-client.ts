@@ -260,7 +260,6 @@ export async function performCredSSP(
   //   Both sides use keyUsage = 23 for VERIFY checksums.
   //   The VERIFY covers the same transcript, so both produce identical checksums.
   const KU_ACCEPTOR_VERIFY = 23;
-  const KU_INITIATOR_VERIFY = 23;
 
   if (serverCksumType === CHECKSUM_TYPE_HMAC_SHA1_96_AES128) {
     const expected = computeAes128Checksum(sessionKey, KU_ACCEPTOR_VERIFY, transcriptData);
@@ -282,13 +281,41 @@ export async function performCredSSP(
   }
 
   // ── Step 3: Send client VERIFY ──
-  // Initiator uses keyUsage=25 (opposite of acceptor's 23).
+  // Try including server's VERIFY in the client's transcript.
+  // The spec says exclude VERIFYs, but NegoExtender might include its own
+  // VERIFY when validating the peer's VERIFY.
+  const serverVerifyBytes = (() => {
+    let pos = 0;
+    while (pos + 40 <= serverNegoex1.length) {
+      const msgLen = serverNegoex1.readUInt32LE(pos + 20);
+      const msgType = serverNegoex1.readUInt32LE(pos + 8);
+      if (msgType === MSG_VERIFY) {
+        return Buffer.from(serverNegoex1.subarray(pos, pos + msgLen));
+      }
+      pos += msgLen;
+    }
+    return null;
+  })();
+
+  // Test both transcript variants with both key usages
+  if (serverVerifyBytes && serverCksumType === CHECKSUM_TYPE_HMAC_SHA1_96_AES128) {
+    const transcriptWithVerify = Buffer.concat([transcriptData, serverVerifyBytes]);
+    console.log(`[CredSSP] Transcript+ServerVerify: ${transcriptWithVerify.length} bytes`);
+    const ck23wv = computeAes128Checksum(sessionKey, 23, transcriptWithVerify);
+    const ck25wv = computeAes128Checksum(sessionKey, 25, transcriptWithVerify);
+    console.log(`[CredSSP]   +svrVerify ku=23: ${ck23wv.toString("hex")}`);
+    console.log(`[CredSSP]   +svrVerify ku=25: ${ck25wv.toString("hex")}`);
+  }
+
+  // Use ku=25 for initiator (standard convention: initiator=25, acceptor=23)
+  const KU_CLIENT_VERIFY = 25;
   let clientChecksum: Buffer;
   if (serverCksumType === CHECKSUM_TYPE_HMAC_SHA1_96_AES128) {
-    clientChecksum = computeAes128Checksum(sessionKey, KU_INITIATOR_VERIFY, transcriptData);
+    clientChecksum = computeAes128Checksum(sessionKey, KU_CLIENT_VERIFY, transcriptData);
   } else {
     clientChecksum = md4(transcriptData);
   }
+  console.log(`[CredSSP] Client VERIFY: ku=${KU_CLIENT_VERIFY}, checksum=${clientChecksum.toString("hex")}`);
 
   const clientVerifyMsg = buildVerifyMessage(
     conversationId,
