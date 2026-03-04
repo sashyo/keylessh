@@ -354,6 +354,17 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
             const ws = state.wsConnections.get(parsed.id);
             if (ws) ws.close(parsed.code || 1000, parsed.reason || "");
           }
+        } else if (parsed.type === "eddsa_response") {
+          // Route EdDSA signature response to the correct RDCleanPath session
+          const rdcpSession = state.rdcleanpathSessions.get(parsed.sessionId);
+          if (rdcpSession?.handleEddsaResponse) {
+            rdcpSession.handleEddsaResponse(
+              Buffer.from(parsed.signature, "base64"),
+              Buffer.from(parsed.publicKey, "base64"),
+            );
+          } else {
+            console.warn(`[WebRTC] eddsa_response for unknown session: ${parsed.sessionId}`);
+          }
         } else if (parsed.type === "tcp_open") {
           handleTcpOpen(state, parsed);
         } else if (parsed.type === "tcp_close") {
@@ -964,6 +975,14 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
           type: "ws_close", id: msg.id, code, reason,
         })));
       },
+      sendEddsaChallenge: (sessionId: string, challenge: Buffer) => {
+        enqueueControl(state, Buffer.from(JSON.stringify({
+          type: "eddsa_challenge",
+          sessionId: sessionId || msg.id,
+          challenge: challenge.toString("base64"),
+        })));
+      },
+      sessionId: msg.id,
       backends: options.backends,
       verifyToken: options.verifyToken,
       gatewayId: options.gatewayId,

@@ -545,7 +545,129 @@
         if (ws) ws._fireError(msg.message);
         break;
       }
+
+      case "eddsa_challenge": {
+        // Gateway is requesting an Ed25519 signature for RDP authentication
+        console.log("[RDP] Received EdDSA challenge for session:", msg.sessionId);
+        handleEddsaChallenge(msg.sessionId, msg.challenge);
+        break;
+      }
     }
+  }
+
+  /**
+   * Handle an EdDSA challenge from the gateway.
+   * Signs the challenge using TideCloak's Ed25519 key and sends back the response.
+   */
+  async function handleEddsaChallenge(rdcpSessionId, challengeB64) {
+    try {
+      var challengeBytes = base64ToUint8Array(challengeB64);
+      console.log("[RDP] Signing EdDSA challenge:", challengeBytes.length, "bytes");
+
+      // Sign using TideCloak
+      var result = await signWithTideCloak(challengeBytes);
+
+      // Send response back to gateway
+      controlChannel.send(JSON.stringify({
+        type: "eddsa_response",
+        sessionId: rdcpSessionId,
+        signature: uint8ArrayToBase64(result.signature),
+        publicKey: uint8ArrayToBase64(result.publicKey),
+      }));
+      console.log("[RDP] EdDSA response sent");
+    } catch (err) {
+      console.error("[RDP] EdDSA signing failed:", err);
+      // The gateway will timeout and close the session
+    }
+  }
+
+  /**
+   * Sign data using TideCloak's Ed25519 key.
+   * Uses the same pattern as tideSsh.ts BasicCustomRequest.
+   */
+  async function signWithTideCloak(data) {
+    // Get TideCloak instance — it should be available on the page
+    // from the auth flow (tidecloak-js SDK)
+    var tc = window.__tidecloak || window.tidecloak;
+    if (!tc) {
+      throw new Error("TideCloak instance not available");
+    }
+
+    // Try to use the TideCloak signing API
+    if (typeof tc.signChallenge === "function") {
+      // Direct challenge signing (if available)
+      return await tc.signChallenge(data);
+    }
+
+    // Fallback: use BasicCustomRequest pattern
+    if (typeof tc.createTideRequest === "function" && typeof tc.executeSignRequest === "function") {
+      var TideMemory = window.TideMemory || (await import("/wasm/tide_js.js")).TideMemory;
+      var BasicCustomRequest = window.BasicCustomRequest || (await import("/wasm/tide_js.js")).BasicCustomRequest;
+
+      var tideRequest = new BasicCustomRequest(
+        "BasicCustom<RDP>",       // Name
+        "BasicCustom<1>",         // Version
+        "Policy:1",               // AuthFlow
+        data,                     // Draft: challenge data to sign
+        new TideMemory()          // DynamicData: empty
+      );
+
+      // Add doken as authorizer
+      var doken = tc.doken || tc.token;
+      if (doken) {
+        var dokenBytes = new TextEncoder().encode(doken);
+        var dokenMemory = TideMemory.CreateFromArray([dokenBytes]);
+        tideRequest.addAuthorizer(dokenMemory);
+      }
+
+      var initializedBytes = await tc.createTideRequest(tideRequest.encode());
+      var sigs = await tc.executeSignRequest(initializedBytes, true);
+
+      var sig = sigs && sigs[0];
+      if (!(sig instanceof Uint8Array) || sig.length !== 64) {
+        throw new Error("Tide enclave did not return a valid Ed25519 signature");
+      }
+
+      // Extract public key from JWT claims
+      var publicKey = extractPublicKeyFromToken();
+
+      return { signature: sig, publicKey: publicKey };
+    }
+
+    throw new Error("No TideCloak signing method available");
+  }
+
+  /**
+   * Extract the Ed25519 public key from the session JWT claims.
+   */
+  function extractPublicKeyFromToken() {
+    if (!sessionToken) throw new Error("No session token available");
+    try {
+      var parts = sessionToken.split(".");
+      var payload = JSON.parse(atob(parts[1].replace(/-/g, "+").replace(/_/g, "/")));
+      // Look for public key in standard locations
+      var pubKeyB64 = payload.public_key || payload.ed25519_public_key ||
+                      (payload.cnf && payload.cnf.jwk && payload.cnf.jwk.x);
+      if (!pubKeyB64) {
+        throw new Error("No public key found in JWT claims");
+      }
+      return base64ToUint8Array(pubKeyB64);
+    } catch (err) {
+      throw new Error("Failed to extract public key from JWT: " + err.message);
+    }
+  }
+
+  function base64ToUint8Array(b64) {
+    var raw = atob(b64.replace(/-/g, "+").replace(/_/g, "/"));
+    var bytes = new Uint8Array(raw.length);
+    for (var i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+    return bytes;
+  }
+
+  function uint8ArrayToBase64(bytes) {
+    var binary = "";
+    for (var i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    return btoa(binary);
   }
 
   function closeAllDcWebSockets() {

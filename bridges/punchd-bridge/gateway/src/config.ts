@@ -19,6 +19,8 @@ export interface BackendEntry {
   url: string;
   /** Protocol: "http" (default web proxy) or "rdp" (TCP tunnel to RDP server) */
   protocol?: "http" | "rdp";
+  /** RDP auth mode: "password" (NTLM, default) or "eddsa" (Ed25519 via TideSSP) */
+  auth?: "password" | "eddsa";
   /** Skip gateway JWT validation — backend handles its own auth */
   noAuth?: boolean;
   /** Strip Authorization header before proxying to this backend */
@@ -124,7 +126,8 @@ function parseBackends(): BackendEntry[] {
       let rawUrl = entry.slice(eq + 1).trim();
       let noAuth = false;
       let stripAuth = false;
-      // Parse suffix flags: ;noauth, ;stripauth (order-independent, repeatable)
+      let auth: "password" | "eddsa" = "password";
+      // Parse suffix flags: ;noauth, ;stripauth, ;eddsa (order-independent, repeatable)
       let changed = true;
       while (changed) {
         changed = false;
@@ -137,11 +140,15 @@ function parseBackends(): BackendEntry[] {
           stripAuth = true;
           rawUrl = rawUrl.slice(0, -";stripauth".length).trim();
           changed = true;
+        } else if (lower.endsWith(";eddsa")) {
+          auth = "eddsa";
+          rawUrl = rawUrl.slice(0, -";eddsa".length).trim();
+          changed = true;
         }
       }
       // Detect protocol from URL scheme
       const protocol: "http" | "rdp" = rawUrl.startsWith("rdp://") ? "rdp" : "http";
-      return { name: entry.slice(0, eq).trim(), url: rawUrl, protocol, noAuth: noAuth || undefined, stripAuth: stripAuth || undefined };
+      return { name: entry.slice(0, eq).trim(), url: rawUrl, protocol, auth: auth !== "password" ? auth : undefined, noAuth: noAuth || undefined, stripAuth: stripAuth || undefined };
     }).filter((b) => b.url);
   }
 

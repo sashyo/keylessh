@@ -25,12 +25,15 @@ import {
   RDCLEANPATH_ERROR_GENERAL,
   type RDCleanPathRequest,
 } from "./rdcleanpath.js";
+import { performCredSSP, type CredSSPCallbacks } from "./credssp-client.js";
 
 // ── Public interface ─────────────────────────────────────────────
 
 export interface RDCleanPathSession {
   /** Handle a binary message from the client */
   handleMessage(data: Buffer): void;
+  /** Handle an EdDSA signature response from the browser */
+  handleEddsaResponse?(signature: Buffer, publicKey: Buffer): void;
   /** Close the session */
   close(): void;
 }
@@ -40,6 +43,10 @@ export interface RDCleanPathSessionOptions {
   sendBinary: (data: Buffer) => void;
   /** Send a close frame back to the client */
   sendClose: (code: number, reason: string) => void;
+  /** Send an EdDSA challenge to the browser for signing */
+  sendEddsaChallenge?: (sessionId: string, challenge: Buffer) => void;
+  /** Session ID for EdDSA challenge correlation */
+  sessionId?: string;
   /** Available backends for resolution */
   backends: BackendEntry[];
   /** JWT verification function */
@@ -53,6 +60,7 @@ export interface RDCleanPathSessionOptions {
 const enum State {
   AWAITING_REQUEST,
   CONNECTING,
+  CREDSSP,
   RELAY,
   CLOSED,
 }
@@ -69,6 +77,10 @@ export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCle
   let tlsSocket: TLSSocket | null = null;
   let relayBytesToClient = 0;
   let relayBytesFromClient = 0;
+
+  // EdDSA challenge-response pending promise
+  let pendingEddsaResolve: ((result: { signature: Buffer; publicKey: Buffer }) => void) | null = null;
+  let pendingEddsaReject: ((err: Error) => void) | null = null;
 
   function sendError(errorCode: number, httpStatus?: number, wsaError?: number, tlsAlert?: number): void {
     try {
@@ -184,6 +196,42 @@ export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCle
       const certChain = extractCertChain(tlsSocket);
       console.log(`[RDCleanPath] TLS complete, ${certChain.length} cert(s) in chain`);
 
+      // Step 5.5: Perform CredSSP/NLA with TideSSP if backend uses EdDSA auth
+      if (backend.auth === "eddsa") {
+        if (!opts.sendEddsaChallenge) {
+          throw new Error("EdDSA auth configured but no challenge relay callback");
+        }
+        state = State.CREDSSP;
+        console.log(`[RDCleanPath] Starting CredSSP with TideSSP for "${backendName}"`);
+
+        // Extract username from JWT (prefer preferred_username, fall back to sub)
+        const eddsaUsername = (payload as any).preferred_username || (payload as any).sub || "user";
+
+        const credsspCallbacks: CredSSPCallbacks = {
+          onChallenge: (challenge: Buffer) => {
+            return new Promise<{ signature: Buffer; publicKey: Buffer }>((resolve, reject) => {
+              pendingEddsaResolve = resolve;
+              pendingEddsaReject = reject;
+
+              // Send challenge to browser via control channel
+              opts.sendEddsaChallenge!(opts.sessionId || "", challenge);
+
+              // Timeout after 30 seconds
+              setTimeout(() => {
+                if (pendingEddsaReject) {
+                  pendingEddsaReject(new Error("EdDSA challenge timeout — no response from browser"));
+                  pendingEddsaResolve = null;
+                  pendingEddsaReject = null;
+                }
+              }, 30_000);
+            });
+          },
+        };
+
+        await performCredSSP(tlsSocket, eddsaUsername, credsspCallbacks);
+        console.log(`[RDCleanPath] CredSSP/TideSSP completed for "${backendName}"`);
+      }
+
       // Step 6: Send RDCleanPath Response PDU
       const responsePdu = buildRDCleanPathResponse({
         x224ConnectionPdu: x224Response,
@@ -250,6 +298,7 @@ export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCle
           break;
 
         case State.CONNECTING:
+        case State.CREDSSP:
           // Buffer or drop — client shouldn't send data during handshake
           break;
 
@@ -258,7 +307,24 @@ export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCle
       }
     },
 
+    handleEddsaResponse(signature: Buffer, publicKey: Buffer): void {
+      if (pendingEddsaResolve) {
+        console.log("[RDCleanPath] Received EdDSA response from browser");
+        const resolve = pendingEddsaResolve;
+        pendingEddsaResolve = null;
+        pendingEddsaReject = null;
+        resolve({ signature, publicKey });
+      } else {
+        console.warn("[RDCleanPath] Unexpected EdDSA response — no pending challenge");
+      }
+    },
+
     close(): void {
+      if (pendingEddsaReject) {
+        pendingEddsaReject(new Error("Session closed during EdDSA challenge"));
+        pendingEddsaResolve = null;
+        pendingEddsaReject = null;
+      }
       cleanup();
     },
   };
