@@ -1459,6 +1459,59 @@ static NTSTATUS NTAPI TideSsp_UserQueryContextAttributes(
         tide_log("User ACCESS_TOKEN: no token");
         return SEC_E_NO_CREDENTIALS;
     }
+    if (Attribute == SECPKG_ATTR_PACKAGE_INFO) {
+        tide_log("User PACKAGE_INFO: returning TideSSP info");
+        PSecPkgInfoW info = (PSecPkgInfoW)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
+            sizeof(SecPkgInfoW) + 64 * sizeof(WCHAR));
+        if (!info) return SEC_E_INSUFFICIENT_MEMORY;
+        WCHAR *nameStr = (WCHAR*)((PUCHAR)info + sizeof(SecPkgInfoW));
+        WCHAR *commentStr = nameStr + 16;
+        wcscpy(nameStr, TIDESSP_NAME);
+        wcscpy(commentStr, TIDESSP_COMMENT);
+        info->fCapabilities = SECPKG_FLAG_INTEGRITY |
+                              SECPKG_FLAG_PRIVACY |
+                              SECPKG_FLAG_MUTUAL_AUTH |
+                              SECPKG_FLAG_ACCEPT_WIN32_NAME |
+                              SECPKG_FLAG_CONNECTION |
+                              SECPKG_FLAG_NEGOTIABLE2;
+        info->wVersion = TIDESSP_VERSION;
+        info->wRPCID = SECPKG_ID_NONE;
+        info->cbMaxToken = 4096;
+        info->Name = nameStr;
+        info->Comment = commentStr;
+        *(PSecPkgInfoW *)Buffer = info;
+        return STATUS_SUCCESS;
+    }
+    if (Attribute == SECPKG_ATTR_NEGOTIATION_INFO) {
+        tide_log("User NEGOTIATION_INFO: returning complete");
+        PSecPkgInfoW info = (PSecPkgInfoW)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
+            sizeof(SecPkgInfoW) + 64 * sizeof(WCHAR));
+        if (!info) return SEC_E_INSUFFICIENT_MEMORY;
+        WCHAR *nameStr = (WCHAR*)((PUCHAR)info + sizeof(SecPkgInfoW));
+        WCHAR *commentStr = nameStr + 16;
+        wcscpy(nameStr, TIDESSP_NAME);
+        wcscpy(commentStr, TIDESSP_COMMENT);
+        info->fCapabilities = SECPKG_FLAG_INTEGRITY |
+                              SECPKG_FLAG_PRIVACY |
+                              SECPKG_FLAG_MUTUAL_AUTH |
+                              SECPKG_FLAG_ACCEPT_WIN32_NAME |
+                              SECPKG_FLAG_CONNECTION |
+                              SECPKG_FLAG_NEGOTIABLE2;
+        info->wVersion = TIDESSP_VERSION;
+        info->wRPCID = SECPKG_ID_NONE;
+        info->cbMaxToken = 4096;
+        info->Name = nameStr;
+        info->Comment = commentStr;
+        PUCHAR p = (PUCHAR)Buffer;
+        *(PSecPkgInfoW *)(p + 0) = info;
+        *(ULONG *)(p + sizeof(void*)) = SECPKG_NEGOTIATION_COMPLETE;
+        return STATUS_SUCCESS;
+    }
+    if (Attribute == SECPKG_ATTR_FLAGS) {
+        tide_log("User FLAGS: returning 0");
+        *(ULONG *)Buffer = 0;
+        return STATUS_SUCCESS;
+    }
     tide_log("User QueryContextAttributes: UNKNOWN attr=%u (0x%X)", Attribute, Attribute);
     return SEC_E_UNSUPPORTED_FUNCTION;
 }

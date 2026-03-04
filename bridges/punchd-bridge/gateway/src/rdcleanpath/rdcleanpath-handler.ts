@@ -220,7 +220,8 @@ export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCle
       tlsSocket.on("data", (data: Buffer) => {
         if (state !== State.RELAY) return;
         relayBytesToClient += data.length;
-        console.log(`[RDCleanPath] Relay RDP→client: ${data.length} bytes (total: ${relayBytesToClient})`);
+        const hex = data.subarray(0, Math.min(64, data.length)).toString("hex");
+        console.log(`[RDCleanPath] Relay RDP→client: ${data.length} bytes (total: ${relayBytesToClient}) hex: ${hex}`);
         opts.sendBinary(data);
       });
 
@@ -263,7 +264,8 @@ export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCle
           // Forward client data to TLS socket
           if (tlsSocket && !tlsSocket.destroyed) {
             relayBytesFromClient += data.length;
-            console.log(`[RDCleanPath] Relay client→RDP: ${data.length} bytes (total: ${relayBytesFromClient})`);
+            const hex = data.subarray(0, Math.min(64, data.length)).toString("hex");
+            console.log(`[RDCleanPath] Relay client→RDP: ${data.length} bytes (total: ${relayBytesFromClient}) hex: ${hex}`);
             tlsSocket.write(data);
           }
           break;
