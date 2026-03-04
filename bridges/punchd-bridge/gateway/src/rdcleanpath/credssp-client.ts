@@ -21,7 +21,7 @@
  */
 
 import type { TLSSocket } from "tls";
-import { createHash } from "crypto";
+import { createHash, randomBytes } from "crypto";
 import {
   encodeSequence,
   encodeExplicit,
@@ -84,6 +84,10 @@ export async function performCredSSP(
   let seqNum = 0;
   const transcript: Buffer[] = []; // all NEGOEX messages for VERIFY checksum
 
+  // CredSSP v5+ requires clientNonce in all TSRequests with negoTokens (CVE-2018-0886)
+  const clientNonce = randomBytes(32);
+  console.log(`[CredSSP] clientNonce: ${clientNonce.toString("hex")}`);
+
   // ── Step 1: Send INITIATOR_NEGO + optimistic AP_REQUEST(JWT) ──
 
   const negoMsg = buildNegoMessage(
@@ -113,7 +117,7 @@ export async function performCredSSP(
 
   const spnegoInit = buildSpnegoInit(initNegoex);
   console.log(`[CredSSP] NEGOEX INITIATOR_NEGO + AP_REQUEST(JWT): ${initNegoex.length} bytes`);
-  const tsReq1 = buildTSRequest(CREDSSP_VERSION, spnegoInit);
+  const tsReq1 = buildTSRequest(CREDSSP_VERSION, spnegoInit, undefined, undefined, clientNonce);
   tlsSocket.write(tsReq1);
   console.log("[CredSSP] Sent NEGOEX INITIATOR_NEGO + AP_REQUEST(JWT)");
 
@@ -346,7 +350,7 @@ export async function performCredSSP(
   console.log(`[CredSSP] Client SPNEGO response raw (${verifySpnego.length}b): ${verifySpnego.toString("hex")}`);
   // Also log the server's SPNEGO for comparison
   console.log(`[CredSSP] Server SPNEGO raw (${serverSpnego1.length}b): ${serverSpnego1.subarray(0, 40).toString("hex")}...`);
-  const tsReqVerify = buildTSRequest(CREDSSP_VERSION, verifySpnego);
+  const tsReqVerify = buildTSRequest(CREDSSP_VERSION, verifySpnego, undefined, undefined, clientNonce);
   tlsSocket.write(tsReqVerify);
   console.log(`[CredSSP] Sent client VERIFY (checksumType=${serverCksumType}, ${clientChecksum.toString("hex")})`);
 
@@ -495,6 +499,7 @@ function buildTSRequest(
   negoToken?: Buffer,
   authInfo?: Buffer,
   pubKeyAuth?: Buffer,
+  clientNonce?: Buffer,
 ): Buffer {
   const elements: Buffer[] = [];
   elements.push(encodeExplicit(0, encodeInteger(version)));
@@ -514,6 +519,11 @@ function buildTSRequest(
     elements.push(encodeExplicit(3, encodeOctetString(pubKeyAuth)));
   }
 
+  // clientNonce [5] OCTET STRING — required for CredSSP v5+ (CVE-2018-0886)
+  if (clientNonce) {
+    elements.push(encodeExplicit(5, encodeOctetString(clientNonce)));
+  }
+
   return encodeSequence(elements);
 }
 
@@ -523,6 +533,7 @@ interface TSRequestData {
   authInfo?: Buffer;
   pubKeyAuth?: Buffer;
   errorCode?: number;
+  clientNonce?: Buffer;
 }
 
 function parseTSRequest(data: Buffer): TSRequestData {
@@ -557,6 +568,9 @@ function parseTSRequest(data: Buffer): TSRequestData {
     } else if (tag === contextTag(4)) {
       const wrapper = reader.readExplicit(4);
       if (wrapper) result.errorCode = wrapper.readInteger();
+    } else if (tag === contextTag(5)) {
+      const wrapper = reader.readExplicit(5);
+      if (wrapper) result.clientNonce = wrapper.readOctetString();
     } else {
       reader.readTlv();
     }
