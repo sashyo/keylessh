@@ -47,6 +47,10 @@
 #define SECPKG_FLAG_NEGOTIABLE2 0x00200000
 #endif
 
+#ifndef SECPKG_INTERFACE_VERSION
+#define SECPKG_INTERFACE_VERSION 0x00010000
+#endif
+
 /* ── TideSSP AuthScheme GUID for NEGOEX ──────────────────────── */
 /* {7A4E8B2C-1F3D-4A5E-9C6B-8D7E0F1A2B3C} */
 static const GUID TIDESSP_AUTH_SCHEME = {
@@ -464,15 +468,31 @@ static NTSTATUS NTAPI TideSsp_AcceptLsaModeContext(
         if (outBuf) outBuf->cbBuffer = 0;
 
         *NewContextHandle = (LSA_SEC_HANDLE)ctx;
-        *ContextAttr = 0;
+        *ContextAttr = ASC_RET_MUTUAL_AUTH | ASC_RET_CONNECTION | ASC_RET_CONFIDENTIALITY;
         if (ExpirationTime) {
             ExpirationTime->LowPart = 0xFFFFFFFF;
             ExpirationTime->HighPart = 0x7FFFFFFF;
         }
-        if (MappedContext) *MappedContext = FALSE;
+        /* Marshal session key to user mode for SealMessage/UnsealMessage */
+        if (MappedContext) *MappedContext = TRUE;
+        if (ContextData) {
+            PVOID keyBuf = NULL;
+            if (LsaDispatch && LsaDispatch->AllocateLsaHeap) {
+                keyBuf = LsaDispatch->AllocateLsaHeap(SESSION_KEY_SIZE);
+            } else {
+                keyBuf = HeapAlloc(GetProcessHeap(), 0, SESSION_KEY_SIZE);
+            }
+            if (keyBuf) {
+                memcpy(keyBuf, ctx->SessionKey, SESSION_KEY_SIZE);
+                ContextData->BufferType = SECBUFFER_TOKEN;
+                ContextData->cbBuffer = SESSION_KEY_SIZE;
+                ContextData->pvBuffer = keyBuf;
+                tide_log("ContextData: marshaled %d-byte session key to user mode", SESSION_KEY_SIZE);
+            }
+        }
 
         ctx->State = 2;
-        tide_log("AcceptLsaModeContext: SUCCESS for '%ls'", ctx->Username);
+        tide_log("AcceptLsaModeContext: SUCCESS for '%ls' (MappedContext=TRUE)", ctx->Username);
         return SEC_E_OK;
     }
 
@@ -591,6 +611,22 @@ static NTSTATUS NTAPI TideSsp_ExchangeMetaData(
 #define SECPKG_ATTR_NEGO_KEYS 22
 #endif
 
+#ifndef SECPKG_ATTR_PACKAGE_INFO
+#define SECPKG_ATTR_PACKAGE_INFO 10
+#endif
+
+#ifndef SECPKG_ATTR_NEGOTIATION_INFO
+#define SECPKG_ATTR_NEGOTIATION_INFO 12
+#endif
+
+#ifndef SECPKG_ATTR_FLAGS
+#define SECPKG_ATTR_FLAGS 14
+#endif
+
+#ifndef SECPKG_NEGOTIATION_COMPLETE
+#define SECPKG_NEGOTIATION_COMPLETE 0
+#endif
+
 /*
  * SECPKG_ATTR_NEGO_KEYS buffer layout (x64, 32 bytes).
  * Written at raw byte offsets to avoid any struct padding ambiguity.
@@ -672,8 +708,59 @@ static NTSTATUS NTAPI TideSsp_QueryContextAttributes(LSA_SEC_HANDLE h, ULONG att
         tide_log("SESSION_KEY: returned 16-byte key");
         return STATUS_SUCCESS;
     }
-    tide_log("QueryContextAttributes: UNKNOWN attr=%u (0x%X)", attr, attr);
-    return (NTSTATUS)(0xC0090000L | (attr & 0xFFFF));
+    if (attr == SECPKG_ATTR_PACKAGE_INFO) {
+        tide_log("PACKAGE_INFO: returning TideSSP package info");
+        /* Allocate SecPkgInfoW + string buffers */
+        PSecPkgInfoW info = (PSecPkgInfoW)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
+            sizeof(SecPkgInfoW) + 64 * sizeof(WCHAR));
+        if (!info) return SEC_E_INSUFFICIENT_MEMORY;
+        WCHAR *nameStr = (WCHAR*)((PUCHAR)info + sizeof(SecPkgInfoW));
+        WCHAR *commentStr = nameStr + 16;
+        wcscpy(nameStr, TIDESSP_NAME);
+        wcscpy(commentStr, TIDESSP_COMMENT);
+        info->fCapabilities = SECPKG_FLAG_ACCEPT_WIN32_NAME |
+                              SECPKG_FLAG_CONNECTION |
+                              SECPKG_FLAG_NEGOTIABLE2;
+        info->wVersion = TIDESSP_VERSION;
+        info->wRPCID = SECPKG_ID_NONE;
+        info->cbMaxToken = 4096;
+        info->Name = nameStr;
+        info->Comment = commentStr;
+        /* SecPkgContext_PackageInfoW is just a pointer to SecPkgInfoW */
+        *(PSecPkgInfoW *)buf = info;
+        return STATUS_SUCCESS;
+    }
+    if (attr == SECPKG_ATTR_NEGOTIATION_INFO) {
+        tide_log("NEGOTIATION_INFO: returning complete");
+        /* SecPkgContext_NegotiationInfoW: { PSecPkgInfoW PackageInfo; ULONG NegotiationState; } */
+        PSecPkgInfoW info = (PSecPkgInfoW)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
+            sizeof(SecPkgInfoW) + 64 * sizeof(WCHAR));
+        if (!info) return SEC_E_INSUFFICIENT_MEMORY;
+        WCHAR *nameStr = (WCHAR*)((PUCHAR)info + sizeof(SecPkgInfoW));
+        WCHAR *commentStr = nameStr + 16;
+        wcscpy(nameStr, TIDESSP_NAME);
+        wcscpy(commentStr, TIDESSP_COMMENT);
+        info->fCapabilities = SECPKG_FLAG_ACCEPT_WIN32_NAME |
+                              SECPKG_FLAG_CONNECTION |
+                              SECPKG_FLAG_NEGOTIABLE2;
+        info->wVersion = TIDESSP_VERSION;
+        info->wRPCID = SECPKG_ID_NONE;
+        info->cbMaxToken = 4096;
+        info->Name = nameStr;
+        info->Comment = commentStr;
+        /* Write at raw offsets: pointer(8) + ULONG(4) */
+        PUCHAR p = (PUCHAR)buf;
+        *(PSecPkgInfoW *)(p + 0) = info;
+        *(ULONG *)(p + sizeof(void*)) = SECPKG_NEGOTIATION_COMPLETE;
+        return STATUS_SUCCESS;
+    }
+    if (attr == SECPKG_ATTR_FLAGS) {
+        tide_log("FLAGS: returning 0");
+        *(ULONG *)buf = 0;
+        return STATUS_SUCCESS;
+    }
+    tide_log("QueryContextAttributes: UNKNOWN attr=%u (0x%X) — returning SEC_E_UNSUPPORTED_FUNCTION", attr, attr);
+    return SEC_E_UNSUPPORTED_FUNCTION;
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -772,6 +859,483 @@ static NTSTATUS NTAPI TideSsp_FreeCredentialsHandle(LSA_SEC_HANDLE h) {
 /* 0x80090317 */ static NTSTATUS NTAPI TideSsp_ApplyControlToken(LSA_SEC_HANDLE h, PSecBufferDesc b) {
     (void)h;(void)b;
     return (NTSTATUS)0x80090317L; /* SEC_E_INCOMPLETE_MESSAGE → ApplyControlToken */
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ *  User-mode component — SealMessage/UnsealMessage for CredSSP
+ *
+ *  After NEGOEX auth completes, CredSSP calls EncryptMessage /
+ *  DecryptMessage via the Negotiate SSP. Negotiate dispatches to
+ *  our user-mode SealMessage/UnsealMessage.
+ *
+ *  Encryption: AES-128-GCM with random 12-byte nonce.
+ *  Wire format (must match gateway's TypeScript implementation):
+ *    SECBUFFER_TOKEN (28 bytes): [12-byte nonce] [16-byte GCM tag]
+ *    SECBUFFER_DATA:             AES-GCM ciphertext (same length)
+ * ══════════════════════════════════════════════════════════════════ */
+
+#define TIDE_GCM_NONCE_SIZE  12
+#define TIDE_GCM_TAG_SIZE    16
+#define TIDE_TOKEN_SIZE      (TIDE_GCM_NONCE_SIZE + TIDE_GCM_TAG_SIZE)  /* 28 */
+
+/* User-mode context: holds session key for encryption */
+typedef struct _TIDE_USER_CONTEXT {
+    UCHAR  SessionKey[SESSION_KEY_SIZE];
+    ULONG  SeqNum;
+} TIDE_USER_CONTEXT, *PTIDE_USER_CONTEXT;
+
+/* Simple context table (max 16 concurrent sessions) */
+#define MAX_USER_CTX 16
+static struct {
+    ULONG_PTR        Handle;
+    TIDE_USER_CONTEXT Ctx;
+    BOOLEAN          Valid;
+} g_UserCtxTable[MAX_USER_CTX];
+static CRITICAL_SECTION g_UserCtxLock;
+static BOOLEAN g_UserCtxLockInit = FALSE;
+
+static void tide_user_ctx_init(void) {
+    if (!g_UserCtxLockInit) {
+        InitializeCriticalSection(&g_UserCtxLock);
+        g_UserCtxLockInit = TRUE;
+    }
+}
+
+static PTIDE_USER_CONTEXT tide_user_ctx_create(ULONG_PTR handle, const UCHAR *key) {
+    tide_user_ctx_init();
+    EnterCriticalSection(&g_UserCtxLock);
+    for (int i = 0; i < MAX_USER_CTX; i++) {
+        if (!g_UserCtxTable[i].Valid) {
+            g_UserCtxTable[i].Handle = handle;
+            memcpy(g_UserCtxTable[i].Ctx.SessionKey, key, SESSION_KEY_SIZE);
+            g_UserCtxTable[i].Ctx.SeqNum = 0;
+            g_UserCtxTable[i].Valid = TRUE;
+            LeaveCriticalSection(&g_UserCtxLock);
+            return &g_UserCtxTable[i].Ctx;
+        }
+    }
+    LeaveCriticalSection(&g_UserCtxLock);
+    return NULL;
+}
+
+static PTIDE_USER_CONTEXT tide_user_ctx_find(ULONG_PTR handle) {
+    tide_user_ctx_init();
+    EnterCriticalSection(&g_UserCtxLock);
+    for (int i = 0; i < MAX_USER_CTX; i++) {
+        if (g_UserCtxTable[i].Valid && g_UserCtxTable[i].Handle == handle) {
+            LeaveCriticalSection(&g_UserCtxLock);
+            return &g_UserCtxTable[i].Ctx;
+        }
+    }
+    LeaveCriticalSection(&g_UserCtxLock);
+    return NULL;
+}
+
+static void tide_user_ctx_delete(ULONG_PTR handle) {
+    tide_user_ctx_init();
+    EnterCriticalSection(&g_UserCtxLock);
+    for (int i = 0; i < MAX_USER_CTX; i++) {
+        if (g_UserCtxTable[i].Valid && g_UserCtxTable[i].Handle == handle) {
+            SecureZeroMemory(&g_UserCtxTable[i].Ctx, sizeof(TIDE_USER_CONTEXT));
+            g_UserCtxTable[i].Valid = FALSE;
+            break;
+        }
+    }
+    LeaveCriticalSection(&g_UserCtxLock);
+}
+
+/* ── AES-128-GCM encrypt ─────────────────────────────────────── */
+
+static NTSTATUS tide_gcm_encrypt(
+    const UCHAR key[SESSION_KEY_SIZE],
+    PUCHAR plaintext, ULONG cbPlaintext,
+    UCHAR nonce[TIDE_GCM_NONCE_SIZE],
+    UCHAR tag[TIDE_GCM_TAG_SIZE])
+{
+    BCRYPT_ALG_HANDLE hAlg = NULL;
+    BCRYPT_KEY_HANDLE hKey = NULL;
+    NTSTATUS status;
+
+    status = BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_AES_ALGORITHM, NULL, 0);
+    if (!BCRYPT_SUCCESS(status)) return status;
+
+    status = BCryptSetProperty(hAlg, BCRYPT_CHAINING_MODE,
+        (PUCHAR)BCRYPT_CHAIN_MODE_GCM, sizeof(BCRYPT_CHAIN_MODE_GCM), 0);
+    if (!BCRYPT_SUCCESS(status)) { BCryptCloseAlgorithmProvider(hAlg, 0); return status; }
+
+    status = BCryptGenerateSymmetricKey(hAlg, &hKey, NULL, 0,
+        (PUCHAR)key, SESSION_KEY_SIZE, 0);
+    if (!BCRYPT_SUCCESS(status)) { BCryptCloseAlgorithmProvider(hAlg, 0); return status; }
+
+    /* Generate random nonce */
+    BCryptGenRandom(NULL, nonce, TIDE_GCM_NONCE_SIZE, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+
+    BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO authInfo;
+    BCRYPT_INIT_AUTH_MODE_INFO(authInfo);
+    authInfo.pbNonce = nonce;
+    authInfo.cbNonce = TIDE_GCM_NONCE_SIZE;
+    authInfo.pbTag = tag;
+    authInfo.cbTag = TIDE_GCM_TAG_SIZE;
+
+    ULONG cbResult = 0;
+    /* Encrypt in place */
+    status = BCryptEncrypt(hKey, plaintext, cbPlaintext, &authInfo,
+        NULL, 0, plaintext, cbPlaintext, &cbResult, 0);
+
+    BCryptDestroyKey(hKey);
+    BCryptCloseAlgorithmProvider(hAlg, 0);
+    return status;
+}
+
+/* ── AES-128-GCM decrypt ─────────────────────────────────────── */
+
+static NTSTATUS tide_gcm_decrypt(
+    const UCHAR key[SESSION_KEY_SIZE],
+    PUCHAR ciphertext, ULONG cbCiphertext,
+    const UCHAR nonce[TIDE_GCM_NONCE_SIZE],
+    const UCHAR tag[TIDE_GCM_TAG_SIZE])
+{
+    BCRYPT_ALG_HANDLE hAlg = NULL;
+    BCRYPT_KEY_HANDLE hKey = NULL;
+    NTSTATUS status;
+
+    status = BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_AES_ALGORITHM, NULL, 0);
+    if (!BCRYPT_SUCCESS(status)) return status;
+
+    status = BCryptSetProperty(hAlg, BCRYPT_CHAINING_MODE,
+        (PUCHAR)BCRYPT_CHAIN_MODE_GCM, sizeof(BCRYPT_CHAIN_MODE_GCM), 0);
+    if (!BCRYPT_SUCCESS(status)) { BCryptCloseAlgorithmProvider(hAlg, 0); return status; }
+
+    status = BCryptGenerateSymmetricKey(hAlg, &hKey, NULL, 0,
+        (PUCHAR)key, SESSION_KEY_SIZE, 0);
+    if (!BCRYPT_SUCCESS(status)) { BCryptCloseAlgorithmProvider(hAlg, 0); return status; }
+
+    BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO authInfo;
+    BCRYPT_INIT_AUTH_MODE_INFO(authInfo);
+    authInfo.pbNonce = (PUCHAR)nonce;
+    authInfo.cbNonce = TIDE_GCM_NONCE_SIZE;
+    authInfo.pbTag = (PUCHAR)tag;
+    authInfo.cbTag = TIDE_GCM_TAG_SIZE;
+
+    ULONG cbResult = 0;
+    status = BCryptDecrypt(hKey, ciphertext, cbCiphertext, &authInfo,
+        NULL, 0, ciphertext, cbCiphertext, &cbResult, 0);
+
+    BCryptDestroyKey(hKey);
+    BCryptCloseAlgorithmProvider(hAlg, 0);
+    return status;
+}
+
+/* ── User-mode: SpInstanceInit ──────────────────────────────────── */
+
+static NTSTATUS NTAPI TideSsp_InstanceInit(
+    ULONG Version,
+    PSECPKG_DLL_FUNCTIONS DllFunctionTable,
+    PVOID *UserFunctionTable)
+{
+    (void)Version; (void)DllFunctionTable; (void)UserFunctionTable;
+    tide_log("InstanceInit (user-mode)");
+    tide_user_ctx_init();
+    return STATUS_SUCCESS;
+}
+
+/* ── User-mode: SpInitUserModeContext ───────────────────────────── */
+
+static NTSTATUS NTAPI TideSsp_InitUserModeContext(
+    ULONG_PTR ContextHandle,
+    PSecBuffer PackedContext)
+{
+    tide_log("InitUserModeContext: handle=%p, cbBuffer=%u",
+             (void*)ContextHandle, PackedContext ? PackedContext->cbBuffer : 0);
+
+    if (!PackedContext || !PackedContext->pvBuffer ||
+        PackedContext->cbBuffer < SESSION_KEY_SIZE) {
+        tide_log("InitUserModeContext: invalid packed context");
+        return SEC_E_INVALID_TOKEN;
+    }
+
+    PTIDE_USER_CONTEXT uctx = tide_user_ctx_create(
+        ContextHandle, (const UCHAR *)PackedContext->pvBuffer);
+    if (!uctx) {
+        tide_log("InitUserModeContext: too many contexts");
+        return SEC_E_INSUFFICIENT_MEMORY;
+    }
+
+    tide_log("InitUserModeContext: created user-mode context, key=%02x%02x%02x%02x...",
+             uctx->SessionKey[0], uctx->SessionKey[1],
+             uctx->SessionKey[2], uctx->SessionKey[3]);
+    return STATUS_SUCCESS;
+}
+
+/* ── User-mode: SealMessage (EncryptMessage) ────────────────────── */
+
+static NTSTATUS NTAPI TideSsp_SealMessage(
+    ULONG_PTR ContextHandle,
+    ULONG QualityOfProtection,
+    PSecBufferDesc MessageBuffers,
+    ULONG MessageSequenceNumber)
+{
+    (void)QualityOfProtection;
+    (void)MessageSequenceNumber;
+
+    PTIDE_USER_CONTEXT uctx = tide_user_ctx_find(ContextHandle);
+    if (!uctx) {
+        tide_log("SealMessage: context not found");
+        return SEC_E_INVALID_HANDLE;
+    }
+
+    /* Find TOKEN and DATA buffers */
+    PSecBuffer tokenBuf = NULL, dataBuf = NULL;
+    for (ULONG i = 0; i < MessageBuffers->cBuffers; i++) {
+        if (MessageBuffers->pBuffers[i].BufferType == SECBUFFER_TOKEN)
+            tokenBuf = &MessageBuffers->pBuffers[i];
+        else if (MessageBuffers->pBuffers[i].BufferType == SECBUFFER_DATA)
+            dataBuf = &MessageBuffers->pBuffers[i];
+    }
+
+    if (!tokenBuf || !dataBuf || !tokenBuf->pvBuffer || !dataBuf->pvBuffer) {
+        tide_log("SealMessage: missing TOKEN or DATA buffer");
+        return SEC_E_INVALID_TOKEN;
+    }
+    if (tokenBuf->cbBuffer < TIDE_TOKEN_SIZE) {
+        tide_log("SealMessage: TOKEN buffer too small (%u < %u)",
+                 tokenBuf->cbBuffer, TIDE_TOKEN_SIZE);
+        return SEC_E_BUFFER_TOO_SMALL;
+    }
+
+    PUCHAR token = (PUCHAR)tokenBuf->pvBuffer;
+    PUCHAR nonce = token;            /* first 12 bytes */
+    PUCHAR tag   = token + TIDE_GCM_NONCE_SIZE;  /* next 16 bytes */
+
+    tide_log("SealMessage: encrypting %u bytes", dataBuf->cbBuffer);
+
+    NTSTATUS status = tide_gcm_encrypt(
+        uctx->SessionKey,
+        (PUCHAR)dataBuf->pvBuffer, dataBuf->cbBuffer,
+        nonce, tag);
+
+    if (BCRYPT_SUCCESS(status)) {
+        tokenBuf->cbBuffer = TIDE_TOKEN_SIZE;
+        tide_log("SealMessage: OK, nonce=%02x%02x%02x%02x, tag=%02x%02x%02x%02x",
+                 nonce[0],nonce[1],nonce[2],nonce[3],
+                 tag[0],tag[1],tag[2],tag[3]);
+    } else {
+        tide_log("SealMessage: GCM encrypt failed 0x%08X", status);
+    }
+    return status;
+}
+
+/* ── User-mode: UnsealMessage (DecryptMessage) ──────────────────── */
+
+static NTSTATUS NTAPI TideSsp_UnsealMessage(
+    ULONG_PTR ContextHandle,
+    PSecBufferDesc MessageBuffers,
+    ULONG MessageSequenceNumber,
+    PULONG QualityOfProtection)
+{
+    (void)MessageSequenceNumber;
+    if (QualityOfProtection) *QualityOfProtection = 0;
+
+    PTIDE_USER_CONTEXT uctx = tide_user_ctx_find(ContextHandle);
+    if (!uctx) {
+        tide_log("UnsealMessage: context not found");
+        return SEC_E_INVALID_HANDLE;
+    }
+
+    PSecBuffer tokenBuf = NULL, dataBuf = NULL;
+    for (ULONG i = 0; i < MessageBuffers->cBuffers; i++) {
+        if (MessageBuffers->pBuffers[i].BufferType == SECBUFFER_TOKEN)
+            tokenBuf = &MessageBuffers->pBuffers[i];
+        else if (MessageBuffers->pBuffers[i].BufferType == SECBUFFER_DATA)
+            dataBuf = &MessageBuffers->pBuffers[i];
+    }
+
+    if (!tokenBuf || !dataBuf || !tokenBuf->pvBuffer || !dataBuf->pvBuffer)
+        return SEC_E_INVALID_TOKEN;
+    if (tokenBuf->cbBuffer < TIDE_TOKEN_SIZE)
+        return SEC_E_INVALID_TOKEN;
+
+    PUCHAR token = (PUCHAR)tokenBuf->pvBuffer;
+    const UCHAR *nonce = token;
+    const UCHAR *tag   = token + TIDE_GCM_NONCE_SIZE;
+
+    tide_log("UnsealMessage: decrypting %u bytes", dataBuf->cbBuffer);
+
+    NTSTATUS status = tide_gcm_decrypt(
+        uctx->SessionKey,
+        (PUCHAR)dataBuf->pvBuffer, dataBuf->cbBuffer,
+        nonce, tag);
+
+    if (BCRYPT_SUCCESS(status)) {
+        tide_log("UnsealMessage: OK");
+    } else {
+        tide_log("UnsealMessage: GCM decrypt failed 0x%08X (SEC_E_MESSAGE_ALTERED)", status);
+        return (NTSTATUS)SEC_E_MESSAGE_ALTERED;
+    }
+    return STATUS_SUCCESS;
+}
+
+/* ── User-mode: MakeSignature ───────────────────────────────────── */
+
+static NTSTATUS NTAPI TideSsp_MakeSignature(
+    ULONG_PTR ContextHandle,
+    ULONG QualityOfProtection,
+    PSecBufferDesc MessageBuffers,
+    ULONG MessageSequenceNumber)
+{
+    (void)QualityOfProtection;
+    (void)MessageSequenceNumber;
+    /* Use SealMessage with zero-length data trick: encrypt empty, sign the data as AAD.
+     * For simplicity, just use HMAC-SHA-256 truncated to 16 bytes. */
+    PTIDE_USER_CONTEXT uctx = tide_user_ctx_find(ContextHandle);
+    if (!uctx) return SEC_E_INVALID_HANDLE;
+
+    PSecBuffer tokenBuf = NULL, dataBuf = NULL;
+    for (ULONG i = 0; i < MessageBuffers->cBuffers; i++) {
+        if (MessageBuffers->pBuffers[i].BufferType == SECBUFFER_TOKEN)
+            tokenBuf = &MessageBuffers->pBuffers[i];
+        else if (MessageBuffers->pBuffers[i].BufferType == SECBUFFER_DATA)
+            dataBuf = &MessageBuffers->pBuffers[i];
+    }
+    if (!tokenBuf || !dataBuf) return SEC_E_INVALID_TOKEN;
+    if (tokenBuf->cbBuffer < 16) return SEC_E_BUFFER_TOO_SMALL;
+
+    /* HMAC-SHA-256(session_key, data)[0:16] */
+    BCRYPT_ALG_HANDLE hAlg = NULL;
+    BCRYPT_HASH_HANDLE hHash = NULL;
+    UCHAR hmac[32];
+
+    BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_SHA256_ALGORITHM, NULL, BCRYPT_ALG_HANDLE_HMAC_FLAG);
+    BCryptCreateHash(hAlg, &hHash, NULL, 0, uctx->SessionKey, SESSION_KEY_SIZE, 0);
+    BCryptHashData(hHash, (PUCHAR)dataBuf->pvBuffer, dataBuf->cbBuffer, 0);
+    BCryptFinishHash(hHash, hmac, 32, 0);
+    BCryptDestroyHash(hHash);
+    BCryptCloseAlgorithmProvider(hAlg, 0);
+
+    memcpy(tokenBuf->pvBuffer, hmac, 16);
+    tokenBuf->cbBuffer = 16;
+    tide_log("MakeSignature: HMAC over %u bytes", dataBuf->cbBuffer);
+    return STATUS_SUCCESS;
+}
+
+/* ── User-mode: VerifySignature ─────────────────────────────────── */
+
+static NTSTATUS NTAPI TideSsp_VerifySignature(
+    ULONG_PTR ContextHandle,
+    PSecBufferDesc MessageBuffers,
+    ULONG MessageSequenceNumber,
+    PULONG QualityOfProtection)
+{
+    (void)MessageSequenceNumber;
+    if (QualityOfProtection) *QualityOfProtection = 0;
+
+    PTIDE_USER_CONTEXT uctx = tide_user_ctx_find(ContextHandle);
+    if (!uctx) return SEC_E_INVALID_HANDLE;
+
+    PSecBuffer tokenBuf = NULL, dataBuf = NULL;
+    for (ULONG i = 0; i < MessageBuffers->cBuffers; i++) {
+        if (MessageBuffers->pBuffers[i].BufferType == SECBUFFER_TOKEN)
+            tokenBuf = &MessageBuffers->pBuffers[i];
+        else if (MessageBuffers->pBuffers[i].BufferType == SECBUFFER_DATA)
+            dataBuf = &MessageBuffers->pBuffers[i];
+    }
+    if (!tokenBuf || !dataBuf) return SEC_E_INVALID_TOKEN;
+    if (tokenBuf->cbBuffer < 16) return SEC_E_MESSAGE_ALTERED;
+
+    BCRYPT_ALG_HANDLE hAlg = NULL;
+    BCRYPT_HASH_HANDLE hHash = NULL;
+    UCHAR hmac[32];
+
+    BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_SHA256_ALGORITHM, NULL, BCRYPT_ALG_HANDLE_HMAC_FLAG);
+    BCryptCreateHash(hAlg, &hHash, NULL, 0, uctx->SessionKey, SESSION_KEY_SIZE, 0);
+    BCryptHashData(hHash, (PUCHAR)dataBuf->pvBuffer, dataBuf->cbBuffer, 0);
+    BCryptFinishHash(hHash, hmac, 32, 0);
+    BCryptDestroyHash(hHash);
+    BCryptCloseAlgorithmProvider(hAlg, 0);
+
+    if (memcmp(tokenBuf->pvBuffer, hmac, 16) != 0) {
+        tide_log("VerifySignature: MISMATCH");
+        return (NTSTATUS)SEC_E_MESSAGE_ALTERED;
+    }
+    tide_log("VerifySignature: OK");
+    return STATUS_SUCCESS;
+}
+
+/* ── User-mode: QueryContextAttributes ──────────────────────────── */
+
+static NTSTATUS NTAPI TideSsp_UserQueryContextAttributes(
+    ULONG_PTR ContextHandle,
+    ULONG Attribute,
+    PVOID Buffer)
+{
+    (void)ContextHandle;
+    tide_log("User QueryContextAttributes: attr=%u", Attribute);
+
+    if (Attribute == SECPKG_ATTR_SIZES) {
+        PSecPkgContext_Sizes sizes = (PSecPkgContext_Sizes)Buffer;
+        sizes->cbMaxToken = 4096;
+        sizes->cbMaxSignature = 16;           /* HMAC-SHA-256 truncated */
+        sizes->cbBlockSize = 1;               /* GCM has no block alignment */
+        sizes->cbSecurityTrailer = TIDE_TOKEN_SIZE;  /* 28 bytes: nonce+tag */
+        tide_log("User SIZES: trailer=%u, sig=%u", TIDE_TOKEN_SIZE, 16);
+        return STATUS_SUCCESS;
+    }
+    if (Attribute == SECPKG_ATTR_SESSION_KEY) {
+        PTIDE_USER_CONTEXT uctx = tide_user_ctx_find(ContextHandle);
+        if (!uctx) return SEC_E_INVALID_HANDLE;
+        SecPkgContext_SessionKey *sk = (SecPkgContext_SessionKey *)Buffer;
+        PUCHAR key = (PUCHAR)HeapAlloc(GetProcessHeap(), 0, SESSION_KEY_SIZE);
+        if (!key) return SEC_E_INSUFFICIENT_MEMORY;
+        memcpy(key, uctx->SessionKey, SESSION_KEY_SIZE);
+        sk->SessionKeyLength = SESSION_KEY_SIZE;
+        sk->SessionKey = key;
+        return STATUS_SUCCESS;
+    }
+    return SEC_E_UNSUPPORTED_FUNCTION;
+}
+
+/* ── User-mode: DeleteContext ───────────────────────────────────── */
+
+static NTSTATUS NTAPI TideSsp_DeleteUserModeContext(ULONG_PTR ContextHandle)
+{
+    tide_log("DeleteUserModeContext: handle=%p", (void*)ContextHandle);
+    tide_user_ctx_delete(ContextHandle);
+    return STATUS_SUCCESS;
+}
+
+/* ── User-mode function table ───────────────────────────────────── */
+
+static SECPKG_USER_FUNCTION_TABLE TideSSP_UserFunctionTable = {
+    (SpInstanceInitFn *)TideSsp_InstanceInit,
+    (SpInitUserModeContextFn *)TideSsp_InitUserModeContext,
+    (SpMakeSignatureFn *)TideSsp_MakeSignature,
+    (SpVerifySignatureFn *)TideSsp_VerifySignature,
+    (SpSealMessageFn *)TideSsp_SealMessage,
+    (SpUnsealMessageFn *)TideSsp_UnsealMessage,
+    NULL, /* GetContextToken */
+    (SpQueryContextAttributesFn *)TideSsp_UserQueryContextAttributes,
+    NULL, /* CompleteAuthToken */
+    (SpDeleteContextFn *)TideSsp_DeleteUserModeContext,
+    NULL, /* FormatCredentials */
+    NULL, /* MarshallSupplementalCreds */
+    NULL, /* ExportContext */
+    NULL, /* ImportContext */
+};
+
+/* ── SpUserModeInitialize export ────────────────────────────────── */
+
+NTSTATUS NTAPI SpUserModeInitialize(
+    ULONG LsaVersion,
+    PULONG PackageVersion,
+    PSECPKG_USER_FUNCTION_TABLE *ppTables,
+    PULONG pcTables)
+{
+    (void)LsaVersion;
+    tide_log("SpUserModeInitialize called");
+    *PackageVersion = SECPKG_INTERFACE_VERSION;
+    *ppTables = &TideSSP_UserFunctionTable;
+    *pcTables = 1;
+    return STATUS_SUCCESS;
 }
 
 /* ══════════════════════════════════════════════════════════════════

@@ -21,7 +21,7 @@
  */
 
 import type { TLSSocket } from "tls";
-import { createHash, randomBytes } from "crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes, X509Certificate } from "crypto";
 import {
   encodeSequence,
   encodeExplicit,
@@ -322,23 +322,58 @@ export async function performCredSSP(
   console.log("[CredSSP] SPNEGO/NEGOEX authentication complete");
 
   // ── Step 5: Send pubKeyAuth (TLS channel binding) ──
+  //
+  // CredSSP v6: pubKeyAuth = EncryptMessage(SHA-256("CredSSP Client-To-Server Binding Hash\0" + nonce + SHA-256(serverCertRaw)))
 
-  const serverPubKey = extractTlsPublicKey(tlsSocket);
-  const pubKeyAuth = buildPubKeyAuth(serverPubKey);
-  const tsReq3 = buildTSRequest(CREDSSP_VERSION, undefined, undefined, pubKeyAuth);
+  const serverCertRaw = extractTlsServerCert(tlsSocket);
+  // Extract SubjectPublicKeyInfo DER from the certificate (per MS-CSSP spec)
+  const x509 = new X509Certificate(serverCertRaw);
+  const spkiDer = Buffer.from(x509.publicKey.export({ type: "spki", format: "der" }));
+  const certHash = createHash("sha256").update(spkiDer).digest();
+  const clientHashInput = Buffer.concat([
+    Buffer.from("CredSSP Client-To-Server Binding Hash\0", "ascii"),
+    clientNonce,
+    certHash,
+  ]);
+  const clientHashEncData = createHash("sha256").update(clientHashInput).digest();
+  console.log(`[CredSSP] pubKeyAuth plaintext (${clientHashEncData.length}b): ${clientHashEncData.toString("hex")}`);
+
+  const pubKeyAuth = tideGcmEncrypt(sessionKey, clientHashEncData);
+  console.log(`[CredSSP] pubKeyAuth encrypted (${pubKeyAuth.length}b): ${pubKeyAuth.toString("hex").substring(0, 60)}...`);
+  const tsReq3 = buildTSRequest(CREDSSP_VERSION, undefined, undefined, pubKeyAuth, clientNonce);
   tlsSocket.write(tsReq3);
+  console.log("[CredSSP] Sent pubKeyAuth (CredSSP v6 hash binding)");
 
   // ── Step 6: Read pubKeyAuth confirmation ──
 
   const tsResp3 = await readTSRequest(tlsSocket);
+  console.log(`[CredSSP] Server step6: version=${tsResp3.version}, errorCode=${tsResp3.errorCode ?? "none"}, hasPubKeyAuth=${!!tsResp3.pubKeyAuth}`);
+  if (tsResp3.errorCode) {
+    throw new Error(`CredSSP: server error during pubKeyAuth 0x${tsResp3.errorCode.toString(16)}`);
+  }
   if (!tsResp3.pubKeyAuth) {
     throw new Error("CredSSP: server did not return pubKeyAuth confirmation");
   }
 
+  // Verify server's pubKeyAuth (SHA-256("CredSSP Server-To-Client Binding Hash\0" + nonce + certHash))
+  const serverHashInput = Buffer.concat([
+    Buffer.from("CredSSP Server-To-Client Binding Hash\0", "ascii"),
+    clientNonce,
+    certHash,
+  ]);
+  const expectedServerHash = createHash("sha256").update(serverHashInput).digest();
+  const serverPubKeyAuth = tideGcmDecrypt(sessionKey, tsResp3.pubKeyAuth);
+  if (!serverPubKeyAuth.equals(expectedServerHash)) {
+    console.log(`[CredSSP] Server pubKeyAuth mismatch! expected=${expectedServerHash.toString("hex")}, got=${serverPubKeyAuth.toString("hex")}`);
+    throw new Error("CredSSP: server pubKeyAuth hash mismatch");
+  }
+  console.log("[CredSSP] Server pubKeyAuth verified OK");
+
   // ── Step 7: Send authInfo (TSCredentials) ──
 
-  const authInfo = buildAuthInfo(username);
-  const tsReq4 = buildTSRequest(CREDSSP_VERSION, undefined, authInfo);
+  const authInfoPlain = buildAuthInfo(username);
+  const authInfoEnc = tideGcmEncrypt(sessionKey, authInfoPlain);
+  const tsReq4 = buildTSRequest(CREDSSP_VERSION, undefined, authInfoEnc, undefined, clientNonce);
   tlsSocket.write(tsReq4);
 
   console.log("[CredSSP] NLA authentication completed successfully");
@@ -616,7 +651,7 @@ function extractNegoToken(tsReq: TSRequestData): Buffer | null {
 
 // ── TLS Channel Binding ─────────────────────────────────────────
 
-function extractTlsPublicKey(tlsSocket: TLSSocket): Buffer {
+function extractTlsServerCert(tlsSocket: TLSSocket): Buffer {
   const cert = tlsSocket.getPeerCertificate();
   if (!cert || !cert.raw) {
     throw new Error("CredSSP: cannot get server TLS certificate");
@@ -624,8 +659,29 @@ function extractTlsPublicKey(tlsSocket: TLSSocket): Buffer {
   return cert.raw;
 }
 
-function buildPubKeyAuth(serverPubKey: Buffer): Buffer {
-  return serverPubKey;
+// ── TideSSP AES-128-GCM encryption (matches TideSSP SealMessage) ──
+//
+// Wire format: [12-byte nonce] [16-byte GCM tag] [ciphertext]
+// Key: raw 16-byte session key
+
+function tideGcmEncrypt(key: Buffer, plaintext: Buffer): Buffer {
+  const nonce = randomBytes(12);
+  const cipher = createCipheriv("aes-128-gcm", key, nonce);
+  const encrypted = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  const tag = cipher.getAuthTag(); // 16 bytes
+  return Buffer.concat([nonce, tag, encrypted]);
+}
+
+function tideGcmDecrypt(key: Buffer, data: Buffer): Buffer {
+  if (data.length < 28) {
+    throw new Error("tideGcmDecrypt: data too short");
+  }
+  const nonce = data.subarray(0, 12);
+  const tag = data.subarray(12, 28);
+  const ciphertext = data.subarray(28);
+  const decipher = createDecipheriv("aes-128-gcm", key, nonce);
+  decipher.setAuthTag(tag);
+  return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
 }
 
 // ── Auth Info ───────────────────────────────────────────────────
