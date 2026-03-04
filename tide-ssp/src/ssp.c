@@ -380,7 +380,18 @@ static NTSTATUS NTAPI TideSsp_QueryMetaData(
     (void)CredentialHandle;
     (void)TargetName;
     (void)ContextRequirements;
-    (void)ContextHandle;
+
+    /* MS-NEGOEX: QueryMetaData should create a security context handle.
+     * NegoExtender uses it for subsequent calls (QueryContextAttributes, etc.) */
+    if (ContextHandle) {
+        PTIDE_CONTEXT ctx = (PTIDE_CONTEXT)HeapAlloc(
+            GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(TIDE_CONTEXT));
+        if (ctx) {
+            ctx->State = 0; /* awaiting NEGOTIATE */
+            *ContextHandle = (LSA_SEC_HANDLE)ctx;
+        }
+    }
+
     if (MetaDataLength) *MetaDataLength = 0;
     if (MetaData) *MetaData = NULL;
     return STATUS_SUCCESS;
@@ -410,6 +421,11 @@ static NTSTATUS NTAPI TideSsp_ExchangeMetaData(
  *  Query/Set Context Attributes (with session key support)
  * ══════════════════════════════════════════════════════════════════ */
 
+/* SECPKG_ATTR_NEGO_KEYS — queried by NegoExtender for NEGOEX VERIFY checksum */
+#ifndef SECPKG_ATTR_NEGO_KEYS
+#define SECPKG_ATTR_NEGO_KEYS 22
+#endif
+
 static NTSTATUS NTAPI TideSsp_QueryContextAttributes(LSA_SEC_HANDLE h, ULONG attr, PVOID buf) {
     if (attr == SECPKG_ATTR_SIZES) {
         PSecPkgContext_Sizes sizes = (PSecPkgContext_Sizes)buf;
@@ -419,11 +435,16 @@ static NTSTATUS NTAPI TideSsp_QueryContextAttributes(LSA_SEC_HANDLE h, ULONG att
         sizes->cbSecurityTrailer = 0;
         return STATUS_SUCCESS;
     }
-    if (attr == SECPKG_ATTR_SESSION_KEY) {
+    if (attr == SECPKG_ATTR_SESSION_KEY || attr == SECPKG_ATTR_NEGO_KEYS) {
+        /* Both SESSION_KEY and NEGO_KEYS use SecPkgContext_SessionKey layout */
         PTIDE_CONTEXT ctx = (PTIDE_CONTEXT)h;
-        if (!ctx || !ctx->SessionKeyValid)
-            return SEC_E_INVALID_HANDLE;
         SecPkgContext_SessionKey *sk = (SecPkgContext_SessionKey *)buf;
+        if (!ctx || !ctx->SessionKeyValid) {
+            /* No key yet (pre-authentication) — return success with empty key */
+            sk->SessionKeyLength = 0;
+            sk->SessionKey = NULL;
+            return STATUS_SUCCESS;
+        }
         sk->SessionKeyLength = SESSION_KEY_SIZE;
         /* Allocate key buffer from LSA heap */
         if (LsaDispatch && LsaDispatch->AllocateLsaHeap) {
@@ -435,54 +456,60 @@ static NTSTATUS NTAPI TideSsp_QueryContextAttributes(LSA_SEC_HANDLE h, ULONG att
         memcpy(sk->SessionKey, ctx->SessionKey, SESSION_KEY_SIZE);
         return STATUS_SUCCESS;
     }
-    return STATUS_NOT_IMPLEMENTED;
+    /* Encode the attribute number in the error so we can identify it from gateway logs.
+     * Error = 0xC0090000 | attr → unique per attribute. */
+    return (NTSTATUS)(0xC0090000L | (attr & 0xFFFF));
 }
 
 /* ══════════════════════════════════════════════════════════════════
  *  Stubs for required but unused functions
+ *
+ *  Each returns a UNIQUE error code so we can identify which function
+ *  NegoExtender is calling from the CredSSP errorCode in gateway logs.
+ *  Map: errorCode → function name, to debug the failing call.
  * ══════════════════════════════════════════════════════════════════ */
 
-static NTSTATUS NTAPI TideSsp_LogonUser(void *a,void *b,void *c,void *d,void *e,void *f,void *g,void *h,void *i,void *j,void *k,void *l,void *m,void *n) {
+/* 0x80090301 */ static NTSTATUS NTAPI TideSsp_LogonUser(void *a,void *b,void *c,void *d,void *e,void *f,void *g,void *h,void *i,void *j,void *k,void *l,void *m,void *n) {
     (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h;(void)i;(void)j;(void)k;(void)l;(void)m;(void)n;
-    return STATUS_NOT_IMPLEMENTED;
+    return (NTSTATUS)0x80090301L; /* SEC_E_INVALID_HANDLE → LogonUser */
 }
 
-static NTSTATUS NTAPI TideSsp_CallPackage(void *a, void *b, void *c, void *d, void *e, void *f) {
+/* 0x80090306 */ static NTSTATUS NTAPI TideSsp_CallPackage(void *a, void *b, void *c, void *d, void *e, void *f) {
     (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;
-    return STATUS_NOT_IMPLEMENTED;
+    return (NTSTATUS)0x80090306L; /* SEC_E_NOT_OWNER → CallPackage */
 }
 
 static void NTAPI TideSsp_LogonTerminated(PLUID LogonId) {
     (void)LogonId;
 }
 
-static NTSTATUS NTAPI TideSsp_CallPackageUntrusted(void *a, void *b, void *c, void *d, void *e, void *f) {
+/* 0x80090307 */ static NTSTATUS NTAPI TideSsp_CallPackageUntrusted(void *a, void *b, void *c, void *d, void *e, void *f) {
     (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;
-    return STATUS_NOT_IMPLEMENTED;
+    return (NTSTATUS)0x80090307L; /* SEC_E_CANNOT_INSTALL → CallPackageUntrusted */
 }
 
-static NTSTATUS NTAPI TideSsp_CallPackagePassthrough(void *a, void *b, void *c, void *d, void *e, void *f) {
+/* 0x80090309 */ static NTSTATUS NTAPI TideSsp_CallPackagePassthrough(void *a, void *b, void *c, void *d, void *e, void *f) {
     (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;
-    return STATUS_NOT_IMPLEMENTED;
+    return (NTSTATUS)0x80090309L; /* SEC_E_CANNOT_PACK → CallPackagePassthrough */
 }
 
-static NTSTATUS NTAPI TideSsp_LogonUserEx(void *a,void *b,void *c,void *d,void *e,void *f,void *g,void *h,void *i,void *j,void *k,void *l,void *m,void *n,void *o) {
+/* 0x8009030A */ static NTSTATUS NTAPI TideSsp_LogonUserEx(void *a,void *b,void *c,void *d,void *e,void *f,void *g,void *h,void *i,void *j,void *k,void *l,void *m,void *n,void *o) {
     (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h;(void)i;(void)j;(void)k;(void)l;(void)m;(void)n;(void)o;
-    return STATUS_NOT_IMPLEMENTED;
+    return (NTSTATUS)0x8009030AL; /* SEC_E_QOP_NOT_SUPPORTED → LogonUserEx */
 }
 
-static NTSTATUS NTAPI TideSsp_LogonUserEx2(void *a,void *b,void *c,void *d,void *e,void *f,void *g,void *h,void *i,void *j,void *k,void *l,void *m,void *n,void *o,void *p) {
+/* 0x8009030B */ static NTSTATUS NTAPI TideSsp_LogonUserEx2(void *a,void *b,void *c,void *d,void *e,void *f,void *g,void *h,void *i,void *j,void *k,void *l,void *m,void *n,void *o,void *p) {
     (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h;(void)i;(void)j;(void)k;(void)l;(void)m;(void)n;(void)o;(void)p;
-    return STATUS_NOT_IMPLEMENTED;
+    return (NTSTATUS)0x8009030BL; /* SEC_E_NO_IMPERSONATION → LogonUserEx2 */
 }
 
-static NTSTATUS NTAPI TideSsp_InitLsaModeContext(
+/* 0x8009030C */ static NTSTATUS NTAPI TideSsp_InitLsaModeContext(
     LSA_SEC_HANDLE a, LSA_SEC_HANDLE b, PUNICODE_STRING c,
     ULONG d, ULONG e, PSecBufferDesc f, PLSA_SEC_HANDLE g,
     PSecBufferDesc h, PULONG i, PTimeStamp j, PBOOLEAN k, PSecBuffer l)
 {
     (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h;(void)i;(void)j;(void)k;(void)l;
-    return STATUS_NOT_IMPLEMENTED;
+    return (NTSTATUS)0x8009030CL; /* SEC_E_LOGON_DENIED → InitLsaModeContext */
 }
 
 static NTSTATUS NTAPI TideSsp_AcquireCredentialsHandle(
@@ -500,34 +527,34 @@ static NTSTATUS NTAPI TideSsp_FreeCredentialsHandle(LSA_SEC_HANDLE h) {
     return STATUS_SUCCESS;
 }
 
-static NTSTATUS NTAPI TideSsp_QueryCredentialsAttributes(LSA_SEC_HANDLE h, ULONG a, PVOID b) {
+/* 0x8009030D */ static NTSTATUS NTAPI TideSsp_QueryCredentialsAttributes(LSA_SEC_HANDLE h, ULONG a, PVOID b) {
     (void)h;(void)a;(void)b;
-    return STATUS_NOT_IMPLEMENTED;
+    return (NTSTATUS)0x8009030DL; /* SEC_E_UNKNOWN_CREDENTIALS → QueryCredentialsAttributes */
 }
 
-static NTSTATUS NTAPI TideSsp_SaveCredentials(LSA_SEC_HANDLE a, PSecBuffer b) {
+/* 0x80090310 */ static NTSTATUS NTAPI TideSsp_SaveCredentials(LSA_SEC_HANDLE a, PSecBuffer b) {
     (void)a;(void)b;
-    return STATUS_NOT_IMPLEMENTED;
+    return (NTSTATUS)0x80090310L; /* SEC_E_OUT_OF_SEQUENCE → SaveCredentials */
 }
 
-static NTSTATUS NTAPI TideSsp_GetCredentials(LSA_SEC_HANDLE a, PSecBuffer b) {
+/* 0x80090311 */ static NTSTATUS NTAPI TideSsp_GetCredentials(LSA_SEC_HANDLE a, PSecBuffer b) {
     (void)a;(void)b;
-    return STATUS_NOT_IMPLEMENTED;
+    return (NTSTATUS)0x80090311L; /* SEC_E_NO_AUTHENTICATING_AUTHORITY → GetCredentials */
 }
 
-static NTSTATUS NTAPI TideSsp_DeleteCredentials(LSA_SEC_HANDLE a, PSecBuffer b) {
+/* 0x80090312 */ static NTSTATUS NTAPI TideSsp_DeleteCredentials(LSA_SEC_HANDLE a, PSecBuffer b) {
     (void)a;(void)b;
-    return STATUS_NOT_IMPLEMENTED;
+    return (NTSTATUS)0x80090312L; /* SEC_E_BAD_PKGID → DeleteCredentials */
 }
 
-static NTSTATUS NTAPI TideSsp_SetContextAttributes(LSA_SEC_HANDLE h, ULONG a, PVOID b, ULONG c) {
+/* 0x80090313 */ static NTSTATUS NTAPI TideSsp_SetContextAttributes(LSA_SEC_HANDLE h, ULONG a, PVOID b, ULONG c) {
     (void)h;(void)a;(void)b;(void)c;
-    return STATUS_NOT_IMPLEMENTED;
+    return (NTSTATUS)0x80090313L; /* SEC_E_CONTEXT_EXPIRED → SetContextAttributes */
 }
 
-static NTSTATUS NTAPI TideSsp_ApplyControlToken(LSA_SEC_HANDLE h, PSecBufferDesc b) {
+/* 0x80090317 */ static NTSTATUS NTAPI TideSsp_ApplyControlToken(LSA_SEC_HANDLE h, PSecBufferDesc b) {
     (void)h;(void)b;
-    return STATUS_NOT_IMPLEMENTED;
+    return (NTSTATUS)0x80090317L; /* SEC_E_INCOMPLETE_MESSAGE → ApplyControlToken */
 }
 
 /* ══════════════════════════════════════════════════════════════════

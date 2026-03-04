@@ -164,7 +164,10 @@ export async function performCredSSP(
     );
     transcript.push(apReqMsg);
 
+    console.log(`[CredSSP] NEGOEX AP_REQUEST: ${apReqMsg.length} bytes, hex: ${apReqMsg.toString("hex")}`);
+    console.log(`[CredSSP] Inner TideSSP token: ${negotiateToken.length} bytes, hex: ${negotiateToken.toString("hex")}`);
     const spnegoResp1 = buildSpnegoResponse(apReqMsg);
+    console.log(`[CredSSP] SPNEGO NegTokenResp: ${spnegoResp1.length} bytes, hex: ${spnegoResp1.toString("hex")}`);
     const tsReq1b = buildTSRequest(CREDSSP_VERSION, spnegoResp1);
     tlsSocket.write(tsReq1b);
 
@@ -340,19 +343,20 @@ function buildSpnegoInit(mechToken: Buffer): Buffer {
 }
 
 /**
- * Build a SPNEGO NegTokenResp (subsequent token).
+ * Build a SPNEGO NegTokenResp (subsequent token from the initiator/client).
+ *
+ * Per RFC 4178, the client's continuation should only include responseToken.
+ * negState is only set by the acceptor (server).
  *
  * NegTokenResp ::= SEQUENCE {
- *   negState   [0] ENUMERATED OPTIONAL,
+ *   negState      [0] ENUMERATED OPTIONAL,  -- server only
  *   supportedMech [1] OID OPTIONAL,
  *   responseToken [2] OCTET STRING OPTIONAL
  * }
  */
 function buildSpnegoResponse(responseToken: Buffer): Buffer {
   const elements: Buffer[] = [];
-  // negState [0] ENUMERATED accept-incomplete (1)
-  elements.push(encodeExplicit(0, encodeTlv(0x0a, Buffer.from([0x01]))));
-  // responseToken [2] OCTET STRING (contains concatenated NEGOEX messages)
+  // responseToken [2] OCTET STRING only — no negState from client
   elements.push(encodeExplicit(2, encodeOctetString(responseToken)));
 
   const negTokenResp = encodeSequence(elements);
