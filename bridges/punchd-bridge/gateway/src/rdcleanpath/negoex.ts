@@ -477,8 +477,11 @@ export const CHECKSUM_TYPE_HMAC_SHA1_96_AES128 = 15;
 
 /**
  * Compute hmac-sha1-96-aes128 checksum (RFC 3962, type 15).
- * 1. Ki = DK(base_key, pack_be32(keyUsage) || 0x55)
- * 2. checksum = HMAC-SHA1(Ki, data)[0:12]
+ * 1. Kc = DK(base_key, pack_be32(keyUsage) || 0x99)
+ * 2. checksum = HMAC-SHA1(Kc, data)[0:12]
+ *
+ * RFC 3961 Section 3: standalone checksums use Kc (0x99),
+ * NOT Ki (0x55) which is for integrity inside encryption.
  *
  * @param sessionKey - 16-byte AES-128 session key
  * @param keyUsage - 23 for initiator, 25 for acceptor
@@ -491,10 +494,10 @@ export function computeAes128Checksum(
 ): Buffer {
   const constant = Buffer.alloc(5);
   constant.writeUInt32BE(keyUsage, 0);
-  constant[4] = 0x55; // 0x55 = integrity key derivation
+  constant[4] = 0x99; // 0x99 = checksum key derivation (Kc)
 
-  const ki = dk(sessionKey, constant);
-  return createHmac("sha1", ki).update(data).digest().subarray(0, 12);
+  const kc = dk(sessionKey, constant);
+  return createHmac("sha1", kc).update(data).digest().subarray(0, 12);
 }
 
 /**
