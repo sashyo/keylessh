@@ -540,7 +540,7 @@ static NTSTATUS NTAPI TideSsp_ApplyControlToken(LSA_SEC_HANDLE h, PSecBufferDesc
 
 SECPKG_FUNCTION_TABLE TideSSP_FunctionTable = {
     /* V1 — basic SSP */
-    .InitializePackage          = (PLSA_AP_INITIALIZE_PACKAGE)TideSsp_Initialize,
+    .InitializePackage          = NULL,
     .LogonUser                  = NULL,
     .CallPackage                = (PLSA_AP_CALL_PACKAGE)TideSsp_CallPackage,
     .LogonTerminated            = (PLSA_AP_LOGON_TERMINATED)TideSsp_LogonTerminated,

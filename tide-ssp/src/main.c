@@ -13,6 +13,14 @@
 #include <ntsecapi.h>
 #include <ntsecpkg.h>
 
+/* V5 interface version — needed for NegoExtender (QueryMetaData etc.) */
+#ifndef SECPKG_INTERFACE_VERSION_3
+#define SECPKG_INTERFACE_VERSION_3 0x00040000
+#endif
+#ifndef SECPKG_INTERFACE_VERSION_5
+#define SECPKG_INTERFACE_VERSION_5 0x00100000
+#endif
+
 /* Implemented in ssp.c */
 extern SECPKG_FUNCTION_TABLE TideSSP_FunctionTable;
 
@@ -40,7 +48,7 @@ NTSTATUS NTAPI SpLsaModeInitialize(
     PULONG pcTables)
 {
     (void)LsaVersion;
-    *PackageVersion = SECPKG_INTERFACE_VERSION;
+    *PackageVersion = SECPKG_INTERFACE_VERSION_5;
     *ppTables = &TideSSP_FunctionTable;
     *pcTables = 1;
     return STATUS_SUCCESS;

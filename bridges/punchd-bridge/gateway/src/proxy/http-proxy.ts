@@ -42,7 +42,7 @@ import {
 export interface ProxyOptions {
   listenPort: number;
   backendUrl: string;
-  backends?: { name: string; url: string; protocol?: string; noAuth?: boolean; stripAuth?: boolean }[];
+  backends?: { name: string; url: string; protocol?: string; auth?: string; noAuth?: boolean; stripAuth?: boolean }[];
   auth: TidecloakAuth;
   stripAuthHeader: boolean;
   tcConfig: TidecloakConfig;
@@ -694,12 +694,18 @@ export function createProxy(options: ProxyOptions): {
         const proto = isTls ? "https" : "http";
         const host = req.headers.host || "localhost";
         const wsProto = isTls ? "wss" : "ws";
+        // Build backend auth map so clients know which backends use EdDSA
+        const backendAuthMap: Record<string, string> = {};
+        for (const b of options.backends ?? []) {
+          if (b.auth) backendAuthMap[b.name] = b.auth;
+        }
         const webrtcConfig: Record<string, unknown> = {
           signalingUrl: `${wsProto}://${host}`,
           stunServer: options.iceServers?.[0]
             ? `stun:${options.iceServers[0].replace("stun:", "")}`
             : null,
           targetGatewayId: options.gatewayId || undefined,
+          backendAuth: backendAuthMap,
         };
         if (options.turnServer && options.turnSecret) {
           // Only serve TURN credentials to authenticated users

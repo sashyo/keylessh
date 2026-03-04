@@ -465,7 +465,23 @@
       // Install WebSocket shim now that the DataChannel is open
       installWebSocketShim();
       setStatus("connecting", "DataChannel open, ready to connect...");
-      showConnectForm();
+
+      // For EdDSA backends, auto-connect using username from JWT (no password needed)
+      var backendAuth = config && config.backendAuth && config.backendAuth[backendName];
+      if (backendAuth === "eddsa" && sessionToken) {
+        try {
+          var jwtParts = sessionToken.split(".");
+          var jwtPayload = JSON.parse(atob(jwtParts[1].replace(/-/g, "+").replace(/_/g, "/")));
+          var jwtUsername = jwtPayload.preferred_username || jwtPayload.sub || "user";
+          console.log("[RDP] EdDSA backend — auto-connecting as:", jwtUsername);
+          startRdpSession(jwtUsername, "");
+        } catch (e) {
+          console.warn("[RDP] Failed to extract username from JWT, showing form:", e);
+          showConnectForm();
+        }
+      } else {
+        showConnectForm();
+      }
     };
 
     controlChannel.onmessage = function (event) {
