@@ -601,7 +601,7 @@
           var reqId = msg.id;
           var wsId = msg.wsId;
           var keyPair = scKeyPairs.get(wsId);
-          if (!keyPair) { console.error("[SmartCard] No key pair for wsId:", wsId); break; }
+          if (!keyPair) { console.error("[SmartCard] No key pair for wsId:", wsId); return; }
           var tbsCert = Uint8Array.from(atob(msg.tbsCert), function (c) { return c.charCodeAt(0); });
           console.log("[SmartCard] Signing TBSCertificate:", tbsCert.length, "bytes");
           Promise.all([
@@ -629,7 +629,7 @@
           var reqId = msg.id;
           var wsId = msg.wsId;
           var keyPair = scKeyPairs.get(wsId);
-          if (!keyPair) { console.error("[SmartCard] No key pair for wsId:", wsId); break; }
+          if (!keyPair) { console.error("[SmartCard] No key pair for wsId:", wsId); return; }
           var hash = Uint8Array.from(atob(msg.hash), function (c) { return c.charCodeAt(0); });
           console.log("[SmartCard] Signing hash:", hash.length, "bytes, algorithm:", msg.algorithm);
           crypto.subtle.sign("RSASSA-PKCS1-v1_5", keyPair.privateKey, hash).then(function (sig) {
