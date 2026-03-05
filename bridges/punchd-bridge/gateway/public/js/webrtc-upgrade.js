@@ -504,6 +504,7 @@
     }
 
     function handleDcMessage(msg) {
+      console.log("[WebRTC] handleDcMessage:", msg.type, msg.id || "");
       if (msg.type === "capabilities") {
         // Gateway capability response — store features for deferred activation
         if (capabilityTimer) { clearTimeout(capabilityTimer); capabilityTimer = null; }

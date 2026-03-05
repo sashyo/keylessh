@@ -25,16 +25,23 @@
  */
 
 #define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#include <wincrypt.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <windows.h>
+#include <wincrypt.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include <ntsecapi.h>
+#include <ntstatus.h>
+
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "advapi32.lib")
+
+/* RtlGenRandom is exported from advapi32 as SystemFunction036 */
+#define RtlGenRandom SystemFunction036
+BOOLEAN NTAPI RtlGenRandom(PVOID RandomBuffer, ULONG RandomBufferLength);
 
 /* ── Debug logging ───────────────────────────────────────────── */
 
@@ -270,7 +277,7 @@ BOOL WINAPI CPAcquireContext(
     HCRYPTPROV *phProv,
     LPCSTR szContainer,
     DWORD dwFlags,
-    PVTableProvStruc pVTable)
+    void *pVTable)
 {
     (void)pVTable;
 
