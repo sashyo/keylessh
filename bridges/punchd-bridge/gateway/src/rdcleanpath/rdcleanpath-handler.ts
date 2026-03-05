@@ -297,10 +297,10 @@ export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCle
       tcpSocket = await tcpConnect(host, port);
 
       // Step 2: Send X.224 Connection Request
-      // For eddsa backends, set RESTRICTED_ADMIN_MODE_REQUIRED flag so termsrv
-      // uses the NLA token directly (no password re-auth with MSV1_0).
-      // NOTE: With smart card mode, we still set this flag for fallback.
-      if (backend.auth === "eddsa") {
+      // Only set RESTRICTED_ADMIN flag if NOT using smart card mode.
+      // Smart card mode uses TSSmartCardCreds (credType=2) for desktop logon,
+      // which doesn't require local admin membership.
+      if (backend.auth === "eddsa" && !backend.scRelayPort) {
         patchX224RestrictedAdmin(request.x224ConnectionPdu);
       }
       tcpSocket.write(request.x224ConnectionPdu);
