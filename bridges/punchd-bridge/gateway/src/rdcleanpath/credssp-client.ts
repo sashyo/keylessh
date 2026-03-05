@@ -379,7 +379,9 @@ export async function performCredSSP(
 
   // ── Step 7: Send authInfo (TSCredentials) ──
 
-  const authInfoPlain = buildAuthInfo(username, password);
+  console.log(`[CredSSP] TSCredentials: user="${username}", domain=".", passLen=${password ? password.length : 0}`);
+  const authInfoPlain = buildAuthInfo(username, password, ".");
+  console.log(`[CredSSP] authInfo plaintext: ${authInfoPlain.length} bytes, hex=${authInfoPlain.toString("hex")}`);
   const authInfoEnc = tideGcmEncrypt(sessionKey, authInfoPlain);
   const tsReq4 = buildTSRequest(CREDSSP_VERSION, undefined, authInfoEnc, undefined, clientNonce);
   tlsSocket.write(tsReq4);
@@ -795,8 +797,8 @@ function tideGcmDecrypt(key: Buffer, data: Buffer): Buffer {
 
 // ── Auth Info ───────────────────────────────────────────────────
 
-function buildAuthInfo(username: string, password?: string): Buffer {
-  const domainName = Buffer.alloc(0);
+function buildAuthInfo(username: string, password?: string, domain?: string): Buffer {
+  const domainName = Buffer.from(domain || ".", "utf-16le");
   const userBytes = Buffer.from(username, "utf-16le");
   const passBytes = password ? Buffer.from(password, "utf-16le") : Buffer.alloc(0);
 
