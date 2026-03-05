@@ -1,0 +1,54 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "namePrefix": {
+      "value": "keylessh"
+    },
+    "location": {
+      "value": "[resourceGroup().location]"
+    },
+    "keylesshImage": {
+      "value": "tideorg/keylessh:latest"
+    },
+    "bridgeImage": {
+      "value": "tideorg/keylessh-bridge:latest"
+    },
+    "tidecloakConfigB64": {
+      "value": ""
+    },
+    "stripeSecretKey": {
+      "value": ""
+    },
+    "stripeWebhookSecret": {
+      "value": ""
+    },
+    "environmentSku": {
+      "value": "Consumption"
+    },
+    "keylesshCpu": {
+      "value": "0.5"
+    },
+    "keylesshMemory": {
+      "value": "1Gi"
+    },
+    "bridgeCpu": {
+      "value": "0.25"
+    },
+    "bridgeMemory": {
+      "value": "0.5Gi"
+    },
+    "keylesshMinReplicas": {
+      "value": 1
+    },
+    "keylesshMaxReplicas": {
+      "value": 3
+    },
+    "bridgeMinReplicas": {
+      "value": 0
+    },
+    "bridgeMaxReplicas": {
+      "value": 100
+    }
+  }
+}

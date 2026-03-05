@@ -4,8 +4,8 @@ on:
   workflow_dispatch:
 
 env:
-  AZURE_WEBAPP_NAME: keylessh-app    # Change this to match your App Service name
-  NODE_VERSION: '20.x'
+  AZURE_WEBAPP_NAME: keylessh
+  NODE_VERSION: '22.x'
 
 jobs:
   build-and-deploy:
@@ -34,6 +34,9 @@ jobs:
 
           # Copy build output
           cp -r dist deploy/
+
+          # Copy data folder (contains tidecloak.json config)
+          cp -r data deploy/
 
           # Copy package files for production dependencies
           cp package.json deploy/
