@@ -174,6 +174,11 @@ export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCle
       tcpSocket = await tcpConnect(host, port);
 
       // Step 2: Send X.224 Connection Request
+      // For eddsa backends, set RESTRICTED_ADMIN_MODE_REQUIRED flag so termsrv
+      // uses the NLA token directly (no password re-auth with MSV1_0).
+      if (backend.auth === "eddsa") {
+        patchX224RestrictedAdmin(request.x224ConnectionPdu);
+      }
       tcpSocket.write(request.x224ConnectionPdu);
 
       // Step 3: Read X.224 Connection Confirm (TPKT-framed)
@@ -537,6 +542,30 @@ function readExactBytes(sock: TLSSocket, n: number): Promise<Buffer> {
       reject(new Error(`Socket closed (wanted ${n} bytes, got ${got})`));
     });
   });
+}
+
+/**
+ * Patch X.224 Connection Request to set RESTRICTED_ADMIN_MODE_REQUIRED flag.
+ *
+ * RDP_NEG_REQ (8 bytes at end of X.224 CR):
+ *   [type=0x01] [flags] [length=0x08,0x00] [requestedProtocols (4 bytes LE)]
+ *
+ * Flag 0x01 = RESTRICTED_ADMIN_MODE_REQUIRED — tells termsrv to use the NLA
+ * token (SECPKG_ATTR_ACCESS_TOKEN) directly for the desktop session instead
+ * of re-authenticating with MSV1_0 + password from TSCredentials.
+ */
+function patchX224RestrictedAdmin(pdu: Buffer): void {
+  // RDP_NEG_REQ is the last 8 bytes of the X.224 Connection Request.
+  // Identify by type=0x01 and length=0x0008.
+  for (let i = pdu.length - 8; i >= 4; i--) {
+    if (pdu[i] === 0x01 && pdu[i + 2] === 0x08 && pdu[i + 3] === 0x00) {
+      const oldFlags = pdu[i + 1];
+      pdu[i + 1] = oldFlags | 0x01; // RESTRICTED_ADMIN_MODE_REQUIRED
+      console.log(`[RDCleanPath] Set RESTRICTED_ADMIN flag in X.224 CR (offset ${i}, flags: 0x${oldFlags.toString(16)} → 0x${pdu[i + 1].toString(16)})`);
+      return;
+    }
+  }
+  console.warn("[RDCleanPath] Could not find RDP_NEG_REQ in X.224 Connection Request");
 }
 
 /**

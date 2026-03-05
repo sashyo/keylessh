@@ -378,15 +378,13 @@ export async function performCredSSP(
 
   // ── Step 7: Send authInfo (TSCredentials) ──
 
-  // credType=1 (TSPasswordCreds): send hex(sessionKey) as the "password".
-  // TideSSP's SubAuth DLL (TideSubAuth) recognizes the NT hash of this
-  // hex string against the NLA session map — no real Windows password needed.
-  const hexSessionKey = sessionKey.toString("hex");
-  // Extract username from JWT for TSCredentials
+  // Restricted Admin mode: termsrv uses the NLA token (from TideSSP's
+  // SECPKG_ATTR_ACCESS_TOKEN) directly for the desktop session. Password
+  // is empty — MSV1_0 re-auth is skipped entirely.
   const jwtPayload = JSON.parse(Buffer.from(jwt.split(".")[1], "base64url").toString());
   const username = jwtPayload.preferred_username || jwtPayload.sub || "";
-  console.log(`[CredSSP] TSCredentials: credType=1, user="${username}", pass=hex(sessionKey), domain="."`);
-  const authInfoPlain = buildAuthInfo(username, hexSessionKey, ".");
+  console.log(`[CredSSP] TSCredentials: credType=1, user="${username}", pass="" (Restricted Admin), domain="."`);
+  const authInfoPlain = buildAuthInfo(username, "", ".");
   console.log(`[CredSSP] authInfo plaintext: ${authInfoPlain.length} bytes, hex=${authInfoPlain.toString("hex")}`);
   const authInfoEnc = tideGcmEncrypt(sessionKey, authInfoPlain);
   const tsReq4 = buildTSRequest(CREDSSP_VERSION, undefined, authInfoEnc, undefined, clientNonce);

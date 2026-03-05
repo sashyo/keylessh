@@ -138,20 +138,26 @@ static BOOLEAN g_NlaSessionLockInit = FALSE;
 /* Compute NT OWF hash: MD4(UTF-16LE(password)) via ntdll */
 static BOOLEAN TideComputeNtHash(const WCHAR *password, USHORT charLen, UCHAR hash[16])
 {
-    typedef NTSTATUS (NTAPI *RtlCalcFn)(void *pUniStr, void *pHash);
-    static RtlCalcFn pfn = NULL;
-    if (!pfn) {
-        HMODULE h = GetModuleHandleW(L"ntdll");
-        if (h) pfn = (RtlCalcFn)GetProcAddress(h, "RtlCalculateNtOwfPassword");
-    }
-    if (!pfn) return FALSE;
+    /* NT OWF hash = MD4(UTF-16LE(password)), computed via BCrypt */
+    BCRYPT_ALG_HANDLE hAlg = NULL;
+    BCRYPT_HASH_HANDLE hHash = NULL;
+    BOOLEAN result = FALSE;
 
-    /* UNICODE_STRING layout expected by RtlCalculateNtOwfPassword */
-    struct { USHORT Length; USHORT MaximumLength; const WCHAR *Buffer; }
-        ustr = { (USHORT)(charLen * sizeof(WCHAR)),
-                 (USHORT)(charLen * sizeof(WCHAR)),
-                 password };
-    return pfn(&ustr, hash) >= 0;   /* STATUS_SUCCESS = 0 */
+    if (BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_MD4_ALGORITHM, NULL, 0) != 0) {
+        tide_log("TideComputeNtHash: BCrypt MD4 provider unavailable");
+        return FALSE;
+    }
+    if (BCryptCreateHash(hAlg, &hHash, NULL, 0, NULL, 0, 0) != 0) {
+        BCryptCloseAlgorithmProvider(hAlg, 0);
+        return FALSE;
+    }
+    if (BCryptHashData(hHash, (PUCHAR)password, charLen * sizeof(WCHAR), 0) == 0 &&
+        BCryptFinishHash(hHash, hash, 16, 0) == 0) {
+        result = TRUE;
+    }
+    BCryptDestroyHash(hHash);
+    BCryptCloseAlgorithmProvider(hAlg, 0);
+    return result;
 }
 
 static void TideNlaSessionInit(void)
@@ -810,31 +816,6 @@ static NTSTATUS NTAPI TideSsp_AcceptLsaModeContext(
                  sigBytes[0],sigBytes[1],sigBytes[2],sigBytes[3],
                  sigBytes[4],sigBytes[5],sigBytes[6],sigBytes[7],
                  sigBytes[60],sigBytes[61],sigBytes[62],sigBytes[63]);
-
-        /* Store NLA session for SubAuth verification (if SubAuth works). */
-        TideNlaSessionStore(ctx->SessionKey, ctx->Username);
-
-        /* Set the Windows account password to hex(sessionKey).
-         * The gateway sends the same hex string as the "password" in
-         * TSCredentials (credType=1).  MSV1_0 validates it normally.
-         * This is passwordless from the user's perspective — they never
-         * type or know a password; it changes every session. */
-        {
-            WCHAR hexPass[SESSION_KEY_SIZE * 2 + 1];
-            for (int j = 0; j < SESSION_KEY_SIZE; j++)
-                swprintf(&hexPass[j * 2], 3, L"%02x", ctx->SessionKey[j]);
-            hexPass[SESSION_KEY_SIZE * 2] = L'\0';
-
-            USER_INFO_1003 ui;
-            ui.usri1003_password = hexPass;
-            NET_API_STATUS nas = NetUserSetInfo(
-                NULL, ctx->Username, 1003, (LPBYTE)&ui, NULL);
-            if (nas == NERR_Success) {
-                tide_log("Set password for '%ls' to hex(sessionKey)", ctx->Username);
-            } else {
-                tide_log("NetUserSetInfo FAILED for '%ls': %lu", ctx->Username, nas);
-            }
-        }
 
         /* Create a Windows logon session via S4U (Service-for-User).
          * This gives termsrv a valid token so it doesn't need the password
