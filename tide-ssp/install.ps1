@@ -14,15 +14,11 @@
 .PARAMETER DllPath
     Path to TideSSP.dll. If not specified, searches build/ subdirectories.
 
-.PARAMETER Username
-    Local username to enable SubAuth for (sets UF_MNS_LOGON_ACCOUNT).
-    If not specified, uses the current user.
 #>
 
 param(
     [switch]$Uninstall,
-    [string]$DllPath,
-    [string]$Username = $env:USERNAME
+    [string]$DllPath
 )
 
 $dllName = "TideSSP.dll"
@@ -43,6 +39,19 @@ if ($Uninstall) {
     # Remove SubAuth registration
     if (Test-Path $msv1_0Path) {
         Remove-ItemProperty $msv1_0Path -Name "Auth0" -ErrorAction SilentlyContinue
+    }
+
+    # Clear UF_MNS_LOGON_ACCOUNT from all local users (in case it was left set)
+    $UF_MNS = 0x20000
+    Get-WmiObject Win32_UserAccount -Filter "LocalAccount=True" | ForEach-Object {
+        try {
+            $u = [ADSI]"WinNT://./$($_.Name),user"
+            if ($u.UserFlags.Value -band $UF_MNS) {
+                $u.UserFlags.Value = $u.UserFlags.Value -band (-bnot $UF_MNS)
+                $u.SetInfo()
+                Write-Host "Cleared UF_MNS_LOGON_ACCOUNT on '$($_.Name)'"
+            }
+        } catch {}
     }
 
     # Delete DLLs
@@ -105,24 +114,7 @@ if (-not (Test-Path $msv1_0Path)) {
 Set-ItemProperty $msv1_0Path -Name "Auth0" -Value "TideSubAuth" -Type String
 Write-Host "Registered TideSubAuth as MSV1_0\Auth0"
 
-# Set UF_MNS_LOGON_ACCOUNT on the target user so MSV1_0 calls SubAuth
-# for interactive logons (including RDP)
-try {
-    $user = [ADSI]"WinNT://./$Username,user"
-    $flags = $user.UserFlags.Value
-    $UF_MNS = 0x20000
-    if (($flags -band $UF_MNS) -eq 0) {
-        $user.UserFlags.Value = $flags -bor $UF_MNS
-        $user.SetInfo()
-        Write-Host "Set UF_MNS_LOGON_ACCOUNT on user '$Username'"
-    } else {
-        Write-Host "UF_MNS_LOGON_ACCOUNT already set on '$Username'"
-    }
-} catch {
-    Write-Warning "Could not set UF_MNS_LOGON_ACCOUNT on '$Username': $_"
-    Write-Warning "SubAuth may not be called for interactive logons."
-}
-
 Write-Host ""
 Write-Host "TideSSP + TideSubAuth installed. Reboot to activate." -ForegroundColor Green
+Write-Host "UF_MNS_LOGON_ACCOUNT is toggled dynamically by TideSSP/SubAuth - no manual setup needed."
 Write-Host "After reboot, RDP logons via the gateway will be passwordless."

@@ -18,6 +18,11 @@
 #undef WIN32_NO_STATUS
 #include <ntstatus.h>
 #include <subauth.h>
+#include <lm.h>         /* NetUserGetInfo, NetUserSetInfo, USER_INFO_1008 */
+
+#ifndef UF_MNS_LOGON_ACCOUNT
+#define UF_MNS_LOGON_ACCOUNT 0x20000
+#endif
 
 /* ── Debug logging (to same file as TideSSP) ───────────────────── */
 
@@ -70,6 +75,37 @@ static BOOLEAN TryTideVerify(const void *ntOwfHash)
     return pfn(ntOwfHash, 16);
 }
 
+/* ── Clear UF_MNS_LOGON_ACCOUNT after passwordless logon ───────── */
+
+static void TideClearMnsFlag(PUSER_ALL_INFORMATION UserAll)
+{
+    /* Extract null-terminated username from UNICODE_STRING */
+    USHORT len = UserAll->UserName.Length / sizeof(WCHAR);
+    WCHAR username[257];
+    if (len > 256) len = 256;
+    memcpy(username, UserAll->UserName.Buffer, len * sizeof(WCHAR));
+    username[len] = L'\0';
+
+    LPBYTE buf = NULL;
+    NET_API_STATUS nas = NetUserGetInfo(NULL, username, 2, &buf);
+    if (nas != NERR_Success || !buf) {
+        subauth_log("NetUserGetInfo failed for '%ls': %lu", username, nas);
+        return;
+    }
+    DWORD flags = ((USER_INFO_2*)buf)->usri2_flags;
+    NetApiBufferFree(buf);
+
+    if (flags & UF_MNS_LOGON_ACCOUNT) {
+        USER_INFO_1008 ui;
+        ui.usri1008_flags = flags & ~UF_MNS_LOGON_ACCOUNT;
+        nas = NetUserSetInfo(NULL, username, 1008, (LPBYTE)&ui, NULL);
+        if (nas == NERR_Success)
+            subauth_log("Cleared UF_MNS_LOGON_ACCOUNT on '%ls'", username);
+        else
+            subauth_log("Failed to clear UF_MNS on '%ls': %lu", username, nas);
+    }
+}
+
 /* ── SubAuth entry point ───────────────────────────────────────── */
 
 NTSTATUS NTAPI
@@ -109,6 +145,8 @@ Msv1_0SubAuthenticationRoutine(
     /* 1. Check TideSSP NLA session (passwordless RDP) */
     if (TryTideVerify(&info->NtOwfPassword)) {
         subauth_log("TideSSP NLA session verified — APPROVED");
+        /* Clear UF_MNS so normal logons (console, etc.) work again */
+        TideClearMnsFlag(UserAll);
         return STATUS_SUCCESS;
     }
 
