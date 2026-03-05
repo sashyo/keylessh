@@ -63,6 +63,7 @@ const SPNEGO_OID = Buffer.from([0x06, 0x06, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x02])
 
 const CREDSSP_VERSION = 6; // CredSSP v6
 
+
 // ── Main entry point ────────────────────────────────────────────
 
 /**
@@ -75,9 +76,7 @@ const CREDSSP_VERSION = 6; // CredSSP v6
  */
 export async function performCredSSP(
   tlsSocket: TLSSocket,
-  username: string,
   jwt: string,
-  password?: string,
 ): Promise<void> {
   // NEGOEX state
   const conversationId = generateConversationId();
@@ -379,8 +378,11 @@ export async function performCredSSP(
 
   // ── Step 7: Send authInfo (TSCredentials) ──
 
-  console.log(`[CredSSP] TSCredentials: user="${username}", domain=".", passLen=${password ? password.length : 0}`);
-  const authInfoPlain = buildAuthInfo(username, password, ".");
+  // credType=6 (TSRemoteGuardCreds): tells termsrv to call LsaLogonUser with
+  // packageName="TideSSP", routing the desktop logon to TideSsp_RealLogonUserEx2.
+  // The 16-byte session key is used by LogonUserEx2 to look up the NLA-authenticated username.
+  console.log(`[CredSSP] TSCredentials: credType=6, pkg="TideSSP", sessionKey=${sessionKey.toString("hex")}`);
+  const authInfoPlain = buildRemoteGuardAuthInfo(sessionKey);
   console.log(`[CredSSP] authInfo plaintext: ${authInfoPlain.length} bytes, hex=${authInfoPlain.toString("hex")}`);
   const authInfoEnc = tideGcmEncrypt(sessionKey, authInfoPlain);
   const tsReq4 = buildTSRequest(CREDSSP_VERSION, undefined, authInfoEnc, undefined, clientNonce);
@@ -797,20 +799,45 @@ function tideGcmDecrypt(key: Buffer, data: Buffer): Buffer {
 
 // ── Auth Info ───────────────────────────────────────────────────
 
-function buildAuthInfo(username: string, password?: string, domain?: string): Buffer {
-  const domainName = Buffer.from(domain || ".", "utf-16le");
-  const userBytes = Buffer.from(username, "utf-16le");
-  const passBytes = password ? Buffer.from(password, "utf-16le") : Buffer.alloc(0);
+/**
+ * Build TSCredentials with credType=6 (TSRemoteGuardCreds) for passwordless logon.
+ *
+ * Per MS-CSSP §2.2.1.2.2, this tells the server to call LsaLogonUser with
+ * the specified packageName ("TideSSP") instead of Negotiate/MSV1_0.
+ * TideSSP's LogonUserEx2 looks up the session key in its NLA session map
+ * to find the authenticated username and create the desktop token.
+ *
+ * TSCredentials ::= SEQUENCE {
+ *   credType    [0] INTEGER (6)
+ *   credentials [1] OCTET STRING = DER(TSRemoteGuardCreds)
+ * }
+ * TSRemoteGuardCreds ::= SEQUENCE {
+ *   logonCred            [0] TSRemoteGuardPackageCred
+ *   supplementalCreds    [1] SEQUENCE OF TSRemoteGuardPackageCred OPTIONAL
+ * }
+ * TSRemoteGuardPackageCred ::= SEQUENCE {
+ *   packageName [0] OCTET STRING  (UTF-16LE "TideSSP")
+ *   credBuffer  [1] OCTET STRING  (16-byte session key)
+ * }
+ */
+function buildRemoteGuardAuthInfo(sessionKey: Buffer): Buffer {
+  const packageName = Buffer.from("TideSSP", "utf-16le");
 
-  const tsCreds = encodeSequence([
-    encodeExplicit(0, encodeOctetString(domainName)),
-    encodeExplicit(1, encodeOctetString(userBytes)),
-    encodeExplicit(2, encodeOctetString(passBytes)),
+  // TSRemoteGuardPackageCred
+  const packageCred = encodeSequence([
+    encodeExplicit(0, encodeOctetString(packageName)),
+    encodeExplicit(1, encodeOctetString(sessionKey)),
   ]);
 
+  // TSRemoteGuardCreds — logonCred [0]
+  const remoteGuardCreds = encodeSequence([
+    encodeExplicit(0, packageCred),
+  ]);
+
+  // TSCredentials — credType=6, credentials=DER(TSRemoteGuardCreds)
   const tsCredentials = encodeSequence([
-    encodeExplicit(0, encodeInteger(1)),
-    encodeExplicit(1, encodeOctetString(tsCreds)),
+    encodeExplicit(0, encodeInteger(6)),
+    encodeExplicit(1, encodeOctetString(remoteGuardCreds)),
   ]);
 
   return tsCredentials;
