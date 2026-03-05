@@ -207,7 +207,8 @@ export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCle
         // (MS-RDPBCGR §2.2.10.2) — sent by the server after NLA completes.
         const authResult = await readExactBytes(tlsSocket, 4);
         const authValue = authResult.readUInt32LE(0);
-        console.log(`[RDCleanPath] Early User Auth Result: 0x${authValue.toString(16).padStart(8, "0")} at ${Date.now()}`);
+        const pendingAfterAuth = tlsSocket.readableLength;
+        console.log(`[RDCleanPath] Early User Auth Result: 0x${authValue.toString(16).padStart(8, "0")} at ${Date.now()}, pendingBytes=${pendingAfterAuth}, destroyed=${tlsSocket.destroyed}`);
         if (authValue !== 0x00000000) {
           throw new Error(`Early User Authorization denied: 0x${authValue.toString(16).padStart(8, "0")}`);
         }
@@ -465,6 +466,8 @@ function extractCertChain(tls: TLSSocket): Buffer[] {
 
 /**
  * Read exactly `n` bytes from a TLS socket.
+ * Any extra bytes received beyond `n` are pushed back into the stream
+ * via unshift() so they are not lost.
  */
 function readExactBytes(sock: TLSSocket, n: number): Promise<Buffer> {
   return new Promise((resolve, reject) => {
@@ -482,7 +485,13 @@ function readExactBytes(sock: TLSSocket, n: number): Promise<Buffer> {
       if (got >= n) {
         clearTimeout(timer);
         sock.off("data", onData);
-        resolve(Buffer.concat(chunks).subarray(0, n));
+        const full = Buffer.concat(chunks);
+        if (full.length > n) {
+          const extra = full.subarray(n);
+          console.log(`[RDCleanPath] readExactBytes: got ${full.length} bytes, wanted ${n}, pushing back ${extra.length} extra bytes: ${extra.toString("hex")}`);
+          sock.unshift(extra);
+        }
+        resolve(full.subarray(0, n));
       }
     }
 

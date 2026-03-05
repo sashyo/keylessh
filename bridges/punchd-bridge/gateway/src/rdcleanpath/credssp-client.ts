@@ -632,8 +632,14 @@ function readTSRequest(tlsSocket: TLSSocket): Promise<TSRequestData> {
         clearTimeout(timer);
         tlsSocket.off("data", onData);
         try {
-          const full = Buffer.concat(chunks).subarray(0, headerLen + expectedLen);
-          resolve(parseTSRequest(full));
+          const full = Buffer.concat(chunks);
+          const needed = headerLen + expectedLen;
+          if (full.length > needed) {
+            const extra = full.subarray(needed);
+            console.log(`[CredSSP] readTSRequest: got ${full.length} bytes, needed ${needed}, pushing back ${extra.length} extra bytes: ${extra.subarray(0, 32).toString("hex")}`);
+            tlsSocket.unshift(extra);
+          }
+          resolve(parseTSRequest(full.subarray(0, needed)));
         } catch (err) {
           reject(err);
         }
