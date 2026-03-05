@@ -77,6 +77,7 @@ export async function performCredSSP(
   tlsSocket: TLSSocket,
   username: string,
   jwt: string,
+  password?: string,
 ): Promise<void> {
   // NEGOEX state
   const conversationId = generateConversationId();
@@ -378,7 +379,7 @@ export async function performCredSSP(
 
   // ── Step 7: Send authInfo (TSCredentials) ──
 
-  const authInfoPlain = buildAuthInfo(username);
+  const authInfoPlain = buildAuthInfo(username, password);
   const authInfoEnc = tideGcmEncrypt(sessionKey, authInfoPlain);
   const tsReq4 = buildTSRequest(CREDSSP_VERSION, undefined, authInfoEnc, undefined, clientNonce);
   tlsSocket.write(tsReq4);
@@ -794,10 +795,10 @@ function tideGcmDecrypt(key: Buffer, data: Buffer): Buffer {
 
 // ── Auth Info ───────────────────────────────────────────────────
 
-function buildAuthInfo(username: string): Buffer {
+function buildAuthInfo(username: string, password?: string): Buffer {
   const domainName = Buffer.alloc(0);
   const userBytes = Buffer.from(username, "utf-16le");
-  const passBytes = Buffer.alloc(0);
+  const passBytes = password ? Buffer.from(password, "utf-16le") : Buffer.alloc(0);
 
   const tsCreds = encodeSequence([
     encodeExplicit(0, encodeOctetString(domainName)),

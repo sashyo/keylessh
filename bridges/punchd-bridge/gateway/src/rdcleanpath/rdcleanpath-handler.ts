@@ -199,7 +199,7 @@ export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCle
         }
 
         // Send JWT directly to TideSSP — it verifies the EdDSA signature
-        await performCredSSP(tlsSocket, username, request.proxyAuth);
+        await performCredSSP(tlsSocket, username, request.proxyAuth, backend.rdpPassword);
 
         console.log(`[RDCleanPath] CredSSP/NLA completed for "${backendName}" at ${Date.now()}`);
 
