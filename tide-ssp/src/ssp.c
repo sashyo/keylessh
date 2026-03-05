@@ -109,27 +109,50 @@ static PLSA_SECPKG_FUNCTION_TABLE LsaDispatch = NULL;
 /* Forward declaration — defined below after context struct */
 static void tide_log(const char *fmt, ...);
 
-/* ── NLA Session Map — links CredSSP sessions to LogonUserEx2 ── */
+/* ── NLA Session Map — links NLA sessions to SubAuth verification ── */
 /*
  * When AcceptLsaModeContext succeeds (JWT verified), we store
- * {sessionKey, username} here.  Later, when termsrv calls our
- * LogonUserEx2 with credType=6 (TSRemoteGuardCreds), we look up
- * the username by matching the 16-byte session key from the
- * credential buffer.
+ * {sessionKey, ntHash, username} here.  The SubAuth DLL (TideSubAuth)
+ * calls our exported TideNlaVerifyNtHash() during MSV1_0 logon to
+ * approve the desktop session without a real password.
+ *
+ * The gateway sends hex(sessionKey) as the "password" in TSCredentials
+ * (credType=1).  MSV1_0 hashes it → NT OWF.  SubAuth calls us with
+ * that hash, we compare against stored ntHash → approve.
  */
 #define MAX_NLA_SESSIONS 32
 #define NLA_SESSION_TTL_MS 60000  /* 60 seconds */
 
 typedef struct {
     UCHAR   SessionKey[SESSION_KEY_SIZE];
+    UCHAR   NtHash[16];    /* MD4(UTF16LE(hex(SessionKey))) — pre-computed */
     WCHAR   Username[MAX_USERNAME_LEN + 1];
-    LONG64  Timestamp;   /* GetTickCount64() */
+    LONG64  Timestamp;     /* GetTickCount64() */
     BOOLEAN InUse;
 } TIDE_NLA_SESSION;
 
 static TIDE_NLA_SESSION g_NlaSessions[MAX_NLA_SESSIONS];
 static CRITICAL_SECTION g_NlaSessionLock;
 static BOOLEAN g_NlaSessionLockInit = FALSE;
+
+/* Compute NT OWF hash: MD4(UTF-16LE(password)) via ntdll */
+static BOOLEAN TideComputeNtHash(const WCHAR *password, USHORT charLen, UCHAR hash[16])
+{
+    typedef NTSTATUS (NTAPI *RtlCalcFn)(void *pUniStr, void *pHash);
+    static RtlCalcFn pfn = NULL;
+    if (!pfn) {
+        HMODULE h = GetModuleHandleW(L"ntdll");
+        if (h) pfn = (RtlCalcFn)GetProcAddress(h, "RtlCalculateNtOwfPassword");
+    }
+    if (!pfn) return FALSE;
+
+    /* UNICODE_STRING layout expected by RtlCalculateNtOwfPassword */
+    struct { USHORT Length; USHORT MaximumLength; const WCHAR *Buffer; }
+        ustr = { (USHORT)(charLen * sizeof(WCHAR)),
+                 (USHORT)(charLen * sizeof(WCHAR)),
+                 password };
+    return pfn(&ustr, hash) >= 0;   /* STATUS_SUCCESS = 0 */
+}
 
 static void TideNlaSessionInit(void)
 {
@@ -144,8 +167,21 @@ static void TideNlaSessionStore(const UCHAR sessionKey[SESSION_KEY_SIZE],
                                  const WCHAR *username)
 {
     LONG64 now = (LONG64)GetTickCount64();
+
+    /* Pre-compute NT hash of hex(sessionKey) — this is what the gateway
+       sends as the "password" and MSV1_0 hashes before calling SubAuth. */
+    WCHAR hexKey[SESSION_KEY_SIZE * 2 + 1];
+    for (int j = 0; j < SESSION_KEY_SIZE; j++)
+        swprintf(&hexKey[j * 2], 3, L"%02x", sessionKey[j]);
+    hexKey[SESSION_KEY_SIZE * 2] = L'\0';
+
+    UCHAR ntHash[16];
+    if (!TideComputeNtHash(hexKey, SESSION_KEY_SIZE * 2, ntHash)) {
+        tide_log("NLA session store: failed to compute NT hash");
+        return;
+    }
+
     EnterCriticalSection(&g_NlaSessionLock);
-    /* Find a free or expired slot */
     int slot = -1;
     for (int i = 0; i < MAX_NLA_SESSIONS; i++) {
         if (!g_NlaSessions[i].InUse ||
@@ -154,38 +190,47 @@ static void TideNlaSessionStore(const UCHAR sessionKey[SESSION_KEY_SIZE],
             break;
         }
     }
-    if (slot < 0) slot = 0; /* overwrite oldest if full */
+    if (slot < 0) slot = 0;
     memcpy(g_NlaSessions[slot].SessionKey, sessionKey, SESSION_KEY_SIZE);
+    memcpy(g_NlaSessions[slot].NtHash, ntHash, 16);
     wcsncpy(g_NlaSessions[slot].Username, username, MAX_USERNAME_LEN);
     g_NlaSessions[slot].Username[MAX_USERNAME_LEN] = L'\0';
     g_NlaSessions[slot].Timestamp = now;
     g_NlaSessions[slot].InUse = TRUE;
     LeaveCriticalSection(&g_NlaSessionLock);
-    tide_log("NLA session stored for '%ls' (slot %d)", username, slot);
+    tide_log("NLA session stored for '%ls' (slot %d), ntHash=%02x%02x%02x%02x...",
+             username, slot, ntHash[0], ntHash[1], ntHash[2], ntHash[3]);
 }
 
-/* Returns TRUE if found, copies username to outUsername */
-static BOOLEAN TideNlaSessionLookup(const UCHAR sessionKey[SESSION_KEY_SIZE],
-                                     WCHAR *outUsername, USHORT maxLen)
+/*
+ * TideNlaVerifyNtHash — exported for SubAuth DLL to call.
+ * Returns TRUE if the given 16-byte NT OWF hash matches any live NLA session.
+ * Consumes the session (one-time use).
+ */
+__declspec(dllexport)
+BOOLEAN NTAPI TideNlaVerifyNtHash(const void *ntHash, ULONG hashLen)
 {
+    if (!ntHash || hashLen < 16 || !g_NlaSessionLockInit) return FALSE;
+
     BOOLEAN found = FALSE;
     LONG64 now = (LONG64)GetTickCount64();
     EnterCriticalSection(&g_NlaSessionLock);
     for (int i = 0; i < MAX_NLA_SESSIONS; i++) {
         if (g_NlaSessions[i].InUse &&
             (now - g_NlaSessions[i].Timestamp <= NLA_SESSION_TTL_MS) &&
-            memcmp(g_NlaSessions[i].SessionKey, sessionKey, SESSION_KEY_SIZE) == 0) {
-            wcsncpy(outUsername, g_NlaSessions[i].Username, maxLen);
-            outUsername[maxLen - 1] = L'\0';
-            g_NlaSessions[i].InUse = FALSE; /* one-time use */
+            memcmp(g_NlaSessions[i].NtHash, ntHash, 16) == 0) {
+            tide_log("TideNlaVerifyNtHash: MATCH for '%ls' (slot %d)",
+                     g_NlaSessions[i].Username, i);
+            g_NlaSessions[i].InUse = FALSE;   /* one-time use */
             found = TRUE;
-            tide_log("NLA session lookup: found '%ls' (slot %d)", outUsername, i);
             break;
         }
     }
     LeaveCriticalSection(&g_NlaSessionLock);
     if (!found)
-        tide_log("NLA session lookup: no match");
+        tide_log("TideNlaVerifyNtHash: no match (hash=%02x%02x%02x%02x...)",
+                 ((const UCHAR*)ntHash)[0], ((const UCHAR*)ntHash)[1],
+                 ((const UCHAR*)ntHash)[2], ((const UCHAR*)ntHash)[3]);
     return found;
 }
 
@@ -226,6 +271,10 @@ typedef NTSTATUS (NTAPI *PFN_NtCreateToken)(
     PTOKEN_PRIMARY_GROUP PrimaryGroup,
     PTOKEN_DEFAULT_DACL DefaultDacl,
     PTOKEN_SOURCE Source);
+
+#ifndef LsaTokenInformationV2
+#define LsaTokenInformationV2 ((LSA_TOKEN_INFORMATION_TYPE)2)
+#endif
 
 #ifndef SECURITY_REMOTE_INTERACTIVE_LOGON_RID
 #define SECURITY_REMOTE_INTERACTIVE_LOGON_RID 14
@@ -1148,262 +1197,6 @@ static NTSTATUS NTAPI TideSsp_QueryContextAttributes(LSA_SEC_HANDLE h, ULONG att
  *  LSA uses the returned TOKEN_INFORMATION_V2 to create the desktop session.
  * ══════════════════════════════════════════════════════════════════ */
 
-#ifndef LsaTokenInformationV2
-#define LsaTokenInformationV2 ((LSA_TOKEN_INFORMATION_TYPE)2)
-#endif
-
-
-static NTSTATUS NTAPI TideSsp_RealLogonUserEx2(
-    PLSA_CLIENT_REQUEST ClientRequest,
-    SECURITY_LOGON_TYPE LogonType,
-    PVOID ProtocolSubmitBuffer,
-    PVOID ClientBufferBase,
-    ULONG SubmitBufferLength,
-    PVOID *ProfileBuffer,
-    PULONG ProfileBufferLength,
-    PLUID LogonId,
-    PNTSTATUS SubStatus,
-    PLSA_TOKEN_INFORMATION_TYPE TokenInformationType,
-    PVOID *TokenInformation,
-    PUNICODE_STRING *AccountName,
-    PUNICODE_STRING *AuthenticatingAuthority,
-    PUNICODE_STRING *MachineName,
-    PSECPKG_PRIMARY_CRED PrimaryCredentials,
-    PSECPKG_SUPPLEMENTAL_CRED_ARRAY *SupplementalCredentials)
-{
-    (void)ClientRequest;
-    (void)ClientBufferBase;
-    (void)MachineName;
-    (void)PrimaryCredentials;
-    (void)SupplementalCredentials;
-
-    tide_log("LogonUserEx2: LogonType=%d, SubmitBufferLength=%u",
-             (int)LogonType, SubmitBufferLength);
-
-    /* Default outputs */
-    if (ProfileBuffer) *ProfileBuffer = NULL;
-    if (ProfileBufferLength) *ProfileBufferLength = 0;
-    if (SubStatus) *SubStatus = STATUS_SUCCESS;
-    if (TokenInformationType) *TokenInformationType = LsaTokenInformationV2;
-    if (TokenInformation) *TokenInformation = NULL;
-    if (AccountName) *AccountName = NULL;
-    if (AuthenticatingAuthority) *AuthenticatingAuthority = NULL;
-    if (MachineName) *MachineName = NULL;
-    if (SupplementalCredentials) *SupplementalCredentials = NULL;
-    if (PrimaryCredentials) memset(PrimaryCredentials, 0, sizeof(*PrimaryCredentials));
-
-    /* Credential buffer = 16-byte session key from gateway */
-    if (SubmitBufferLength < SESSION_KEY_SIZE) {
-        tide_log("LogonUserEx2: credential buffer too small (%u < %u)",
-                 SubmitBufferLength, SESSION_KEY_SIZE);
-        if (SubStatus) *SubStatus = STATUS_INVALID_PARAMETER;
-        return STATUS_INVALID_PARAMETER;
-    }
-
-    /* Look up the NLA session by session key */
-    WCHAR username[MAX_USERNAME_LEN + 1];
-    if (!TideNlaSessionLookup((const UCHAR *)ProtocolSubmitBuffer,
-                               username, MAX_USERNAME_LEN + 1)) {
-        tide_log("LogonUserEx2: no matching NLA session — rejecting");
-        if (SubStatus) *SubStatus = STATUS_NO_SUCH_USER;
-        return STATUS_NO_SUCH_USER;
-    }
-
-    tide_log("LogonUserEx2: matched user '%ls'", username);
-
-    /* Look up account and create token via LSA dispatch */
-    if (!LsaDispatch || !LsaDispatch->GetAuthDataForUser ||
-        !LsaDispatch->ConvertAuthDataToToken) {
-        tide_log("LogonUserEx2: LsaDispatch not available");
-        return STATUS_INTERNAL_ERROR;
-    }
-
-    UNICODE_STRING uname;
-    uname.Length = (USHORT)(wcslen(username) * sizeof(WCHAR));
-    uname.MaximumLength = uname.Length + sizeof(WCHAR);
-    uname.Buffer = username;
-
-    PUCHAR authData = NULL;
-    ULONG authDataSize = 0;
-    UNICODE_STRING flatNameBuf = {0};
-
-    NTSTATUS status = LsaDispatch->GetAuthDataForUser(
-        (PSECURITY_STRING)&uname,
-        SecNameFlat,
-        NULL,
-        &authData,
-        &authDataSize,
-        &flatNameBuf);
-
-    if (!NT_SUCCESS(status) || !authData) {
-        tide_log("LogonUserEx2: GetAuthDataForUser failed 0x%08X", status);
-        if (SubStatus) *SubStatus = STATUS_NO_SUCH_USER;
-        return STATUS_NO_SUCH_USER;
-    }
-
-    /* Create a temporary token to extract TOKEN_INFORMATION_V2 fields */
-    HANDLE tempToken = NULL;
-    LUID tempLogonId = {0};
-    NTSTATUS subSt = STATUS_SUCCESS;
-    TOKEN_SOURCE tokenSource;
-    UNICODE_STRING authority = {0};
-    UNICODE_STRING acctName = uname;
-
-    memcpy(tokenSource.SourceName, "TideSSP\0", TOKEN_SOURCE_LENGTH);
-    AllocateLocallyUniqueId(&tokenSource.SourceIdentifier);
-
-    status = LsaDispatch->ConvertAuthDataToToken(
-        authData, authDataSize,
-        SecurityImpersonation,
-        &tokenSource,
-        RemoteInteractive,
-        &authority,
-        &tempToken,
-        &tempLogonId,
-        &acctName,
-        &subSt);
-
-    if (LsaDispatch->FreeLsaHeap && authData)
-        LsaDispatch->FreeLsaHeap(authData);
-
-    if (!NT_SUCCESS(status) || !tempToken) {
-        tide_log("LogonUserEx2: ConvertAuthDataToToken failed 0x%08X (sub=0x%08X)",
-                 status, subSt);
-        if (SubStatus) *SubStatus = subSt;
-        return status;
-    }
-
-    tide_log("LogonUserEx2: temp token %p, logonId=%08X:%08X",
-             tempToken, tempLogonId.HighPart, tempLogonId.LowPart);
-
-    /* Pass the logon ID back to LSA */
-    if (LogonId) *LogonId = tempLogonId;
-
-    /* ── Query token fields and build TOKEN_INFORMATION_V2 on LSA heap ── */
-
-    DWORD sz = 0;
-    PTOKEN_USER       pUser   = NULL;
-    PTOKEN_GROUPS     pGroups = NULL;
-    PTOKEN_PRIVILEGES pPrivs  = NULL;
-    PTOKEN_OWNER      pOwner  = NULL;
-    PTOKEN_PRIMARY_GROUP pPG  = NULL;
-    PTOKEN_DEFAULT_DACL  pDacl = NULL;
-
-    NTSTATUS retStatus = STATUS_INTERNAL_ERROR;
-
-#define QUERY_TMP(cls, var) do {                                          \
-        GetTokenInformation(tempToken, cls, NULL, 0, &sz);                \
-        var = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sz);          \
-        if (!var || !GetTokenInformation(tempToken, cls, var, sz, &sz)) { \
-            tide_log("LogonUserEx2: query " #cls " failed");              \
-            goto logon_cleanup;                                           \
-        }                                                                 \
-    } while (0)
-
-    QUERY_TMP(TokenUser,         pUser);
-    QUERY_TMP(TokenGroups,       pGroups);
-    QUERY_TMP(TokenPrivileges,   pPrivs);
-    QUERY_TMP(TokenOwner,        pOwner);
-    QUERY_TMP(TokenPrimaryGroup, pPG);
-    QUERY_TMP(TokenDefaultDacl,  pDacl);
-#undef QUERY_TMP
-
-    /* Add S-1-5-14 (Remote Interactive) and S-1-5-4 (Interactive) if missing */
-    {
-        SID_IDENTIFIER_AUTHORITY ntAuth = SECURITY_NT_AUTHORITY;
-        PSID pSid14 = NULL, pSid4 = NULL;
-        BOOL has14 = FALSE;
-        DWORD i;
-
-        for (i = 0; i < pGroups->GroupCount; i++) {
-            LPWSTR pStr = NULL;
-            if (ConvertSidToStringSidW(pGroups->Groups[i].Sid, &pStr)) {
-                if (wcscmp(pStr, L"S-1-5-14") == 0) has14 = TRUE;
-                LocalFree(pStr);
-            }
-        }
-
-        if (!has14) {
-            AllocateAndInitializeSid(&ntAuth, 1, SECURITY_REMOTE_INTERACTIVE_LOGON_RID,
-                0, 0, 0, 0, 0, 0, 0, &pSid14);
-            AllocateAndInitializeSid(&ntAuth, 1, SECURITY_INTERACTIVE_LOGON_RID,
-                0, 0, 0, 0, 0, 0, 0, &pSid4);
-
-            if (pSid14 && pSid4) {
-                DWORD newCount = pGroups->GroupCount + 2;
-                DWORD newSize = sizeof(TOKEN_GROUPS) + (newCount - 1) * sizeof(SID_AND_ATTRIBUTES);
-                PTOKEN_GROUPS pNew = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, newSize);
-                if (pNew) {
-                    pNew->GroupCount = newCount;
-                    for (i = 0; i < pGroups->GroupCount; i++)
-                        pNew->Groups[i] = pGroups->Groups[i];
-                    pNew->Groups[pGroups->GroupCount].Sid = pSid14;
-                    pNew->Groups[pGroups->GroupCount].Attributes =
-                        SE_GROUP_ENABLED | SE_GROUP_MANDATORY | SE_GROUP_ENABLED_BY_DEFAULT;
-                    pNew->Groups[pGroups->GroupCount + 1].Sid = pSid4;
-                    pNew->Groups[pGroups->GroupCount + 1].Attributes =
-                        SE_GROUP_ENABLED | SE_GROUP_MANDATORY | SE_GROUP_ENABLED_BY_DEFAULT;
-                    HeapFree(GetProcessHeap(), 0, pGroups);
-                    pGroups = pNew;
-                    tide_log("LogonUserEx2: added S-1-5-14 and S-1-5-4");
-                }
-            }
-        }
-    }
-
-    /* Allocate TOKEN_INFORMATION_V2 on LSA heap */
-    {
-        PLSA_TOKEN_INFORMATION_V2 info = NULL;
-        if (LsaDispatch && LsaDispatch->AllocateLsaHeap) {
-            info = (PLSA_TOKEN_INFORMATION_V2)LsaDispatch->AllocateLsaHeap(
-                sizeof(LSA_TOKEN_INFORMATION_V2));
-        }
-        if (!info) {
-            tide_log("LogonUserEx2: AllocateLsaHeap failed");
-            goto logon_cleanup;
-        }
-        memset(info, 0, sizeof(*info));
-        info->ExpirationTime.QuadPart = 0x7FFFFFFFFFFFFFFFLL; /* never */
-        info->User = *pUser;
-        info->Groups = pGroups; pGroups = NULL; /* transfer ownership to LSA */
-        info->PrimaryGroup = *pPG;
-        info->Privileges = pPrivs; pPrivs = NULL; /* transfer ownership */
-        info->Owner = *pOwner;
-        info->DefaultDacl = *pDacl;
-
-        if (TokenInformationType) *TokenInformationType = LsaTokenInformationV2;
-        if (TokenInformation) *TokenInformation = info;
-    }
-
-    /* Set AccountName output (LSA heap) */
-    if (AccountName && LsaDispatch && LsaDispatch->AllocateLsaHeap) {
-        USHORT nameBytes = (USHORT)(wcslen(username) * sizeof(WCHAR));
-        PUNICODE_STRING pName = (PUNICODE_STRING)LsaDispatch->AllocateLsaHeap(
-            sizeof(UNICODE_STRING) + nameBytes + sizeof(WCHAR));
-        if (pName) {
-            pName->Buffer = (PWSTR)((PUCHAR)pName + sizeof(UNICODE_STRING));
-            pName->Length = nameBytes;
-            pName->MaximumLength = nameBytes + sizeof(WCHAR);
-            memcpy(pName->Buffer, username, nameBytes);
-            pName->Buffer[wcslen(username)] = L'\0';
-            *AccountName = pName;
-        }
-    }
-
-    tide_log("LogonUserEx2: SUCCESS for '%ls'", username);
-    retStatus = STATUS_SUCCESS;
-
-logon_cleanup:
-    if (tempToken) CloseHandle(tempToken);
-    if (pUser)   HeapFree(GetProcessHeap(), 0, pUser);
-    if (pGroups) HeapFree(GetProcessHeap(), 0, pGroups);
-    if (pPrivs)  HeapFree(GetProcessHeap(), 0, pPrivs);
-    if (pOwner)  HeapFree(GetProcessHeap(), 0, pOwner);
-    if (pPG)     HeapFree(GetProcessHeap(), 0, pPG);
-    if (pDacl)   HeapFree(GetProcessHeap(), 0, pDacl);
-    return retStatus;
-}
-
 /* ══════════════════════════════════════════════════════════════════
  *  Stubs for required but unused functions
  *
@@ -2180,7 +1973,7 @@ SECPKG_FUNCTION_TABLE TideSSP_FunctionTable = {
     .CallPackageUntrusted       = (PLSA_AP_CALL_PACKAGE_PASSTHROUGH)TideSsp_CallPackageUntrusted,
     .CallPackagePassthrough     = (PLSA_AP_CALL_PACKAGE_PASSTHROUGH)TideSsp_CallPackagePassthrough,
     .LogonUserEx                = NULL,
-    .LogonUserEx2               = (PLSA_AP_LOGON_USER_EX2)TideSsp_RealLogonUserEx2,
+    .LogonUserEx2               = NULL,
     .Initialize                 = (SpInitializeFn *)TideSsp_Initialize,
     .Shutdown                   = (SpShutdownFn *)TideSsp_Shutdown,
     .GetInfo                    = (SpGetInfoFn *)TideSsp_GetInfo,

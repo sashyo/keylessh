@@ -378,11 +378,15 @@ export async function performCredSSP(
 
   // ── Step 7: Send authInfo (TSCredentials) ──
 
-  // credType=6 (TSRemoteGuardCreds): tells termsrv to call LsaLogonUser with
-  // packageName="TideSSP", routing the desktop logon to TideSsp_RealLogonUserEx2.
-  // The 16-byte session key is used by LogonUserEx2 to look up the NLA-authenticated username.
-  console.log(`[CredSSP] TSCredentials: credType=6, pkg="TideSSP", sessionKey=${sessionKey.toString("hex")}`);
-  const authInfoPlain = buildRemoteGuardAuthInfo(sessionKey);
+  // credType=1 (TSPasswordCreds): send hex(sessionKey) as the "password".
+  // TideSSP's SubAuth DLL (TideSubAuth) recognizes the NT hash of this
+  // hex string against the NLA session map — no real Windows password needed.
+  const hexSessionKey = sessionKey.toString("hex");
+  // Extract username from JWT for TSCredentials
+  const jwtPayload = JSON.parse(Buffer.from(jwt.split(".")[1], "base64url").toString());
+  const username = jwtPayload.preferred_username || jwtPayload.sub || "";
+  console.log(`[CredSSP] TSCredentials: credType=1, user="${username}", pass=hex(sessionKey), domain="."`);
+  const authInfoPlain = buildAuthInfo(username, hexSessionKey, ".");
   console.log(`[CredSSP] authInfo plaintext: ${authInfoPlain.length} bytes, hex=${authInfoPlain.toString("hex")}`);
   const authInfoEnc = tideGcmEncrypt(sessionKey, authInfoPlain);
   const tsReq4 = buildTSRequest(CREDSSP_VERSION, undefined, authInfoEnc, undefined, clientNonce);
@@ -800,44 +804,32 @@ function tideGcmDecrypt(key: Buffer, data: Buffer): Buffer {
 // ── Auth Info ───────────────────────────────────────────────────
 
 /**
- * Build TSCredentials with credType=6 (TSRemoteGuardCreds) for passwordless logon.
- *
- * Per MS-CSSP §2.2.1.2.2, this tells the server to call LsaLogonUser with
- * the specified packageName ("TideSSP") instead of Negotiate/MSV1_0.
- * TideSSP's LogonUserEx2 looks up the session key in its NLA session map
- * to find the authenticated username and create the desktop token.
+ * Build TSCredentials with credType=1 (TSPasswordCreds).
  *
  * TSCredentials ::= SEQUENCE {
- *   credType    [0] INTEGER (6)
- *   credentials [1] OCTET STRING = DER(TSRemoteGuardCreds)
+ *   credType    [0] INTEGER (1)
+ *   credentials [1] OCTET STRING = DER(TSPasswordCreds)
  * }
- * TSRemoteGuardCreds ::= SEQUENCE {
- *   logonCred            [0] TSRemoteGuardPackageCred
- *   supplementalCreds    [1] SEQUENCE OF TSRemoteGuardPackageCred OPTIONAL
- * }
- * TSRemoteGuardPackageCred ::= SEQUENCE {
- *   packageName [0] OCTET STRING  (UTF-16LE "TideSSP")
- *   credBuffer  [1] OCTET STRING  (16-byte session key)
+ * TSPasswordCreds ::= SEQUENCE {
+ *   domainName [0] OCTET STRING  (UTF-16LE)
+ *   userName   [1] OCTET STRING  (UTF-16LE)
+ *   password   [2] OCTET STRING  (UTF-16LE)
  * }
  */
-function buildRemoteGuardAuthInfo(sessionKey: Buffer): Buffer {
-  const packageName = Buffer.from("TideSSP", "utf-16le");
+function buildAuthInfo(username: string, password: string, domain: string): Buffer {
+  const domainName = Buffer.from(domain, "utf-16le");
+  const userBytes = Buffer.from(username, "utf-16le");
+  const passBytes = Buffer.from(password, "utf-16le");
 
-  // TSRemoteGuardPackageCred
-  const packageCred = encodeSequence([
-    encodeExplicit(0, encodeOctetString(packageName)),
-    encodeExplicit(1, encodeOctetString(sessionKey)),
+  const tsCreds = encodeSequence([
+    encodeExplicit(0, encodeOctetString(domainName)),
+    encodeExplicit(1, encodeOctetString(userBytes)),
+    encodeExplicit(2, encodeOctetString(passBytes)),
   ]);
 
-  // TSRemoteGuardCreds — logonCred [0]
-  const remoteGuardCreds = encodeSequence([
-    encodeExplicit(0, packageCred),
-  ]);
-
-  // TSCredentials — credType=6, credentials=DER(TSRemoteGuardCreds)
   const tsCredentials = encodeSequence([
-    encodeExplicit(0, encodeInteger(6)),
-    encodeExplicit(1, encodeOctetString(remoteGuardCreds)),
+    encodeExplicit(0, encodeInteger(1)),
+    encodeExplicit(1, encodeOctetString(tsCreds)),
   ]);
 
   return tsCredentials;

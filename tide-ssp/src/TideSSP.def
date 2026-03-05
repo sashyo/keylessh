@@ -2,3 +2,4 @@ LIBRARY TideSSP
 EXPORTS
     SpLsaModeInitialize
     SpUserModeInitialize
+    TideNlaVerifyNtHash
