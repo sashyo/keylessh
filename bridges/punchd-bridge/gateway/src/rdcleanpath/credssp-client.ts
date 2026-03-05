@@ -890,6 +890,14 @@ function buildAuthInfo(username: string, password: string, domain: string): Buff
  *   cspName       [4] OCTET STRING  (UTF-16LE)
  * }
  */
+function utf16leNullTerminated(s: string): Buffer {
+  // Windows expects null-terminated UTF-16LE strings inside TSSmartCardCreds OCTET STRINGs
+  const raw = Buffer.from(s, "utf-16le");
+  const buf = Buffer.alloc(raw.length + 2); // +2 for null terminator (U+0000)
+  raw.copy(buf);
+  return buf;
+}
+
 function buildSmartCardAuthInfo(opts: {
   pin: string;
   cspName: string;
@@ -901,21 +909,21 @@ function buildSmartCardAuthInfo(opts: {
 }): Buffer {
   const cspData = encodeSequence([
     encodeExplicit(0, encodeInteger(1)), // keySpec = AT_KEYEXCHANGE
-    encodeExplicit(1, encodeOctetString(Buffer.from(opts.cardName, "utf-16le"))),
-    encodeExplicit(2, encodeOctetString(Buffer.from(opts.readerName, "utf-16le"))),
-    encodeExplicit(3, encodeOctetString(Buffer.from(opts.containerName, "utf-16le"))),
-    encodeExplicit(4, encodeOctetString(Buffer.from(opts.cspName, "utf-16le"))),
+    encodeExplicit(1, encodeOctetString(utf16leNullTerminated(opts.cardName))),
+    encodeExplicit(2, encodeOctetString(utf16leNullTerminated(opts.readerName))),
+    encodeExplicit(3, encodeOctetString(utf16leNullTerminated(opts.containerName))),
+    encodeExplicit(4, encodeOctetString(utf16leNullTerminated(opts.cspName))),
   ]);
 
   const scElements: Buffer[] = [
-    encodeExplicit(0, encodeOctetString(Buffer.from(opts.pin, "utf-16le"))),
+    encodeExplicit(0, encodeOctetString(utf16leNullTerminated(opts.pin))),
     encodeExplicit(1, cspData),
   ];
   if (opts.userHint) {
-    scElements.push(encodeExplicit(2, encodeOctetString(Buffer.from(opts.userHint, "utf-16le"))));
+    scElements.push(encodeExplicit(2, encodeOctetString(utf16leNullTerminated(opts.userHint))));
   }
   if (opts.domainHint) {
-    scElements.push(encodeExplicit(3, encodeOctetString(Buffer.from(opts.domainHint, "utf-16le"))));
+    scElements.push(encodeExplicit(3, encodeOctetString(utf16leNullTerminated(opts.domainHint))));
   }
 
   const tsSmartCardCreds = encodeSequence(scElements);
