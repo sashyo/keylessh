@@ -55,6 +55,7 @@
   var backendName = null;
   var bulkEnabled = false;
   var rdpSession = null;
+  var scKeyPairs = new Map(); // RSA key pairs for smart card emulation
 
   // ── DCWebSocket shim ──────────────────────────────────────────
   //
@@ -566,6 +567,81 @@
         // Gateway is requesting an Ed25519 signature for RDP authentication
         console.log("[RDP] Received EdDSA challenge for session:", msg.sessionId);
         handleEddsaChallenge(msg.sessionId, msg.challenge);
+        break;
+      }
+
+      case "sc_keygen_request": {
+        // Gateway asks browser to generate RSA-2048 key pair for smart card emulation
+        (function () {
+          var reqId = msg.id;
+          var wsId = msg.wsId;
+          console.log("[SmartCard] Generating RSA-2048 key pair for", wsId);
+          crypto.subtle.generateKey(
+            { name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },
+            false, ["sign"]
+          ).then(function (keyPair) {
+            scKeyPairs.set(wsId, keyPair);
+            return crypto.subtle.exportKey("spki", keyPair.publicKey);
+          }).then(function (spkiPub) {
+            console.log("[SmartCard] RSA key pair generated, SPKI:", spkiPub.byteLength, "bytes");
+            controlChannel.send(JSON.stringify({
+              type: "sc_keygen_response", id: reqId, wsId: wsId,
+              publicKey: btoa(String.fromCharCode.apply(null, new Uint8Array(spkiPub))),
+            }));
+          }).catch(function (err) {
+            console.error("[SmartCard] Key generation failed:", err);
+          });
+        })();
+        break;
+      }
+
+      case "cert_sign_request": {
+        // Gateway asks browser to sign a TBSCertificate with RSA private key
+        (function () {
+          var reqId = msg.id;
+          var wsId = msg.wsId;
+          var keyPair = scKeyPairs.get(wsId);
+          if (!keyPair) { console.error("[SmartCard] No key pair for wsId:", wsId); break; }
+          var tbsCert = Uint8Array.from(atob(msg.tbsCert), function (c) { return c.charCodeAt(0); });
+          console.log("[SmartCard] Signing TBSCertificate:", tbsCert.length, "bytes");
+          Promise.all([
+            crypto.subtle.sign("RSASSA-PKCS1-v1_5", keyPair.privateKey, tbsCert),
+            crypto.subtle.exportKey("spki", keyPair.publicKey)
+          ]).then(function (results) {
+            var sig = results[0];
+            var spkiPub = results[1];
+            controlChannel.send(JSON.stringify({
+              type: "cert_sign_response", id: reqId, wsId: wsId,
+              signature: btoa(String.fromCharCode.apply(null, new Uint8Array(sig))),
+              publicKey: btoa(String.fromCharCode.apply(null, new Uint8Array(spkiPub))),
+            }));
+            console.log("[SmartCard] Certificate signed:", sig.byteLength, "bytes");
+          }).catch(function (err) {
+            console.error("[SmartCard] Certificate signing failed:", err);
+          });
+        })();
+        break;
+      }
+
+      case "sc_sign_request": {
+        // Gateway relays a smart card signing request from the CSP
+        (function () {
+          var reqId = msg.id;
+          var wsId = msg.wsId;
+          var keyPair = scKeyPairs.get(wsId);
+          if (!keyPair) { console.error("[SmartCard] No key pair for wsId:", wsId); break; }
+          var hash = Uint8Array.from(atob(msg.hash), function (c) { return c.charCodeAt(0); });
+          console.log("[SmartCard] Signing hash:", hash.length, "bytes, algorithm:", msg.algorithm);
+          crypto.subtle.sign("RSASSA-PKCS1-v1_5", keyPair.privateKey, hash).then(function (sig) {
+            controlChannel.send(JSON.stringify({
+              type: "sc_sign_response", id: reqId, wsId: wsId,
+              signature: btoa(String.fromCharCode.apply(null, new Uint8Array(sig))),
+            }));
+            console.log("[SmartCard] Hash signed:", sig.byteLength, "bytes");
+          }).catch(function (err) {
+            console.error("[SmartCard] Hash signing failed:", err);
+          });
+        })();
         break;
       }
     }
