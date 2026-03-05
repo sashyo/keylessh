@@ -17,6 +17,7 @@ target_link_libraries(TideSSP PRIVATE
     ntdll
     advapi32
     bcrypt
+    netapi32
 )
 
 # SSP DLLs must export SpLsaModeInitialize

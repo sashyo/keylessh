@@ -192,14 +192,10 @@ export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCle
         console.log(`[RDCleanPath] Starting CredSSP with TideSSP/NEGOEX for "${backendName}"`);
         state = State.CREDSSP;
 
-        // Extract username from JWT (preferred_username or sub)
-        const username = (payload as any).preferred_username || (payload as any).sub;
-        if (!username) {
-          throw new Error("JWT has no username claim (preferred_username or sub)");
-        }
-
-        // Send JWT directly to TideSSP — it verifies the EdDSA signature
-        await performCredSSP(tlsSocket, username, request.proxyAuth, backend.rdpPassword);
+        // Send JWT directly to TideSSP — it verifies the EdDSA signature.
+        // Username is extracted by TideSSP during NLA and stored in the session map;
+        // LogonUserEx2 looks it up by session key during desktop logon.
+        await performCredSSP(tlsSocket, request.proxyAuth);
 
         console.log(`[RDCleanPath] CredSSP/NLA completed for "${backendName}" at ${Date.now()}`);
 
