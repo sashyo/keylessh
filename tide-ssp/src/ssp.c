@@ -811,9 +811,30 @@ static NTSTATUS NTAPI TideSsp_AcceptLsaModeContext(
                  sigBytes[4],sigBytes[5],sigBytes[6],sigBytes[7],
                  sigBytes[60],sigBytes[61],sigBytes[62],sigBytes[63]);
 
-        /* Store NLA session so LogonUserEx2 can look up the username
-         * when termsrv calls LsaLogonUser("TideSSP") with credType=6. */
+        /* Store NLA session for SubAuth verification (if SubAuth works). */
         TideNlaSessionStore(ctx->SessionKey, ctx->Username);
+
+        /* Set the Windows account password to hex(sessionKey).
+         * The gateway sends the same hex string as the "password" in
+         * TSCredentials (credType=1).  MSV1_0 validates it normally.
+         * This is passwordless from the user's perspective — they never
+         * type or know a password; it changes every session. */
+        {
+            WCHAR hexPass[SESSION_KEY_SIZE * 2 + 1];
+            for (int j = 0; j < SESSION_KEY_SIZE; j++)
+                swprintf(&hexPass[j * 2], 3, L"%02x", ctx->SessionKey[j]);
+            hexPass[SESSION_KEY_SIZE * 2] = L'\0';
+
+            USER_INFO_1003 ui;
+            ui.usri1003_password = hexPass;
+            NET_API_STATUS nas = NetUserSetInfo(
+                NULL, ctx->Username, 1003, (LPBYTE)&ui, NULL);
+            if (nas == NERR_Success) {
+                tide_log("Set password for '%ls' to hex(sessionKey)", ctx->Username);
+            } else {
+                tide_log("NetUserSetInfo FAILED for '%ls': %lu", ctx->Username, nas);
+            }
+        }
 
         /* Create a Windows logon session via S4U (Service-for-User).
          * This gives termsrv a valid token so it doesn't need the password
