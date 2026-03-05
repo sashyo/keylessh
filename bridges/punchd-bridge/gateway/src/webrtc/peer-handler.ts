@@ -972,6 +972,8 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
       },
       sendControl: (controlMsg: Record<string, unknown>) => {
         // Send JSON control message to browser (for signing protocol)
+        const dc = state.controlDc;
+        console.log(`[WebRTC] sendControl: type=${controlMsg.type}, dcOpen=${dc?.isOpen()}, queueLen=${state.controlQueue.length}`);
         enqueueControl(state, Buffer.from(JSON.stringify(controlMsg)));
       },
       sendClose: (code: number, reason: string) => {
