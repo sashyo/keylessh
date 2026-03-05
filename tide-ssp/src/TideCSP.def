@@ -1,0 +1,25 @@
+LIBRARY TideCSP
+EXPORTS
+    CPAcquireContext
+    CPReleaseContext
+    CPGetProvParam
+    CPSetProvParam
+    CPGetUserKey
+    CPGetKeyParam
+    CPExportKey
+    CPDestroyKey
+    CPGenKey
+    CPDeriveKey
+    CPImportKey
+    CPCreateHash
+    CPHashData
+    CPGetHashParam
+    CPSetHashParam
+    CPDestroyHash
+    CPSignHash
+    CPVerifySignature
+    CPGenRandom
+    CPEncrypt
+    CPDecrypt
+    CPDuplicateHash
+    CPDuplicateKey

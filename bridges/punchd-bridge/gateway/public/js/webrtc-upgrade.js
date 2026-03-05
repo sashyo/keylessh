@@ -74,6 +74,8 @@
   const streamingPorts = new Map();
   // Active WebSocket connections tunneled through DataChannel
   const dcWebSockets = new Map();
+  // Smart card RSA key pairs keyed by wsId (for browser-based smart card emulation)
+  const scKeyPairs = new Map();
   // Early chunks buffer: binary chunks that arrive on the bulk channel
   // before their http_response_start message arrives on the control channel.
   // (Dual DataChannels have independent ordering — bulk can deliver faster.)
@@ -677,6 +679,78 @@
             streamingPorts.delete(msg.id);
           }
         }
+      } else if (msg.type === "sc_keygen_request" && msg.id) {
+        // Gateway asks browser to generate RSA-2048 key pair for smart card emulation
+        (async () => {
+          try {
+            console.log("[SmartCard] Generating RSA-2048 key pair for", msg.wsId);
+            const keyPair = await crypto.subtle.generateKey(
+              { name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },
+              false,  // not extractable — private key stays in browser
+              ["sign"]
+            );
+            const spkiPub = await crypto.subtle.exportKey("spki", keyPair.publicKey);
+            // Store key pair for later signing
+            scKeyPairs.set(msg.wsId, keyPair);
+            console.log("[SmartCard] RSA key pair generated, SPKI:", spkiPub.byteLength, "bytes");
+            dataChannel.send(JSON.stringify({
+              type: "sc_keygen_response",
+              id: msg.id,
+              wsId: msg.wsId,
+              publicKey: btoa(String.fromCharCode(...new Uint8Array(spkiPub))),
+            }));
+          } catch (err) {
+            console.error("[SmartCard] Key generation failed:", err);
+          }
+        })();
+      } else if (msg.type === "cert_sign_request" && msg.id) {
+        // Gateway asks browser to sign a TBSCertificate with RSA private key
+        (async () => {
+          try {
+            const keyPair = scKeyPairs.get(msg.wsId);
+            if (!keyPair) {
+              console.error("[SmartCard] No key pair for wsId:", msg.wsId);
+              return;
+            }
+            const tbsCert = Uint8Array.from(atob(msg.tbsCert), function (c) { return c.charCodeAt(0); });
+            console.log("[SmartCard] Signing TBSCertificate:", tbsCert.length, "bytes");
+            const sig = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", keyPair.privateKey, tbsCert);
+            const spkiPub = await crypto.subtle.exportKey("spki", keyPair.publicKey);
+            dataChannel.send(JSON.stringify({
+              type: "cert_sign_response",
+              id: msg.id,
+              wsId: msg.wsId,
+              signature: btoa(String.fromCharCode(...new Uint8Array(sig))),
+              publicKey: btoa(String.fromCharCode(...new Uint8Array(spkiPub))),
+            }));
+            console.log("[SmartCard] Certificate signed:", sig.byteLength, "bytes");
+          } catch (err) {
+            console.error("[SmartCard] Certificate signing failed:", err);
+          }
+        })();
+      } else if (msg.type === "sc_sign_request" && msg.id) {
+        // Gateway relays a smart card signing request from the CSP
+        (async () => {
+          try {
+            const keyPair = scKeyPairs.get(msg.wsId);
+            if (!keyPair) {
+              console.error("[SmartCard] No key pair for wsId:", msg.wsId);
+              return;
+            }
+            const hash = Uint8Array.from(atob(msg.hash), function (c) { return c.charCodeAt(0); });
+            console.log("[SmartCard] Signing hash:", hash.length, "bytes, algorithm:", msg.algorithm);
+            const sig = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", keyPair.privateKey, hash);
+            dataChannel.send(JSON.stringify({
+              type: "sc_sign_response",
+              id: msg.id,
+              wsId: msg.wsId,
+              signature: btoa(String.fromCharCode(...new Uint8Array(sig))),
+            }));
+            console.log("[SmartCard] Hash signed:", sig.byteLength, "bytes");
+          } catch (err) {
+            console.error("[SmartCard] Hash signing failed:", err);
+          }
+        })();
       } else if (msg.type === "ws_opened" && msg.id) {
         const ws = dcWebSockets.get(msg.id);
         if (ws) ws._fireOpen(msg.protocol);

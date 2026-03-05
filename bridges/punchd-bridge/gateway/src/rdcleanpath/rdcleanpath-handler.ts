@@ -14,8 +14,9 @@
  * (no real WebSocket — messages flow over DataChannel).
  */
 
-import { connect as netConnect, type Socket } from "net";
+import { connect as netConnect, createServer, type Socket, type Server } from "net";
 import { connect as tlsConnect, type TLSSocket } from "tls";
+import { randomBytes } from "crypto";
 import type { JWTPayload } from "jose";
 import type { BackendEntry } from "../config.js";
 import {
@@ -25,20 +26,27 @@ import {
   RDCLEANPATH_ERROR_GENERAL,
   type RDCleanPathRequest,
 } from "./rdcleanpath.js";
-import { performCredSSP } from "./credssp-client.js";
+import { performCredSSP, type SmartCardInfo } from "./credssp-client.js";
+import { buildTbsCertificate, assembleCertificate } from "./cert-builder.js";
 
 // ── Public interface ─────────────────────────────────────────────
 
 export interface RDCleanPathSession {
   /** Handle a binary message from the client */
   handleMessage(data: Buffer): void;
+  /** Handle a JSON control message from the browser (signing responses) */
+  handleControlMessage(msg: Record<string, unknown>): void;
   /** Close the session */
   close(): void;
 }
 
 export interface RDCleanPathSessionOptions {
+  /** Virtual WebSocket ID for this session (used for message routing) */
+  wsId: string;
   /** Send a binary WS message back to the client */
   sendBinary: (data: Buffer) => void;
+  /** Send a JSON control message to the browser (signing requests) */
+  sendControl: (msg: Record<string, unknown>) => void;
   /** Send a close frame back to the client */
   sendClose: (code: number, reason: string) => void;
   /** Available backends for resolution */
@@ -65,6 +73,115 @@ const X224_READ_TIMEOUT = 10_000;
 
 // ── Session factory ──────────────────────────────────────────────
 
+// ── Signing relay: global map of active sessions for CSP → gateway relay ──
+
+interface SigningSession {
+  wsId: string;
+  sendControl: (msg: Record<string, unknown>) => void;
+  /** Resolves when browser sends sc_sign_response */
+  pendingSign: Map<string, (signature: Buffer) => void>;
+}
+
+const signingRelaySessions = new Map<string, SigningSession>();
+let signingRelayServer: Server | null = null;
+
+/**
+ * Start the signing relay TCP server (once, shared across sessions).
+ * CSP on Windows connects here to relay signing requests to the browser.
+ */
+export function startSigningRelay(port: number): void {
+  if (signingRelayServer) return;
+
+  signingRelayServer = createServer((sock: Socket) => {
+    console.log(`[SigningRelay] CSP connected from ${sock.remoteAddress}`);
+    let buf: Buffer<ArrayBufferLike> = Buffer.alloc(0);
+
+    sock.on("data", (data: Buffer) => {
+      buf = Buffer.concat([buf, data]);
+      processRelayMessages(sock, buf);
+    });
+
+    sock.on("error", (err) => {
+      console.error(`[SigningRelay] Socket error: ${err.message}`);
+    });
+
+    sock.on("close", () => {
+      console.log("[SigningRelay] CSP disconnected");
+    });
+
+    function processRelayMessages(sock: Socket, _buffer: Buffer): void {
+      let buffer = _buffer;
+      // Wire format: [4 bytes: msg length][1 byte: type][payload]
+      while (buffer.length >= 5) {
+        const msgLen = buffer.readUInt32LE(0);
+        if (buffer.length < 4 + msgLen) break;
+
+        const type = buffer[4];
+        const payload = buffer.subarray(5, 4 + msgLen);
+        buffer = Buffer.from(buffer.subarray(4 + msgLen));
+        buf = buffer;
+
+        if (type === 0x01) {
+          // HELLO: [16 bytes session token]
+          const token = payload.subarray(0, 16).toString("hex");
+          console.log(`[SigningRelay] HELLO from CSP, token=${token}`);
+          const session = signingRelaySessions.get(token);
+          if (!session) {
+            console.warn(`[SigningRelay] No session for token ${token}`);
+            sock.destroy();
+            return;
+          }
+          // Store socket reference on the session for sending results back
+          (sock as any)._signingSession = session;
+          // ACK
+          const ack = Buffer.alloc(5);
+          ack.writeUInt32LE(1, 0);
+          ack[4] = 0x04; // ACK type
+          sock.write(ack);
+        } else if (type === 0x02) {
+          // SIGN: [4 bytes hash length][hash bytes][4 bytes algId]
+          const session = (sock as any)._signingSession as SigningSession | undefined;
+          if (!session) {
+            console.warn("[SigningRelay] SIGN without HELLO");
+            sock.destroy();
+            return;
+          }
+          const hashLen = payload.readUInt32LE(0);
+          const hash = payload.subarray(4, 4 + hashLen);
+          const algId = payload.readUInt32LE(4 + hashLen);
+          const requestId = randomBytes(8).toString("hex");
+          console.log(`[SigningRelay] SIGN request: hashLen=${hashLen}, algId=${algId}, id=${requestId}`);
+
+          // Send to browser
+          session.sendControl({
+            type: "sc_sign_request",
+            id: requestId,
+            wsId: session.wsId,
+            hash: hash.toString("base64"),
+            algorithm: algId === 0x800c ? "SHA-256" : "SHA-1",
+          });
+
+          // Wait for browser response
+          session.pendingSign.set(requestId, (signature: Buffer) => {
+            // Send RESULT back to CSP: [4 bytes msg length][0x03][4 bytes sig length][sig]
+            const result = Buffer.alloc(4 + 1 + 4 + signature.length);
+            result.writeUInt32LE(1 + 4 + signature.length, 0);
+            result[4] = 0x03; // RESULT type
+            result.writeUInt32LE(signature.length, 5);
+            signature.copy(result, 9);
+            sock.write(result);
+            console.log(`[SigningRelay] Sent signature (${signature.length}b) to CSP`);
+          });
+        }
+      }
+    }
+  });
+
+  signingRelayServer.listen(port, "0.0.0.0", () => {
+    console.log(`[SigningRelay] Listening on port ${port}`);
+  });
+}
+
 export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCleanPathSession {
   let state = State.AWAITING_REQUEST;
   let tcpSocket: Socket | null = null;
@@ -72,6 +189,12 @@ export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCle
   let relayBytesToClient = 0;
   let relayBytesFromClient = 0;
   let mcsPatchProtocol = 0; // eddsa: original selectedProtocol to restore in MCS
+
+  // Pending control message resolvers (keyed by request type + id)
+  const pendingControlResponses = new Map<string, (msg: Record<string, unknown>) => void>();
+  // Signing relay session (registered when smart card mode is active)
+  let signingSessionToken: string | null = null;
+  const pendingSignCallbacks = new Map<string, (signature: Buffer) => void>();
 
   function sendError(errorCode: number, httpStatus?: number, wsaError?: number, tlsAlert?: number): void {
     try {
@@ -176,6 +299,7 @@ export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCle
       // Step 2: Send X.224 Connection Request
       // For eddsa backends, set RESTRICTED_ADMIN_MODE_REQUIRED flag so termsrv
       // uses the NLA token directly (no password re-auth with MSV1_0).
+      // NOTE: With smart card mode, we still set this flag for fallback.
       if (backend.auth === "eddsa") {
         patchX224RestrictedAdmin(request.x224ConnectionPdu);
       }
@@ -197,10 +321,99 @@ export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCle
         console.log(`[RDCleanPath] Starting CredSSP with TideSSP/NEGOEX for "${backendName}"`);
         state = State.CREDSSP;
 
-        // Send JWT directly to TideSSP — it verifies the EdDSA signature.
-        // Username is extracted by TideSSP during NLA and stored in the session map;
-        // LogonUserEx2 looks it up by session key during desktop logon.
-        await performCredSSP(tlsSocket, request.proxyAuth);
+        // ── Smart Card: certificate exchange with browser ──
+        // Request the browser to generate RSA key pair and sign a certificate.
+        let smartCardInfo: SmartCardInfo | undefined;
+
+        const scSessionToken = randomBytes(16);
+        const requestId = randomBytes(8).toString("hex");
+
+        // 1. Send cert_sign_request: ask browser to generate RSA key + sign TBSCertificate
+        //    We first need the browser's public key, so we ask it to generate and send back.
+        console.log(`[RDCleanPath] Requesting browser RSA key + certificate signature (id=${requestId})`);
+
+        // Extract username from JWT for CN in certificate
+        const jwtPayload = JSON.parse(Buffer.from(request.proxyAuth.split(".")[1], "base64url").toString());
+        const certUsername = jwtPayload.preferred_username || jwtPayload.sub || "user";
+
+        // Ask browser to generate key pair and send public key + sign TBSCertificate
+        // We send a two-phase request: first get the public key, then send TBSCert for signing
+        const certSignPromise = new Promise<{ signature: Buffer; publicKey: Buffer }>((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            pendingControlResponses.delete(`cert_sign_response:${requestId}`);
+            reject(new Error("Browser certificate signing timeout"));
+          }, 15_000);
+
+          pendingControlResponses.set(`cert_sign_response:${requestId}`, (msg) => {
+            clearTimeout(timeout);
+            resolve({
+              signature: Buffer.from(msg.signature as string, "base64"),
+              publicKey: Buffer.from(msg.publicKey as string, "base64"),
+            });
+          });
+        });
+
+        // Tell the browser to generate an RSA key pair and send back the public key
+        // The browser will generate the key, build the TBSCert client-side,
+        // and sign it — but we need to build TBSCert on the gateway side.
+        // So we do a two-step: first ask for publicKey, then send tbsCert for signing.
+        // Simplification: send username + sessionToken, browser generates key,
+        // gateway builds tbsCert from publicKey, sends it back for signing.
+        opts.sendControl({
+          type: "sc_keygen_request",
+          id: requestId,
+          wsId: opts.wsId,
+          username: certUsername,
+        });
+
+        // Wait for browser to send back its public key
+        const keygenPromise = new Promise<Buffer>((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            pendingControlResponses.delete(`sc_keygen_response:${requestId}`);
+            reject(new Error("Browser keygen timeout"));
+          }, 10_000);
+
+          pendingControlResponses.set(`sc_keygen_response:${requestId}`, (msg) => {
+            clearTimeout(timeout);
+            resolve(Buffer.from(msg.publicKey as string, "base64"));
+          });
+        });
+
+        const browserPublicKey = await keygenPromise;
+        console.log(`[RDCleanPath] Got browser RSA public key: ${browserPublicKey.length} bytes`);
+
+        // Build TBSCertificate with the browser's public key
+        const tbsCert = buildTbsCertificate(certUsername, browserPublicKey);
+        console.log(`[RDCleanPath] Built TBSCertificate: ${tbsCert.length} bytes`);
+
+        // Send TBSCertificate to browser for signing
+        opts.sendControl({
+          type: "cert_sign_request",
+          id: requestId,
+          wsId: opts.wsId,
+          tbsCert: tbsCert.toString("base64"),
+        });
+
+        const { signature: certSig, publicKey: _pk } = await certSignPromise;
+        console.log(`[RDCleanPath] Got browser certificate signature: ${certSig.length} bytes`);
+
+        // Assemble full X.509 certificate
+        const certificate = assembleCertificate(tbsCert, certSig);
+        console.log(`[RDCleanPath] Assembled certificate: ${certificate.length} bytes`);
+
+        smartCardInfo = { certificate, sessionToken: scSessionToken };
+
+        // Register signing relay session for CSP connections
+        signingSessionToken = scSessionToken.toString("hex");
+        signingRelaySessions.set(signingSessionToken, {
+          wsId: opts.wsId,
+          sendControl: opts.sendControl,
+          pendingSign: pendingSignCallbacks,
+        });
+        console.log(`[RDCleanPath] Registered signing relay session: ${signingSessionToken}`);
+
+        // Send JWT + certificate to TideSSP via NEGOEX
+        await performCredSSP(tlsSocket, request.proxyAuth, smartCardInfo);
 
         console.log(`[RDCleanPath] CredSSP/NLA completed for "${backendName}" at ${Date.now()}`);
 
@@ -371,7 +584,42 @@ export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCle
       }
     },
 
+    handleControlMessage(msg: Record<string, unknown>): void {
+      const msgType = msg.type as string;
+      const msgId = msg.id as string;
+
+      if (msgType === "sc_keygen_response" && msgId) {
+        const key = `sc_keygen_response:${msgId}`;
+        const resolver = pendingControlResponses.get(key);
+        if (resolver) {
+          pendingControlResponses.delete(key);
+          resolver(msg);
+        }
+      } else if (msgType === "cert_sign_response" && msgId) {
+        const key = `cert_sign_response:${msgId}`;
+        const resolver = pendingControlResponses.get(key);
+        if (resolver) {
+          pendingControlResponses.delete(key);
+          resolver(msg);
+        }
+      } else if (msgType === "sc_sign_response" && msgId) {
+        // Route to signing relay callback
+        const sigB64 = msg.signature as string;
+        const sigBuf = Buffer.from(sigB64, "base64");
+        const cb = pendingSignCallbacks.get(msgId);
+        if (cb) {
+          pendingSignCallbacks.delete(msgId);
+          cb(sigBuf);
+        }
+      }
+    },
+
     close(): void {
+      // Unregister signing relay session
+      if (signingSessionToken) {
+        signingRelaySessions.delete(signingSessionToken);
+        signingSessionToken = null;
+      }
       cleanup();
     },
   };

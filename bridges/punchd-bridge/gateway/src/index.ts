@@ -18,11 +18,21 @@ import { createProxy } from "./proxy/http-proxy.js";
 import { createHealthServer } from "./health.js";
 import { registerWithStun } from "./registration/stun-client.js";
 import { generateSelfSignedCert } from "./tls/self-signed.js";
+import { startSigningRelay } from "./rdcleanpath/rdcleanpath-handler.js";
 
 async function main() {
   // ── Configuration ────────────────────────────────────────────────
 
   const config = loadConfig();
+
+  // ── Smart Card Signing Relay ──────────────────────────────────────
+  // Start TCP signing relay for any eddsa backend with sc-relay-port configured
+  for (const backend of config.backends) {
+    if (backend.auth === "eddsa" && backend.scRelayPort) {
+      startSigningRelay(backend.scRelayPort);
+      break; // One relay server shared across all backends
+    }
+  }
   const tcConfig = loadTidecloakConfig();
 
   const auth = createTidecloakAuth(tcConfig);

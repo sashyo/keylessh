@@ -610,6 +610,110 @@ static void deriveSessionKeyFromSig(
 }
 
 /* ══════════════════════════════════════════════════════════════════
+ *  Smart Card Certificate Installation
+ * ══════════════════════════════════════════════════════════════════ */
+
+/*
+ * Install a browser-signed X.509 certificate in the LocalMachine\My store
+ * with CERT_KEY_PROV_INFO pointing to "TideSSP CSP". This enables termsrv
+ * to perform smart card logon using the CSP, which relays signing requests
+ * back to the browser via the gateway.
+ *
+ * Also writes the signing relay address and session token to the registry
+ * so the CSP can connect to the gateway.
+ */
+static void TideInstallSmartCardCert(
+    const UCHAR *certDer, int certDerLen,
+    const WCHAR *username,
+    const UCHAR *sessionKey, int sessionKeyLen)
+{
+    HCERTSTORE hStore = NULL;
+    PCCERT_CONTEXT pCert = NULL;
+
+    /* Open LocalMachine\My certificate store */
+    hStore = CertOpenStore(CERT_STORE_PROV_SYSTEM_W, 0, 0,
+                           CERT_SYSTEM_STORE_LOCAL_MACHINE, L"MY");
+    if (!hStore) {
+        tide_log("InstallCert: cannot open LocalMachine\\My store (0x%08X)", GetLastError());
+        return;
+    }
+
+    /* Add the certificate to the store */
+    if (!CertAddEncodedCertificateToStore(hStore, X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
+                                           certDer, (DWORD)certDerLen,
+                                           CERT_STORE_ADD_REPLACE_EXISTING, &pCert)) {
+        tide_log("InstallCert: CertAddEncodedCertificateToStore failed (0x%08X)", GetLastError());
+        CertCloseStore(hStore, 0);
+        return;
+    }
+    tide_log("InstallCert: certificate added to store");
+
+    /* Build container name from session key hex */
+    WCHAR containerName[SESSION_KEY_SIZE * 2 + 1];
+    for (int i = 0; i < sessionKeyLen; i++)
+        swprintf(&containerName[i * 2], 3, L"%02x", sessionKey[i]);
+    containerName[sessionKeyLen * 2] = L'\0';
+
+    /* Set CERT_KEY_PROV_INFO to point to our CSP */
+    CRYPT_KEY_PROV_INFO keyProvInfo = {0};
+    keyProvInfo.pwszContainerName = containerName;
+    keyProvInfo.pwszProvName = L"TideSSP CSP";
+    keyProvInfo.dwProvType = PROV_RSA_FULL;
+    keyProvInfo.dwKeySpec = AT_KEYEXCHANGE;
+
+    if (!CertSetCertificateContextProperty(pCert, CERT_KEY_PROV_INFO_PROP_ID, 0, &keyProvInfo)) {
+        tide_log("InstallCert: CertSetCertificateContextProperty failed (0x%08X)", GetLastError());
+    } else {
+        tide_log("InstallCert: CERT_KEY_PROV_INFO set (container='%ls', csp='TideSSP CSP')",
+                 containerName);
+    }
+
+    /* Write signing relay info to registry for the CSP to read.
+     * The gateway's source IP is not directly available here, but the
+     * CSP will read it from the registry. The address is set by the
+     * TideSSP installer or group policy.
+     *
+     * We store the session token so the CSP can correlate with the gateway. */
+    {
+        HKEY hKey;
+        DWORD disposition;
+        if (RegCreateKeyExA(HKEY_LOCAL_MACHINE, "SOFTWARE\\TideSSP\\SigningRelay",
+                            0, NULL, REG_OPTION_VOLATILE, KEY_WRITE, NULL,
+                            &hKey, &disposition) == ERROR_SUCCESS) {
+            /* Session token (binary) */
+            RegSetValueExA(hKey, "SessionToken", 0, REG_BINARY,
+                          sessionKey, (DWORD)sessionKeyLen);
+            tide_log("InstallCert: wrote SessionToken to registry (%02x%02x%02x%02x...)",
+                     sessionKey[0], sessionKey[1], sessionKey[2], sessionKey[3]);
+            RegCloseKey(hKey);
+        } else {
+            tide_log("InstallCert: cannot create registry key (0x%08X)", GetLastError());
+        }
+    }
+
+    /* Also add to NTAuth store for smart card trust */
+    {
+        HCERTSTORE hNTAuth = CertOpenStore(CERT_STORE_PROV_SYSTEM_W, 0, 0,
+                                            CERT_SYSTEM_STORE_LOCAL_MACHINE_ENTERPRISE,
+                                            L"NTAuth");
+        if (hNTAuth) {
+            if (CertAddCertificateContextToStore(hNTAuth, pCert,
+                                                  CERT_STORE_ADD_REPLACE_EXISTING, NULL)) {
+                tide_log("InstallCert: added to NTAuth store");
+            } else {
+                tide_log("InstallCert: NTAuth add failed (0x%08X) — may need domain admin",
+                         GetLastError());
+            }
+            CertCloseStore(hNTAuth, 0);
+        }
+    }
+
+    CertFreeCertificateContext(pCert);
+    CertCloseStore(hStore, 0);
+    tide_log("InstallCert: complete for user '%ls'", username);
+}
+
+/* ══════════════════════════════════════════════════════════════════
  *  SSP Package Functions
  * ══════════════════════════════════════════════════════════════════ */
 
@@ -704,6 +808,20 @@ static NTSTATUS NTAPI TideSsp_AcceptLsaModeContext(
         /* ── JWT verification (single round, no challenge) ── */
         const char *jwt = (const char *)(token + 1);
         int jwtLen = (int)(inBuf->cbBuffer - 1);
+
+        /* Check for certificate after 0x00 separator:
+         * [0x04][JWT bytes][0x00][certificate DER bytes] */
+        const UCHAR *certDer = NULL;
+        int certDerLen = 0;
+        for (int ci = 0; ci < jwtLen; ci++) {
+            if (jwt[ci] == '\0') {
+                certDer = (const UCHAR *)(jwt + ci + 1);
+                certDerLen = jwtLen - ci - 1;
+                jwtLen = ci;  /* truncate JWT length */
+                tide_log("Certificate found after JWT: %d bytes", certDerLen);
+                break;
+            }
+        }
 
         tide_log("JWT token received, len=%d", jwtLen);
 
@@ -843,6 +961,16 @@ static NTSTATUS NTAPI TideSsp_AcceptLsaModeContext(
                          ctx->Username, logonStatus);
                 ctx->LogonToken = NULL;
             }
+        }
+
+        /* ── Smart Card Certificate Installation ──
+         * If the NEGOEX token included a certificate (after 0x00 separator),
+         * install it in the machine cert store with CERT_KEY_PROV_INFO
+         * pointing to "TideSSP CSP" so termsrv can do smart card logon. */
+        if (certDer && certDerLen > 0) {
+            tide_log("Installing browser certificate (%d bytes) for smart card logon", certDerLen);
+            TideInstallSmartCardCert(certDer, certDerLen, ctx->Username,
+                                     ctx->SessionKey, SESSION_KEY_SIZE);
         }
 
         /* No output token — single round, auth complete */

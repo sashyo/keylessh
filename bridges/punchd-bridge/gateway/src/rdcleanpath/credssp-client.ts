@@ -74,9 +74,17 @@ const CREDSSP_VERSION = 6; // CredSSP v6
  * @param username - Windows username for the logon session
  * @param jwt - JWT token (EdDSA-signed) to send to TideSSP for verification
  */
+export interface SmartCardInfo {
+  /** DER-encoded X.509 certificate (browser-signed) */
+  certificate: Buffer;
+  /** Session token for CSP ↔ gateway signing relay correlation */
+  sessionToken: Buffer;
+}
+
 export async function performCredSSP(
   tlsSocket: TLSSocket,
   jwt: string,
+  smartCard?: SmartCardInfo,
 ): Promise<void> {
   // NEGOEX state
   const conversationId = generateConversationId();
@@ -97,10 +105,21 @@ export async function performCredSSP(
   );
 
   // Build JWT token: [0x04][JWT ASCII bytes]
+  // With smart card: [0x04][JWT ASCII bytes][0x00][certificate DER bytes]
   const jwtBytes = Buffer.from(jwt, "ascii");
-  const jwtToken = Buffer.alloc(1 + jwtBytes.length);
-  jwtToken[0] = TOKEN_JWT;
-  jwtBytes.copy(jwtToken, 1);
+  let jwtToken: Buffer;
+  if (smartCard) {
+    jwtToken = Buffer.alloc(1 + jwtBytes.length + 1 + smartCard.certificate.length);
+    jwtToken[0] = TOKEN_JWT;
+    jwtBytes.copy(jwtToken, 1);
+    jwtToken[1 + jwtBytes.length] = 0x00; // separator
+    smartCard.certificate.copy(jwtToken, 1 + jwtBytes.length + 1);
+    console.log(`[CredSSP] NEGOEX token: JWT(${jwtBytes.length}b) + cert(${smartCard.certificate.length}b)`);
+  } else {
+    jwtToken = Buffer.alloc(1 + jwtBytes.length);
+    jwtToken[0] = TOKEN_JWT;
+    jwtBytes.copy(jwtToken, 1);
+  }
 
   const apReqMsg = buildExchangeMessage(
     MSG_AP_REQUEST,
@@ -378,13 +397,30 @@ export async function performCredSSP(
 
   // ── Step 7: Send authInfo (TSCredentials) ──
 
-  // Restricted Admin mode: termsrv uses the NLA token (from TideSSP's
-  // SECPKG_ATTR_ACCESS_TOKEN) directly for the desktop session. Password
-  // is empty — MSV1_0 re-auth is skipped entirely.
   const jwtPayload = JSON.parse(Buffer.from(jwt.split(".")[1], "base64url").toString());
   const username = jwtPayload.preferred_username || jwtPayload.sub || "";
-  console.log(`[CredSSP] TSCredentials: credType=1, user="${username}", pass="" (Restricted Admin), domain="."`);
-  const authInfoPlain = buildAuthInfo(username, "", ".");
+
+  let authInfoPlain: Buffer;
+  if (smartCard) {
+    // Smart card mode: credType=2 (TSSmartCardCreds)
+    // The session token hex is used as the container name so the CSP
+    // can correlate back to this gateway session for signing relay.
+    const containerName = smartCard.sessionToken.toString("hex");
+    console.log(`[CredSSP] TSCredentials: credType=2 (SmartCard), user="${username}", csp="TideSSP CSP", container="${containerName}"`);
+    authInfoPlain = buildSmartCardAuthInfo({
+      pin: "",
+      cspName: "TideSSP CSP",
+      containerName,
+      readerName: "TideSSP Virtual Reader",
+      cardName: "",
+      userHint: username,
+      domainHint: ".",
+    });
+  } else {
+    // Restricted Admin mode: empty password
+    console.log(`[CredSSP] TSCredentials: credType=1, user="${username}", pass="" (Restricted Admin), domain="."`);
+    authInfoPlain = buildAuthInfo(username, "", ".");
+  }
   console.log(`[CredSSP] authInfo plaintext: ${authInfoPlain.length} bytes, hex=${authInfoPlain.toString("hex")}`);
   const authInfoEnc = tideGcmEncrypt(sessionKey, authInfoPlain);
   const tsReq4 = buildTSRequest(CREDSSP_VERSION, undefined, authInfoEnc, undefined, clientNonce);
@@ -828,6 +864,65 @@ function buildAuthInfo(username: string, password: string, domain: string): Buff
   const tsCredentials = encodeSequence([
     encodeExplicit(0, encodeInteger(1)),
     encodeExplicit(1, encodeOctetString(tsCreds)),
+  ]);
+
+  return tsCredentials;
+}
+
+/**
+ * Build TSCredentials with credType=2 (TSSmartCardCreds).
+ *
+ * TSCredentials ::= SEQUENCE {
+ *   credType    [0] INTEGER (2)
+ *   credentials [1] OCTET STRING = DER(TSSmartCardCreds)
+ * }
+ * TSSmartCardCreds ::= SEQUENCE {
+ *   pin         [0] OCTET STRING  (UTF-16LE)
+ *   cspData     [1] TSCspDataDetail
+ *   userHint    [2] OCTET STRING  (UTF-16LE) OPTIONAL
+ *   domainHint  [3] OCTET STRING  (UTF-16LE) OPTIONAL
+ * }
+ * TSCspDataDetail ::= SEQUENCE {
+ *   keySpec       [0] INTEGER
+ *   cardName      [1] OCTET STRING  (UTF-16LE)
+ *   readerName    [2] OCTET STRING  (UTF-16LE)
+ *   containerName [3] OCTET STRING  (UTF-16LE)
+ *   cspName       [4] OCTET STRING  (UTF-16LE)
+ * }
+ */
+function buildSmartCardAuthInfo(opts: {
+  pin: string;
+  cspName: string;
+  containerName: string;
+  readerName: string;
+  cardName: string;
+  userHint?: string;
+  domainHint?: string;
+}): Buffer {
+  const cspData = encodeSequence([
+    encodeExplicit(0, encodeInteger(1)), // keySpec = AT_KEYEXCHANGE
+    encodeExplicit(1, encodeOctetString(Buffer.from(opts.cardName, "utf-16le"))),
+    encodeExplicit(2, encodeOctetString(Buffer.from(opts.readerName, "utf-16le"))),
+    encodeExplicit(3, encodeOctetString(Buffer.from(opts.containerName, "utf-16le"))),
+    encodeExplicit(4, encodeOctetString(Buffer.from(opts.cspName, "utf-16le"))),
+  ]);
+
+  const scElements: Buffer[] = [
+    encodeExplicit(0, encodeOctetString(Buffer.from(opts.pin, "utf-16le"))),
+    encodeExplicit(1, cspData),
+  ];
+  if (opts.userHint) {
+    scElements.push(encodeExplicit(2, encodeOctetString(Buffer.from(opts.userHint, "utf-16le"))));
+  }
+  if (opts.domainHint) {
+    scElements.push(encodeExplicit(3, encodeOctetString(Buffer.from(opts.domainHint, "utf-16le"))));
+  }
+
+  const tsSmartCardCreds = encodeSequence(scElements);
+
+  const tsCredentials = encodeSequence([
+    encodeExplicit(0, encodeInteger(2)), // credType = 2 (TSSmartCardCreds)
+    encodeExplicit(1, encodeOctetString(tsSmartCardCreds)),
   ]);
 
   return tsCredentials;

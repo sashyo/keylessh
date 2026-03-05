@@ -358,6 +358,17 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
           handleTcpOpen(state, parsed);
         } else if (parsed.type === "tcp_close") {
           handleTcpClose(state, parsed.id);
+        } else if (parsed.type === "sc_keygen_response" || parsed.type === "cert_sign_response" || parsed.type === "sc_sign_response") {
+          // Route signing protocol messages to the correct RDCleanPath session
+          const wsId = parsed.wsId as string;
+          if (wsId) {
+            const rdcp = state.rdcleanpathSessions.get(wsId);
+            if (rdcp) {
+              rdcp.handleControlMessage(parsed);
+            } else {
+              console.warn(`[WebRTC] Signing message for unknown session: ${wsId}`);
+            }
+          }
         } else if (parsed.type === "capabilities") {
           // Client capability handshake — respond with our supported features
           const clientFeatures: string[] = parsed.features || [];
@@ -944,6 +955,7 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
     })));
 
     const session = createRDCleanPathSession({
+      wsId: msg.id,
       sendBinary: (data: Buffer) => {
         // Use binary WS fast-path via bulk channel when available
         if (state.capabilities.has("binary-ws") && state.bulkDc?.isOpen()) {
@@ -957,6 +969,10 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
             data: data.toString("base64"), binary: true,
           })));
         }
+      },
+      sendControl: (controlMsg: Record<string, unknown>) => {
+        // Send JSON control message to browser (for signing protocol)
+        enqueueControl(state, Buffer.from(JSON.stringify(controlMsg)));
       },
       sendClose: (code: number, reason: string) => {
         state.rdcleanpathSessions.delete(msg.id);

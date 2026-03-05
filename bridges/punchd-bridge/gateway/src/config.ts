@@ -27,6 +27,8 @@ export interface BackendEntry {
   noAuth?: boolean;
   /** Strip Authorization header before proxying to this backend */
   stripAuth?: boolean;
+  /** Port for the CSP signing relay (smart card emulation) */
+  scRelayPort?: number;
 }
 
 export interface ServerConfig {
@@ -130,7 +132,8 @@ function parseBackends(): BackendEntry[] {
       let stripAuth = false;
       let auth: "password" | "eddsa" = "password";
       let rdpPassword: string | undefined;
-      // Parse suffix flags: ;noauth, ;stripauth, ;eddsa, ;pass=xxx (order-independent, repeatable)
+      let scRelayPort: number | undefined;
+      // Parse suffix flags: ;noauth, ;stripauth, ;eddsa, ;pass=xxx, ;sc-relay-port=N (order-independent, repeatable)
       let changed = true;
       while (changed) {
         changed = false;
@@ -154,11 +157,17 @@ function parseBackends(): BackendEntry[] {
             rawUrl = rawUrl.slice(0, rawUrl.length - passMatch[0].length).trim();
             changed = true;
           }
+          const scMatch = rawUrl.match(/;sc-relay-port=(\d+)$/i);
+          if (scMatch) {
+            scRelayPort = parseInt(scMatch[1], 10);
+            rawUrl = rawUrl.slice(0, rawUrl.length - scMatch[0].length).trim();
+            changed = true;
+          }
         }
       }
       // Detect protocol from URL scheme
       const protocol: "http" | "rdp" = rawUrl.startsWith("rdp://") ? "rdp" : "http";
-      return { name: entry.slice(0, eq).trim(), url: rawUrl, protocol, auth: auth !== "password" ? auth : undefined, rdpPassword, noAuth: noAuth || undefined, stripAuth: stripAuth || undefined };
+      return { name: entry.slice(0, eq).trim(), url: rawUrl, protocol, auth: auth !== "password" ? auth : undefined, rdpPassword, noAuth: noAuth || undefined, stripAuth: stripAuth || undefined, scRelayPort };
     }).filter((b) => b.url);
   }
 

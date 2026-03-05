@@ -18,6 +18,7 @@ target_link_libraries(TideSSP PRIVATE
     advapi32
     bcrypt
     netapi32
+    crypt32
 )
 
 # SSP DLLs must export SpLsaModeInitialize
@@ -35,4 +36,32 @@ if(MSVC)
     )
 endif()
 
-install(TARGETS TideSSP RUNTIME DESTINATION bin)
+# ── TideCSP: Cryptographic Service Provider for browser smart card emulation ──
+
+add_library(TideCSP SHARED
+    src/csp.c
+)
+
+target_include_directories(TideCSP PRIVATE src)
+
+target_link_libraries(TideCSP PRIVATE
+    advapi32
+    bcrypt
+    crypt32
+    ws2_32
+)
+
+target_compile_definitions(TideCSP PRIVATE
+    SECURITY_WIN32
+    UNICODE
+    _UNICODE
+)
+
+if(MSVC)
+    target_compile_options(TideCSP PRIVATE /W4)
+    set_target_properties(TideCSP PROPERTIES
+        LINK_FLAGS "/DEF:${CMAKE_CURRENT_SOURCE_DIR}/src/TideCSP.def"
+    )
+endif()
+
+install(TARGETS TideSSP TideCSP RUNTIME DESTINATION bin)
