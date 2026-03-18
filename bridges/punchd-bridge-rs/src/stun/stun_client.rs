@@ -443,6 +443,7 @@ async fn handle_http_request(
 
         let client = reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(REQUEST_TIMEOUT)
             .build()
             .unwrap();
