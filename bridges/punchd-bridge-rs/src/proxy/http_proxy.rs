@@ -662,7 +662,11 @@ pub fn build_proxy_state(
     auth: Arc<TidecloakAuth>,
     use_tls: bool,
 ) -> Arc<ProxyState> {
-    let base_url = tc_config.auth_server_url.trim_end_matches('/');
+    let base_url = config
+        .tc_internal_url
+        .as_deref()
+        .unwrap_or(&tc_config.auth_server_url)
+        .trim_end_matches('/');
     let realm = &tc_config.realm;
 
     // Build OIDC endpoint URLs for the TideCloak server
@@ -709,7 +713,7 @@ pub fn build_proxy_state(
         }
     }
 
-    let tc_proxy_url = url::Url::parse(&format!("{base_url}/")).unwrap();
+    let tc_proxy_url = url::Url::parse(&format!("{}/", base_url)).unwrap();
     let tc_public_origin = config.auth_server_public_url.clone();
 
     // Resolve public directory: check next to executable first, then cwd
