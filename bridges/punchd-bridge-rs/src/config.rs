@@ -122,15 +122,37 @@ pub struct TidecloakConfig {
 
 // ── Config file path ────────────────────────────────────────────
 
+/// Config directory: ~/.keylessh/ (or %APPDATA%\KeyleSSH\ on Windows)
+pub fn config_dir() -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(appdata) = env::var("APPDATA") {
+            return PathBuf::from(appdata).join("KeyleSSH");
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Ok(home) = env::var("HOME") {
+            return PathBuf::from(home).join(".keylessh");
+        }
+    }
+    // Fallback: next to the executable
+    env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
 pub fn config_file_path() -> PathBuf {
-    // Look next to the executable first, then current dir
+    let dir = config_dir();
+    // If config already exists next to exe (portable mode), use that
     if let Ok(exe) = env::current_exe() {
         let beside_exe = exe.parent().unwrap_or(exe.as_ref()).join("gateway.toml");
         if beside_exe.exists() {
             return beside_exe;
         }
     }
-    PathBuf::from("gateway.toml")
+    dir.join("gateway.toml")
 }
 
 fn load_toml() -> GatewayToml {
@@ -264,12 +286,25 @@ pub fn load_tidecloak_config() -> TidecloakConfig {
         String::from_utf8(bytes).expect("Invalid UTF-8 in TideCloak config")
     } else {
         let path = get_val(&toml_cfg.tidecloak_config_path, "TIDECLOAK_CONFIG_PATH")
-            .map(PathBuf::from)
+            .map(|p| {
+                let pb = PathBuf::from(&p);
+                // If relative path, resolve against config dir
+                if pb.is_relative() && !pb.exists() {
+                    let in_config_dir = config_dir().join(&pb);
+                    if in_config_dir.exists() {
+                        return in_config_dir;
+                    }
+                }
+                pb
+            })
             .unwrap_or_else(|| {
-                // Look next to the executable
+                // Check config dir, then next to exe, then cwd
+                let in_config = config_dir().join("tidecloak.json");
+                if in_config.exists() {
+                    return in_config;
+                }
                 if let Ok(exe) = env::current_exe() {
-                    let dir = exe.parent().unwrap_or(exe.as_ref());
-                    let beside = dir.join("tidecloak.json");
+                    let beside = exe.parent().unwrap_or(exe.as_ref()).join("tidecloak.json");
                     if beside.exists() {
                         return beside;
                     }
@@ -279,7 +314,7 @@ pub fn load_tidecloak_config() -> TidecloakConfig {
         eprintln!("[Gateway] Loading JWKS from {}", path.display());
         fs::read_to_string(&path).unwrap_or_else(|e| {
             eprintln!("[Gateway] Failed to read {}: {e}", path.display());
-            eprintln!("[Gateway] Place tidecloak.json next to the executable or set tidecloak_config_path in gateway.toml");
+            eprintln!("[Gateway] Place tidecloak.json in {} or set tidecloak_config_path in gateway.toml", config_dir().display());
             std::process::exit(1);
         })
     };

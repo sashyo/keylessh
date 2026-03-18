@@ -11,8 +11,16 @@
 /// using the refresh token cookie before proxying.
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+// ── Embedded static assets (baked into the binary) ──────────────
+static ASSET_RDP_HTML: &str = include_str!("../../public/rdp.html");
+static ASSET_JS_SW: &str = include_str!("../../public/js/sw.js");
+static ASSET_JS_RDP_CLIENT: &str = include_str!("../../public/js/rdp-client.js");
+static ASSET_JS_WEBRTC_UPGRADE: &str = include_str!("../../public/js/webrtc-upgrade.js");
+static ASSET_JS_TIDE_E2E: &str = include_str!("../../public/js/tide-e2e.js");
+static ASSET_WASM_JS: &str = include_str!("../../public/wasm/ironrdp_web.js");
+static ASSET_WASM_BG: &[u8] = include_bytes!("../../public/wasm/ironrdp_web_bg.wasm");
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
@@ -82,7 +90,6 @@ pub struct ProxyState {
     pub use_tls: bool,
     pub http_client: reqwest::Client,
     pub session_token_hits: DashMap<String, Vec<u64>>,
-    pub public_dir: PathBuf,
     pub tc_proxy_url: url::Url,
     pub tc_public_origin: Option<String>,
     pub gateway_id: Option<String>,
@@ -408,21 +415,6 @@ impl ProxyState {
             .build()
             .expect("Failed to build HTTP client");
 
-        // Resolve public directory: check next to executable first, then cwd
-        let public_dir = {
-            let beside_exe = std::env::current_exe()
-                .ok()
-                .and_then(|p| p.parent().map(|p| p.join("public")));
-            if beside_exe.as_ref().map_or(false, |p| p.exists()) {
-                beside_exe.unwrap()
-            } else if PathBuf::from("public").exists() {
-                std::fs::canonicalize("public").unwrap_or_else(|_| PathBuf::from("public"))
-            } else {
-                beside_exe.unwrap_or_else(|| PathBuf::from("public"))
-            }
-        };
-        eprintln!("[Gateway] Public dir: {}", public_dir.display());
-
         Self {
             use_tls: config.https,
             gateway_id: Some(config.gateway_id.clone()),
@@ -443,7 +435,6 @@ impl ProxyState {
             refresh_in_flight: DashMap::new(),
             http_client,
             session_token_hits: DashMap::new(),
-            public_dir,
             tc_proxy_url,
             tc_public_origin,
             default_backend_name,
@@ -722,20 +713,6 @@ pub fn build_proxy_state(
     let tc_public_origin = config.auth_server_public_url.clone();
 
     // Resolve public directory: check next to executable first, then cwd
-    let public_dir = {
-        let beside_exe = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|p| p.join("public")));
-        if beside_exe.as_ref().map_or(false, |p| p.exists()) {
-            beside_exe.unwrap()
-        } else if PathBuf::from("public").exists() {
-            std::fs::canonicalize("public").unwrap_or_else(|_| PathBuf::from("public"))
-        } else {
-            beside_exe.unwrap_or_else(|| PathBuf::from("public"))
-        }
-    };
-    eprintln!("[Gateway] Public dir: {}", public_dir.display());
-
     let http_client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
         .redirect(reqwest::redirect::Policy::none())
@@ -761,7 +738,6 @@ pub fn build_proxy_state(
         use_tls,
         http_client,
         session_token_hits: DashMap::new(),
-        public_dir,
         tc_proxy_url,
         tc_public_origin,
         gateway_id: Some(config.gateway_id.clone()),
@@ -869,41 +845,43 @@ async fn handle_request(
         return make_response(StatusCode::NO_CONTENT, resp_headers, "");
     }
 
-    // WASM files
-    if effective_path.starts_with("/wasm/") {
-        let ext = effective_path.rsplit('.').next().unwrap_or("");
-        return match ext {
-            "wasm" => serve_binary_file(&state, &effective_path[1..], "application/wasm", resp_headers),
-            "js" => serve_text_file(
-                &state,
-                &effective_path[1..],
-                "application/javascript; charset=utf-8",
-                resp_headers,
-            ),
-            _ => make_response(StatusCode::NOT_FOUND, resp_headers, "Not found"),
-        };
+    // WASM files (embedded)
+    if effective_path == "/wasm/ironrdp_web_bg.wasm" {
+        resp_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/wasm"));
+        return make_binary_response(StatusCode::OK, resp_headers, ASSET_WASM_BG);
+    }
+    if effective_path == "/wasm/ironrdp_web.js" {
+        resp_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/javascript; charset=utf-8"));
+        return make_response(StatusCode::OK, resp_headers, ASSET_WASM_JS);
     }
 
-    // Static JS files
+    // Static JS files (embedded)
     if effective_path.starts_with("/js/") && effective_path.ends_with(".js") {
-        if effective_path == "/js/sw.js" {
-            resp_headers.insert(
-                HeaderName::from_static("service-worker-allowed"),
-                HeaderValue::from_static("/"),
-            );
-            resp_headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+        let content = match effective_path.as_str() {
+            "/js/sw.js" => {
+                resp_headers.insert(
+                    HeaderName::from_static("service-worker-allowed"),
+                    HeaderValue::from_static("/"),
+                );
+                resp_headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+                Some(ASSET_JS_SW)
+            }
+            "/js/rdp-client.js" => Some(ASSET_JS_RDP_CLIENT),
+            "/js/webrtc-upgrade.js" => Some(ASSET_JS_WEBRTC_UPGRADE),
+            "/js/tide-e2e.js" => Some(ASSET_JS_TIDE_E2E),
+            _ => None,
+        };
+        if let Some(body) = content {
+            resp_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/javascript; charset=utf-8"));
+            return make_response(StatusCode::OK, resp_headers, body);
         }
-        return serve_text_file(
-            &state,
-            &effective_path[1..],
-            "application/javascript; charset=utf-8",
-            resp_headers,
-        );
+        return make_response(StatusCode::NOT_FOUND, resp_headers, "Not found");
     }
 
-    // RDP client page
+    // RDP client page (embedded)
     if effective_path == "/rdp" {
-        return serve_text_file(&state, "rdp.html", "text/html; charset=utf-8", resp_headers);
+        resp_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"));
+        return make_response(StatusCode::OK, resp_headers, ASSET_RDP_HTML);
     }
 
     // WebRTC config
@@ -2110,109 +2088,6 @@ async fn handle_tc_proxy(
         .unwrap_or_else(|_| Response::new(Body::from("Internal error")))
 }
 
-// ── Static file serving ──────────────────────────────────────────
-
-fn serve_text_file(
-    state: &ProxyState,
-    relative_path: &str,
-    content_type: &str,
-    mut resp_headers: HeaderMap,
-) -> Response {
-    let resolved = state.public_dir.join(relative_path);
-
-    // Prevent path traversal
-    let canonical = match resolved.canonicalize() {
-        Ok(p) => p,
-        Err(_) => {
-            resp_headers.insert(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("text/plain"),
-            );
-            return make_response(StatusCode::NOT_FOUND, resp_headers, "Not found");
-        }
-    };
-
-    let canonical_base = state.public_dir.canonicalize().unwrap_or_else(|_| state.public_dir.clone());
-    if !canonical.starts_with(&canonical_base) {
-        resp_headers.insert(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("text/plain"),
-        );
-        return make_response(StatusCode::FORBIDDEN, resp_headers, "Forbidden");
-    }
-
-    match std::fs::read_to_string(&canonical) {
-        Ok(content) => {
-            if let Ok(v) = HeaderValue::from_str(content_type) {
-                resp_headers.insert(header::CONTENT_TYPE, v);
-            }
-            make_response(StatusCode::OK, resp_headers, &content)
-        }
-        Err(_) => {
-            resp_headers.insert(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("text/plain"),
-            );
-            make_response(StatusCode::NOT_FOUND, resp_headers, "Not found")
-        }
-    }
-}
-
-fn serve_binary_file(
-    state: &ProxyState,
-    relative_path: &str,
-    content_type: &str,
-    mut resp_headers: HeaderMap,
-) -> Response {
-    let resolved = state.public_dir.join(relative_path);
-
-    let canonical = match resolved.canonicalize() {
-        Ok(p) => p,
-        Err(_) => {
-            resp_headers.insert(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("text/plain"),
-            );
-            return make_response(StatusCode::NOT_FOUND, resp_headers, "Not found");
-        }
-    };
-
-    let canonical_base = state.public_dir.canonicalize().unwrap_or_else(|_| state.public_dir.clone());
-    if !canonical.starts_with(&canonical_base) {
-        resp_headers.insert(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("text/plain"),
-        );
-        return make_response(StatusCode::FORBIDDEN, resp_headers, "Forbidden");
-    }
-
-    match std::fs::read(&canonical) {
-        Ok(content) => {
-            if let Ok(v) = HeaderValue::from_str(content_type) {
-                resp_headers.insert(header::CONTENT_TYPE, v);
-            }
-            resp_headers.insert(
-                header::CACHE_CONTROL,
-                HeaderValue::from_static("public, max-age=86400"),
-            );
-            let mut response = Response::builder().status(StatusCode::OK);
-            for (name, value) in resp_headers.iter() {
-                response = response.header(name, value);
-            }
-            response
-                .body(Body::from(content))
-                .unwrap_or_else(|_| Response::new(Body::from("Internal error")))
-        }
-        Err(_) => {
-            resp_headers.insert(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("text/plain"),
-            );
-            make_response(StatusCode::NOT_FOUND, resp_headers, "Not found")
-        }
-    }
-}
-
 // ── Response builder helper ──────────────────────────────────────
 
 fn make_response(status: StatusCode, headers: HeaderMap, body: &str) -> Response {
@@ -2222,5 +2097,15 @@ fn make_response(status: StatusCode, headers: HeaderMap, body: &str) -> Response
     }
     response
         .body(Body::from(body.to_string()))
+        .unwrap_or_else(|_| Response::new(Body::from("Internal error")))
+}
+
+fn make_binary_response(status: StatusCode, headers: HeaderMap, body: &[u8]) -> Response {
+    let mut response = Response::builder().status(status);
+    for (name, value) in headers.iter() {
+        response = response.header(name, value);
+    }
+    response
+        .body(Body::from(body.to_vec()))
         .unwrap_or_else(|_| Response::new(Body::from("Internal error")))
 }

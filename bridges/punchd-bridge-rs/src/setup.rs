@@ -13,7 +13,7 @@ use axum::routing::{get, post};
 use axum::Router;
 use tokio::sync::Notify;
 
-use crate::config::config_file_path;
+use crate::config::{config_dir, config_file_path};
 
 struct SetupState {
     done: Arc<Notify>,
@@ -152,16 +152,21 @@ async fn handle_save(
     toml.push_str("https = true\n");
     toml.push_str("tls_hostname = \"localhost\"\n");
 
-    // Save
+    // Save — create config directory if needed
+    let dir = config_dir();
+    if let Err(e) = fs::create_dir_all(&dir) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create {}: {e}", dir.display())).into_response();
+    }
     let path = config_file_path();
     if let Err(e) = fs::write(&path, &toml) {
         return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to save: {e}")).into_response();
     }
+    eprintln!("[Setup] Saved config to {}", path.display());
 
     // Signal done
     state.done.notify_one();
 
-    (StatusCode::OK, "OK").into_response()
+    (StatusCode::OK, format!("OK:{}", dir.display())).into_response()
 }
 
 fn write_field(s: &mut String, key: &str, val: &str) {
@@ -306,7 +311,11 @@ const SETUP_HTML: &str = r##"<!DOCTYPE html>
 
   <div id="success" class="success hidden">
     <h2>Gateway Starting!</h2>
-    <p>Configuration saved to gateway.toml.<br>You can close this tab.</p>
+    <p>Configuration saved. You can close this tab.</p>
+    <p id="config-info" style="display:none; margin-top:0.5rem; font-size:0.85rem; color:#64748b;">
+      Config dir: <code id="config-path" style="color:#38bdf8;"></code><br>
+      Place <code>tidecloak.json</code> in this folder if using a file.
+    </p>
   </div>
 </div>
 
@@ -343,8 +352,15 @@ document.getElementById('form').addEventListener('submit', async (e) => {
       const text = await res.text();
       throw new Error(text || 'Save failed');
     }
+    const text = await res.text();
+    const configDir = text.startsWith('OK:') ? text.slice(3) : '';
     document.getElementById('form').classList.add('hidden');
-    document.getElementById('success').classList.remove('hidden');
+    const successEl = document.getElementById('success');
+    if (configDir) {
+      document.getElementById('config-path').textContent = configDir;
+      document.getElementById('config-info').style.display = 'block';
+    }
+    successEl.classList.remove('hidden');
   } catch (err) {
     errEl.textContent = err.message;
     errEl.style.display = 'block';
