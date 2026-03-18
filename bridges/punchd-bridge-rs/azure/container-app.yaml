@@ -1,0 +1,68 @@
+# Azure Container Apps configuration
+# Deploy with: az containerapp create --yaml container-app.yaml
+
+name: keylessh-punchd-bridge
+type: Microsoft.App/containerApps
+location: eastus
+properties:
+  managedEnvironmentId: /subscriptions/<SUBSCRIPTION_ID>/resourceGroups/<RESOURCE_GROUP>/providers/Microsoft.App/managedEnvironments/<ENVIRONMENT_NAME>
+
+  configuration:
+    ingress:
+      external: true
+      targetPort: 7891
+      transport: http
+      clientCertificateMode: ignore
+
+    secrets:
+      - name: tidecloak-config
+        value: <BASE64_ENCODED_TIDECLOAK_JSON>
+      - name: api-secret
+        value: <API_SECRET>
+      - name: turn-secret
+        value: <TURN_SECRET>
+
+  template:
+    containers:
+      - name: punchd-bridge
+        image: <ACR_NAME>.azurecr.io/keylessh-punchd-bridge:latest
+        resources:
+          cpu: 0.5
+          memory: 1Gi
+        env:
+          - name: TIDECLOAK_CONFIG_B64
+            secretRef: tidecloak-config
+          - name: STUN_SERVER_URL
+            value: "<STUN_SERVER_URL>"
+          - name: API_SECRET
+            secretRef: api-secret
+          - name: TURN_SECRET
+            secretRef: turn-secret
+          - name: LISTEN_PORT
+            value: "7891"
+          - name: HEALTH_PORT
+            value: "7892"
+          - name: HTTPS
+            value: "true"
+        probes:
+          - type: liveness
+            httpGet:
+              path: /health
+              port: 7892
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          - type: readiness
+            httpGet:
+              path: /health
+              port: 7892
+            initialDelaySeconds: 2
+            periodSeconds: 10
+
+    scale:
+      minReplicas: 0
+      maxReplicas: 100
+      rules:
+        - name: http-connections
+          http:
+            metadata:
+              concurrentRequests: "10"
