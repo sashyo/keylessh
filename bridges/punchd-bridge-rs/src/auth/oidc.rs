@@ -112,12 +112,12 @@ async fn post_token_request(
         .map_err(|e| format!("{label} read error: {e}"))?;
 
     if !status.is_success() {
-        eprintln!("[OIDC] {label} failed ({status}): {text}");
+        tracing::error!("{label} failed ({status}): {text}");
         return Err(format!("{label} failed ({status}): {text}"));
     }
 
     serde_json::from_str(&text).map_err(|e| {
-        eprintln!("[OIDC] {label} response not JSON: {}", &text[..200.min(text.len())]);
+        tracing::error!("{label} response not JSON: {}", &text[..200.min(text.len())]);
         format!("{label} response not JSON: {e}")
     })
 }

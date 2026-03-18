@@ -159,11 +159,11 @@ fn load_toml() -> GatewayToml {
     let path = config_file_path();
     if path.exists() {
         let content = fs::read_to_string(&path).unwrap_or_else(|e| {
-            eprintln!("[Gateway] Failed to read {}: {e}", path.display());
+            tracing::error!("Failed to read {}: {e}", path.display());
             std::process::exit(1);
         });
         toml::from_str(&content).unwrap_or_else(|e| {
-            eprintln!("[Gateway] Failed to parse {}: {e}", path.display());
+            tracing::error!("Failed to parse {}: {e}", path.display());
             std::process::exit(1);
         })
     } else {
@@ -202,21 +202,21 @@ pub fn load_config() -> ServerConfig {
     let has_env = env::var("STUN_SERVER_URL").is_ok() || env::var("BACKENDS").is_ok();
 
     if !has_config_file && !has_env {
-        eprintln!("[Gateway] No gateway.toml found and no environment variables set.");
-        eprintln!("[Gateway] Run the gateway once to launch the setup wizard, or create gateway.toml manually.");
+        tracing::error!("No gateway.toml found and no environment variables set.");
+        tracing::error!("Run the gateway once to launch the setup wizard, or create gateway.toml manually.");
         std::process::exit(1);
     }
 
     // Resolve values: TOML > env var > default
     let stun_server_url = get_val(&toml_cfg.stun_server_url, "STUN_SERVER_URL")
         .unwrap_or_else(|| {
-            eprintln!("[Gateway] STUN_SERVER_URL is required (set in gateway.toml or env)");
+            tracing::error!("STUN_SERVER_URL is required (set in gateway.toml or env)");
             std::process::exit(1);
         });
 
     let api_secret = get_val(&toml_cfg.api_secret, "API_SECRET")
         .unwrap_or_else(|| {
-            eprintln!("[Gateway] API_SECRET is required (set in gateway.toml or env)");
+            tracing::error!("API_SECRET is required (set in gateway.toml or env)");
             std::process::exit(1);
         });
 
@@ -228,7 +228,7 @@ pub fn load_config() -> ServerConfig {
 
     let backend_url = backends.first().map(|b| b.url.clone()).unwrap_or_default();
     if backend_url.is_empty() {
-        eprintln!("[Gateway] No backends configured (set backends in gateway.toml or BACKENDS env)");
+        tracing::error!("No backends configured (set backends in gateway.toml or BACKENDS env)");
         std::process::exit(1);
     }
 
@@ -237,7 +237,7 @@ pub fn load_config() -> ServerConfig {
 
     let turn_secret = get_val(&toml_cfg.turn_secret, "TURN_SECRET").unwrap_or_default();
     if turn_secret.is_empty() {
-        eprintln!("[Gateway] WARNING: TURN secret is empty — TURN credentials will be disabled");
+        tracing::warn!("TURN secret is empty — TURN credentials will be disabled");
     }
 
     let ice_servers = get_val(&toml_cfg.ice_servers, "ICE_SERVERS")
@@ -279,7 +279,7 @@ pub fn load_tidecloak_config() -> TidecloakConfig {
     let toml_cfg = load_toml();
 
     let config_data = if let Some(b64) = get_val(&toml_cfg.tidecloak_config_b64, "TIDECLOAK_CONFIG_B64") {
-        eprintln!("[Gateway] Loading JWKS from base64 config");
+        tracing::info!("Loading JWKS from base64 config");
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(&b64)
             .expect("Invalid base64 in TideCloak config");
@@ -311,21 +311,21 @@ pub fn load_tidecloak_config() -> TidecloakConfig {
                 }
                 PathBuf::from("tidecloak.json")
             });
-        eprintln!("[Gateway] Loading JWKS from {}", path.display());
+        tracing::info!("Loading JWKS from {}", path.display());
         fs::read_to_string(&path).unwrap_or_else(|e| {
-            eprintln!("[Gateway] Failed to read {}: {e}", path.display());
-            eprintln!("[Gateway] Place tidecloak.json in {} or set tidecloak_config_path in gateway.toml", config_dir().display());
+            tracing::error!("Failed to read {}: {e}", path.display());
+            tracing::error!("Place tidecloak.json in {} or set tidecloak_config_path in gateway.toml", config_dir().display());
             std::process::exit(1);
         })
     };
 
     let config: TidecloakConfig = serde_json::from_str(&config_data).unwrap_or_else(|e| {
-        eprintln!("[Gateway] Failed to parse TideCloak config: {e}");
+        tracing::error!("Failed to parse TideCloak config: {e}");
         std::process::exit(1);
     });
 
     if config.jwk.keys.is_empty() {
-        eprintln!("[Gateway] No JWKS keys found in config");
+        tracing::error!("No JWKS keys found in config");
         std::process::exit(1);
     }
 

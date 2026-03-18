@@ -29,8 +29,7 @@ pub async fn run_setup_if_needed() {
         return;
     }
 
-    eprintln!();
-    eprintln!("[Setup] No gateway.toml found. Starting setup wizard...");
+    tracing::info!("No gateway.toml found. Starting setup wizard...");
 
     let done = Arc::new(Notify::new());
     let state = Arc::new(SetupState {
@@ -46,7 +45,7 @@ pub async fn run_setup_if_needed() {
     let addr = format!("0.0.0.0:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     let url = format!("http://localhost:{port}");
-    eprintln!("[Setup] Open your browser to: {url}");
+    tracing::info!("Open your browser to: {url}");
 
     // Try to open browser automatically
     open_browser(&url);
@@ -56,8 +55,7 @@ pub async fn run_setup_if_needed() {
     tokio::select! {
         _ = server => {},
         _ = done.notified() => {
-            eprintln!("[Setup] Configuration saved. Starting gateway...");
-            eprintln!();
+            tracing::info!("Configuration saved. Starting gateway...");
         }
     }
 }
@@ -165,7 +163,7 @@ async fn handle_save(
     if let Err(e) = fs::write(&path, &toml) {
         return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to save: {e}")).into_response();
     }
-    eprintln!("[Setup] Saved config to {}", path.display());
+    tracing::info!("Saved config to {}", path.display());
 
     // Signal done
     state.done.notify_one();

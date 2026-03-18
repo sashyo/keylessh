@@ -360,11 +360,11 @@ impl ProxyState {
                 backend_map.insert(b.name.clone(), u.clone());
                 if b.no_auth {
                     no_auth_backends.insert(b.name.clone());
-                    eprintln!("[Proxy] Backend \"{}\" — auth disabled (noauth)", b.name);
+                    tracing::info!("Backend \"{}\" — auth disabled (noauth)", b.name);
                 }
                 if b.strip_auth {
                     strip_auth_backends.insert(b.name.clone());
-                    eprintln!("[Proxy] Backend \"{}\" — auth header stripped (stripauth)", b.name);
+                    tracing::info!("Backend \"{}\" — auth header stripped (stripauth)", b.name);
                 }
                 let host = u.host_str().unwrap_or("");
                 if host == "localhost" || host == "127.0.0.1" {
@@ -406,8 +406,8 @@ impl ProxyState {
             .map(|b| b.name.clone())
             .unwrap_or_else(|| "Default".to_string());
 
-        eprintln!("[Proxy] TideCloak internal URL: {tc_internal_url}");
-        eprintln!("[Proxy] TideCloak public origin: {tc_public_origin:?}");
+        tracing::info!("TideCloak internal URL: {tc_internal_url}");
+        tracing::info!("TideCloak public origin: {tc_public_origin:?}");
 
         let http_client = reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
@@ -502,7 +502,7 @@ impl ProxyState {
                 Some(r)
             }
             Err(e) => {
-                eprintln!("[Gateway] Deduplicated refresh failed: {e}");
+                tracing::error!("Deduplicated refresh failed: {e}");
                 None
             }
         };
@@ -1020,7 +1020,7 @@ async fn handle_request(
                         &request_url,
                         cnf_jkt.as_deref(),
                     ) {
-                        eprintln!("[Gateway] DPoP proof verification failed: {e}");
+                        tracing::error!("DPoP proof verification failed: {e}");
                         resp_headers.insert(
                             header::CONTENT_TYPE,
                             HeaderValue::from_static("application/json"),
@@ -1159,8 +1159,8 @@ async fn handle_request(
             });
 
             if !has_access {
-                eprintln!(
-                    "[Gateway] dest role denied: gwId={gw_id} backend=\"{backend}\" clientId=\"{}\"",
+                tracing::error!(
+                    "dest role denied: gwId={gw_id} backend=\"{backend}\" clientId=\"{}\"",
                     state.client_id
                 );
                 resp_headers.insert(
@@ -1306,7 +1306,7 @@ async fn handle_request(
     {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("[Proxy] Backend error: {e}");
+            tracing::error!("Backend error: {e}");
             resp_headers.insert(
                 header::CONTENT_TYPE,
                 HeaderValue::from_static("application/json"),
@@ -1385,7 +1385,7 @@ async fn handle_request(
         let body_bytes = match backend_resp.bytes().await {
             Ok(b) => b,
             Err(e) => {
-                eprintln!("[Proxy] Error reading backend response: {e}");
+                tracing::error!("Error reading backend response: {e}");
                 resp_headers.insert(
                     header::CONTENT_TYPE,
                     HeaderValue::from_static("application/json"),
@@ -1446,7 +1446,7 @@ async fn handle_request(
     let body_bytes = match backend_resp.bytes().await {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("[Proxy] Error reading backend response: {e}");
+            tracing::error!("Error reading backend response: {e}");
             return make_response(
                 StatusCode::BAD_GATEWAY,
                 resp_headers,
@@ -1568,8 +1568,8 @@ async fn handle_auth_callback(
 
     let error = params.get("error");
     if let Some(err) = error {
-        eprintln!(
-            "[Gateway] Auth error from TideCloak: {err} — {}",
+        tracing::error!(
+            "Auth error from TideCloak: {err} — {}",
             params.get("error_description").unwrap_or(&"no description".to_string())
         );
         resp_headers.insert(
@@ -1584,7 +1584,7 @@ async fn handle_auth_callback(
     }
 
     let Some(code) = params.get("code") else {
-        eprintln!("[Gateway] Auth callback missing code parameter");
+        tracing::error!("Auth callback missing code parameter");
         resp_headers.insert(
             header::LOCATION,
             HeaderValue::from_static("/auth/login?error=no_code"),
@@ -1599,7 +1599,7 @@ async fn handle_auth_callback(
     let expected_nonce = cookies.get("oidc_nonce").map(|s| s.as_str()).unwrap_or("");
 
     if expected_nonce.is_empty() || expected_nonce != nonce {
-        eprintln!("[Gateway] OIDC CSRF check failed: nonce mismatch");
+        tracing::error!("OIDC CSRF check failed: nonce mismatch");
         resp_headers.insert(
             header::LOCATION,
             HeaderValue::from_static("/auth/login?error=csrf_failed"),
@@ -1609,15 +1609,15 @@ async fn handle_auth_callback(
 
     let callback_url = get_callback_url(host, state.use_tls);
 
-    eprintln!("[Gateway] Token exchange:");
-    eprintln!("[Gateway]   endpoint: {}", state.server_endpoints.token);
-    eprintln!("[Gateway]   client_id: {}", state.client_id);
-    eprintln!("[Gateway]   redirect_uri: {callback_url}");
-    eprintln!("[Gateway]   code: {}...", &code[..8.min(code.len())]);
+    tracing::info!("Token exchange:");
+    tracing::info!("  endpoint: {}", state.server_endpoints.token);
+    tracing::info!("  client_id: {}", state.client_id);
+    tracing::info!("  redirect_uri: {callback_url}");
+    tracing::info!("  code: {}...", &code[..8.min(code.len())]);
 
     match exchange_code(&state.server_endpoints, &state.client_id, code, &callback_url).await {
         Ok(tokens) => {
-            eprintln!("[Gateway] Token exchange succeeded (expires_in={})", tokens.expires_in);
+            tracing::info!("Token exchange succeeded (expires_in={})", tokens.expires_in);
 
             let mut set_cookies = vec![build_cookie_header(
                 "gateway_access",
@@ -1642,7 +1642,7 @@ async fn handle_auth_callback(
                 .push("oidc_nonce=; HttpOnly; Path=/auth/callback; Max-Age=0".to_string());
 
             let safe_redirect = sanitize_redirect(&redirect_url);
-            eprintln!("[Gateway] Auth complete, redirecting to: {safe_redirect}");
+            tracing::info!("Auth complete, redirecting to: {safe_redirect}");
 
             resp_headers.insert(
                 header::LOCATION,
@@ -1656,7 +1656,7 @@ async fn handle_auth_callback(
             make_response(StatusCode::FOUND, resp_headers, "")
         }
         Err(e) => {
-            eprintln!("[Gateway] Token exchange failed: {e}");
+            tracing::error!("Token exchange failed: {e}");
             resp_headers.insert(
                 header::LOCATION,
                 HeaderValue::from_static("/auth/login?error=token_exchange"),
@@ -1932,7 +1932,7 @@ async fn handle_tc_proxy(
     {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("[Proxy] TideCloak error: {e}");
+            tracing::error!("TideCloak error: {e}");
             resp_headers.insert(
                 header::CONTENT_TYPE,
                 HeaderValue::from_static("application/json"),
@@ -2012,7 +2012,7 @@ async fn handle_tc_proxy(
         let body_bytes = match tc_resp.bytes().await {
             Ok(b) => b,
             Err(e) => {
-                eprintln!("[Proxy] Error reading TC response: {e}");
+                tracing::error!("Error reading TC response: {e}");
                 return make_response(
                     StatusCode::BAD_GATEWAY,
                     resp_headers,
@@ -2081,7 +2081,7 @@ async fn handle_tc_proxy(
     let body_bytes = match tc_resp.bytes().await {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("[Proxy] Error reading TC response: {e}");
+            tracing::error!("Error reading TC response: {e}");
             return make_response(
                 StatusCode::BAD_GATEWAY,
                 resp_headers,

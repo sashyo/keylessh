@@ -159,8 +159,8 @@ impl TidecloakAuth {
             valid_issuers.push(format!("{url}/realms/{}", config.realm));
         }
 
-        eprintln!("[Gateway] TideCloak JWKS loaded successfully");
-        eprintln!("[Gateway] Valid issuers: {}", valid_issuers.join(", "));
+        tracing::info!("TideCloak JWKS loaded successfully");
+        tracing::info!("Valid issuers: {}", valid_issuers.join(", "));
 
         Self {
             config: Arc::new(config.clone()),
@@ -174,14 +174,14 @@ impl TidecloakAuth {
         // Check issuer
         let iss = payload.iss.as_deref()?;
         if !self.valid_issuers.iter().any(|i| i == iss) {
-            eprintln!("[Gateway] Issuer mismatch: got {iss}");
+            tracing::error!("Issuer mismatch: got {iss}");
             return None;
         }
 
         // Check azp
         if payload.azp.as_deref() != Some(&self.config.resource) {
-            eprintln!(
-                "[Gateway] AZP mismatch: expected {}, got {:?}",
+            tracing::error!(
+                "AZP mismatch: expected {}, got {:?}",
                 self.config.resource, payload.azp
             );
             return None;
@@ -194,7 +194,7 @@ impl TidecloakAuth {
             .as_secs();
         if let Some(exp) = payload.exp {
             if now > exp {
-                eprintln!("[Gateway] Token expired");
+                tracing::error!("Token expired");
                 return None;
             }
         }
@@ -203,11 +203,11 @@ impl TidecloakAuth {
         match verify_jwt_sig(token, &self.config) {
             Ok(true) => Some(payload),
             Ok(false) => {
-                eprintln!("[Gateway] JWT signature verification failed");
+                tracing::error!("JWT signature verification failed");
                 None
             }
             Err(e) => {
-                eprintln!("[Gateway] JWT verification error: {e}");
+                tracing::error!("JWT verification error: {e}");
                 None
             }
         }
