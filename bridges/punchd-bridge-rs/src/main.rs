@@ -121,24 +121,24 @@ async fn main() {
     tray::spawn_tray(logs_url, gateway_url);
 
     // Startup banner
-    eprintln!("[Gateway] KeyleSSH Gateway (local-facing)");
-    eprintln!(
-        "[Gateway] Login: {scheme}://localhost:{}/login",
+    tracing::info!("KeyleSSH Gateway (local-facing)");
+    tracing::info!(
+        "Login: {scheme}://localhost:{}/login",
         config.listen_port
     );
-    eprintln!(
-        "[Gateway] Proxy: {scheme}://localhost:{}",
+    tracing::info!(
+        "Proxy: {scheme}://localhost:{}",
         config.listen_port
     );
-    eprintln!(
-        "[Gateway] Health: http://localhost:{}/health",
+    tracing::info!(
+        "Health: http://localhost:{}/health",
         config.health_port
     );
     for b in &config.backends {
-        eprintln!("[Gateway] Backend: {} -> {}", b.name, b.url);
+        tracing::info!("Backend: {} -> {}", b.name, b.url);
     }
-    eprintln!("[Gateway] STUN Server: {}", config.stun_server_url);
-    eprintln!("[Gateway] Gateway ID: {}", config.gateway_id);
+    tracing::info!("STUN Server: {}", config.stun_server_url);
+    tracing::info!("Gateway ID: {}", config.gateway_id);
 
     // Start servers
     let _health_handle = tokio::spawn(async move {
@@ -165,14 +165,14 @@ async fn main() {
         let tls_acceptor = TlsAcceptor::from(Arc::new(rustls_config));
 
         let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-        eprintln!("[Gateway] HTTPS listening on {addr}");
+        tracing::info!("HTTPS listening on {addr}");
 
         // Accept TLS connections
         loop {
             let (stream, _) = match listener.accept().await {
                 Ok(conn) => conn,
                 Err(e) => {
-                    tracing::error!("[Gateway] Accept error: {}", e);
+                    tracing::error!("Accept error: {}", e);
                     continue;
                 }
             };
@@ -196,7 +196,7 @@ async fn main() {
         }
     } else {
         let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-        eprintln!("[Gateway] HTTP listening on {addr}");
+        tracing::info!("HTTP listening on {addr}");
         axum::serve(listener, app).await.unwrap();
     }
 }
