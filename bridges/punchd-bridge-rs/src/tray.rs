@@ -16,33 +16,52 @@ pub fn spawn_tray(_logs_url: String, _gateway_url: String) {
 #[cfg(target_os = "windows")]
 mod win32 {
     use std::mem::{size_of, zeroed};
-    use std::ptr::null_mut;
+    use std::ptr::null;
 
-    // ── Types ────────────────────────────────────────────────
-    type HWND = isize;
-    type HMENU = isize;
-    type HICON = isize;
-    type HINSTANCE = isize;
+    // ── Fundamental types (match Win32 exactly) ──────────────
+    #[allow(non_camel_case_types)]
+    type HWND = *mut std::ffi::c_void;
+    #[allow(non_camel_case_types)]
+    type HMENU = *mut std::ffi::c_void;
+    #[allow(non_camel_case_types)]
+    type HICON = *mut std::ffi::c_void;
+    #[allow(non_camel_case_types)]
+    type HINSTANCE = *mut std::ffi::c_void;
+    #[allow(non_camel_case_types)]
+    type HBRUSH = *mut std::ffi::c_void;
+    #[allow(non_camel_case_types)]
+    type HCURSOR = *mut std::ffi::c_void;
+    #[allow(non_camel_case_types)]
     type WPARAM = usize;
+    #[allow(non_camel_case_types)]
     type LPARAM = isize;
+    #[allow(non_camel_case_types)]
     type LRESULT = isize;
-    type UINT = u32;
-    type WORD = u16;
-    type DWORD = u32;
-    type BOOL = i32;
-    type WNDPROC = Option<unsafe extern "system" fn(HWND, UINT, WPARAM, LPARAM) -> LRESULT>;
+    #[allow(non_camel_case_types)]
+    type ATOM = u16;
+    #[allow(non_camel_case_types)]
+    type WNDPROC = unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT;
 
     #[repr(C)]
+    struct GUID {
+        data1: u32,
+        data2: u16,
+        data3: u16,
+        data4: [u8; 8],
+    }
+
+    // Matches the Windows SDK WNDCLASSEXW exactly
+    #[repr(C)]
     struct WNDCLASSEXW {
-        cb_size: UINT,
-        style: UINT,
+        cb_size: u32,
+        style: u32,
         lpfn_wnd_proc: WNDPROC,
         cb_cls_extra: i32,
         cb_wnd_extra: i32,
         h_instance: HINSTANCE,
         h_icon: HICON,
-        h_cursor: isize,
-        hbr_background: isize,
+        h_cursor: HCURSOR,
+        hbr_background: HBRUSH,
         lpsz_menu_name: *const u16,
         lpsz_class_name: *const u16,
         h_icon_sm: HICON,
@@ -51,91 +70,96 @@ mod win32 {
     #[repr(C)]
     struct MSG {
         hwnd: HWND,
-        message: UINT,
+        message: u32,
         w_param: WPARAM,
         l_param: LPARAM,
-        time: DWORD,
-        pt_x: i32,
-        pt_y: i32,
+        time: u32,
+        pt: POINT,
     }
 
     #[repr(C)]
-    struct NOTIFYICONDATAW {
-        cb_size: DWORD,
-        h_wnd: HWND,
-        u_id: UINT,
-        u_flags: UINT,
-        u_callback_message: UINT,
-        h_icon: HICON,
-        sz_tip: [u16; 128],
-        dw_state: DWORD,
-        dw_state_mask: DWORD,
-        sz_info: [u16; 256],
-        u_version_or_timeout: UINT,
-        sz_info_title: [u16; 64],
-        dw_info_flags: DWORD,
-        guid_item: [u8; 16],
-        h_balloon_icon: HICON,
-    }
-
-    #[repr(C)]
+    #[derive(Copy, Clone)]
     struct POINT {
         x: i32,
         y: i32,
     }
 
+    // NOTIFYICONDATAW — use the V1 size (pre-Vista) which is simpler and widely supported
+    // We only need: cbSize, hWnd, uID, uFlags, uCallbackMessage, hIcon, szTip
+    #[repr(C)]
+    struct NOTIFYICONDATAW {
+        cb_size: u32,
+        h_wnd: HWND,
+        u_id: u32,
+        u_flags: u32,
+        u_callback_message: u32,
+        h_icon: HICON,
+        sz_tip: [u16; 128],
+        // V1 fields (Win2000+)
+        dw_state: u32,
+        dw_state_mask: u32,
+        sz_info: [u16; 256],
+        u_timeout_or_version: u32,
+        sz_info_title: [u16; 64],
+        dw_info_flags: u32,
+        // V2 fields (Vista+)
+        guid_item: GUID,
+        h_balloon_icon: HICON,
+    }
+
     // ── Constants ────────────────────────────────────────────
-    const WM_USER: UINT = 0x0400;
-    const WM_TRAYICON: UINT = WM_USER + 1;
-    const WM_COMMAND: UINT = 0x0111;
-    const WM_DESTROY: UINT = 0x0002;
-    const WM_RBUTTONUP: UINT = 0x0205;
-    const WM_LBUTTONDBLCLK: UINT = 0x0203;
+    const WM_USER: u32 = 0x0400;
+    const WM_TRAYICON: u32 = WM_USER + 1;
+    const WM_COMMAND: u32 = 0x0111;
+    const WM_DESTROY: u32 = 0x0002;
+    const WM_RBUTTONUP: u32 = 0x0205;
+    const WM_LBUTTONDBLCLK: u32 = 0x0203;
 
-    const NIM_ADD: DWORD = 0x00;
-    const NIM_DELETE: DWORD = 0x02;
-    const NIF_MESSAGE: UINT = 0x01;
-    const NIF_ICON: UINT = 0x02;
-    const NIF_TIP: UINT = 0x04;
+    const NIM_ADD: u32 = 0x00;
+    const NIM_DELETE: u32 = 0x02;
+    const NIF_MESSAGE: u32 = 0x01;
+    const NIF_ICON: u32 = 0x02;
+    const NIF_TIP: u32 = 0x04;
 
-    const IDI_APPLICATION: *const u16 = 32512 as *const u16;
-    const TPM_BOTTOMALIGN: UINT = 0x0020;
-    const TPM_LEFTALIGN: UINT = 0x0000;
-    const MF_STRING: UINT = 0x0000;
-    const MF_SEPARATOR: UINT = 0x0800;
+    const TPM_BOTTOMALIGN: u32 = 0x0020;
+    const TPM_LEFTALIGN: u32 = 0x0000;
+    const MF_STRING: u32 = 0x0000;
+    const MF_SEPARATOR: u32 = 0x0800;
 
-    const ID_OPEN_LOGS: UINT = 1001;
-    const ID_OPEN_GATEWAY: UINT = 1002;
-    const ID_QUIT: UINT = 1003;
+    const ID_OPEN_LOGS: usize = 1001;
+    const ID_OPEN_GATEWAY: usize = 1002;
+    const ID_QUIT: usize = 1003;
+
+    const HWND_MESSAGE: HWND = -3isize as HWND;
 
     // ── Win32 FFI ────────────────────────────────────────────
     extern "system" {
         fn GetModuleHandleW(name: *const u16) -> HINSTANCE;
-        fn RegisterClassExW(wc: *const WNDCLASSEXW) -> WORD;
+        fn RegisterClassExW(wc: *const WNDCLASSEXW) -> ATOM;
         fn CreateWindowExW(
-            ex_style: DWORD, class: *const u16, title: *const u16,
-            style: DWORD, x: i32, y: i32, w: i32, h: i32,
-            parent: HWND, menu: HMENU, instance: HINSTANCE, param: *mut (),
+            ex_style: u32, class: *const u16, title: *const u16,
+            style: u32, x: i32, y: i32, w: i32, h: i32,
+            parent: HWND, menu: HMENU, instance: HINSTANCE, param: *mut std::ffi::c_void,
         ) -> HWND;
-        fn DefWindowProcW(hwnd: HWND, msg: UINT, wp: WPARAM, lp: LPARAM) -> LRESULT;
-        fn GetMessageW(msg: *mut MSG, hwnd: HWND, min: UINT, max: UINT) -> BOOL;
-        fn TranslateMessage(msg: *const MSG) -> BOOL;
+        fn DefWindowProcW(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT;
+        fn GetMessageW(msg: *mut MSG, hwnd: HWND, min: u32, max: u32) -> i32;
+        fn TranslateMessage(msg: *const MSG) -> i32;
         fn DispatchMessageW(msg: *const MSG) -> LRESULT;
         fn PostQuitMessage(code: i32);
-        fn Shell_NotifyIconW(msg: DWORD, data: *mut NOTIFYICONDATAW) -> BOOL;
+        fn Shell_NotifyIconW(msg: u32, data: *mut NOTIFYICONDATAW) -> i32;
         fn LoadIconW(instance: HINSTANCE, name: *const u16) -> HICON;
         fn CreatePopupMenu() -> HMENU;
-        fn AppendMenuW(menu: HMENU, flags: UINT, id: usize, text: *const u16) -> BOOL;
-        fn TrackPopupMenu(menu: HMENU, flags: UINT, x: i32, y: i32, reserved: i32, hwnd: HWND, rect: *const ()) -> BOOL;
-        fn DestroyMenu(menu: HMENU) -> BOOL;
-        fn GetCursorPos(point: *mut POINT) -> BOOL;
-        fn SetForegroundWindow(hwnd: HWND) -> BOOL;
+        fn AppendMenuW(menu: HMENU, flags: u32, id: usize, text: *const u16) -> i32;
+        fn TrackPopupMenu(menu: HMENU, flags: u32, x: i32, y: i32, reserved: i32, hwnd: HWND, rect: *const std::ffi::c_void) -> i32;
+        fn DestroyMenu(menu: HMENU) -> i32;
+        fn GetCursorPos(point: *mut POINT) -> i32;
+        fn SetForegroundWindow(hwnd: HWND) -> i32;
+        fn GetLastError() -> u32;
     }
 
     // ── Globals (single tray instance) ───────────────────────
     static mut LOGS_URL: Option<String> = None;
     static mut GATEWAY_URL: Option<String> = None;
-    static mut TRAY_HWND: HWND = 0;
 
     fn to_wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -155,10 +179,10 @@ mod win32 {
             .spawn();
     }
 
-    unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
         match msg {
             WM_TRAYICON => {
-                let event = (lp as UINT) & 0xFFFF;
+                let event = (lp as u32) & 0xFFFF;
                 if event == WM_RBUTTONUP {
                     show_context_menu(hwnd);
                 } else if event == WM_LBUTTONDBLCLK {
@@ -169,7 +193,7 @@ mod win32 {
                 0
             }
             WM_COMMAND => {
-                let id = (wp & 0xFFFF) as UINT;
+                let id = wp & 0xFFFF;
                 match id {
                     ID_OPEN_LOGS => {
                         if let Some(ref url) = LOGS_URL {
@@ -205,34 +229,47 @@ mod win32 {
         let gateway = to_wide("Open Gateway");
         let quit = to_wide("Quit");
 
-        AppendMenuW(menu, MF_STRING, ID_OPEN_LOGS as usize, logs.as_ptr());
-        AppendMenuW(menu, MF_STRING, ID_OPEN_GATEWAY as usize, gateway.as_ptr());
-        AppendMenuW(menu, MF_SEPARATOR, 0, null_mut());
-        AppendMenuW(menu, MF_STRING, ID_QUIT as usize, quit.as_ptr());
+        AppendMenuW(menu, MF_STRING, ID_OPEN_LOGS, logs.as_ptr());
+        AppendMenuW(menu, MF_STRING, ID_OPEN_GATEWAY, gateway.as_ptr());
+        AppendMenuW(menu, MF_SEPARATOR, 0, null());
+        AppendMenuW(menu, MF_STRING, ID_QUIT, quit.as_ptr());
 
         let mut pt: POINT = zeroed();
         GetCursorPos(&mut pt);
         SetForegroundWindow(hwnd);
-        TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_BOTTOMALIGN, pt.x, pt.y, 0, hwnd, null_mut() as *const ());
+        TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_BOTTOMALIGN, pt.x, pt.y, 0, hwnd, null());
         DestroyMenu(menu);
     }
 
-    unsafe fn add_tray_icon(hwnd: HWND) {
-        let icon = LoadIconW(0, IDI_APPLICATION);
+    unsafe fn add_tray_icon(hwnd: HWND) -> bool {
+        let icon = LoadIconW(null() as HINSTANCE, 32512 as *const u16); // IDI_APPLICATION
+        eprintln!("[Tray] icon handle: {:?}", icon);
+
         let mut nid: NOTIFYICONDATAW = zeroed();
-        nid.cb_size = size_of::<NOTIFYICONDATAW>() as DWORD;
+        nid.cb_size = size_of::<NOTIFYICONDATAW>() as u32;
         nid.h_wnd = hwnd;
         nid.u_id = 1;
         nid.u_flags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
         nid.u_callback_message = WM_TRAYICON;
         nid.h_icon = icon;
         nid.sz_tip = wide_into_array::<128>("KeyleSSH Gateway");
-        Shell_NotifyIconW(NIM_ADD, &mut nid);
+
+        eprintln!("[Tray] NOTIFYICONDATAW size: {} bytes", nid.cb_size);
+
+        let result = Shell_NotifyIconW(NIM_ADD, &mut nid);
+        if result == 0 {
+            let err = GetLastError();
+            eprintln!("[Tray] Shell_NotifyIconW failed! GetLastError={err}");
+            false
+        } else {
+            eprintln!("[Tray] Shell_NotifyIconW succeeded");
+            true
+        }
     }
 
     unsafe fn remove_tray_icon(hwnd: HWND) {
         let mut nid: NOTIFYICONDATAW = zeroed();
-        nid.cb_size = size_of::<NOTIFYICONDATAW>() as DWORD;
+        nid.cb_size = size_of::<NOTIFYICONDATAW>() as u32;
         nid.h_wnd = hwnd;
         nid.u_id = 1;
         Shell_NotifyIconW(NIM_DELETE, &mut nid);
@@ -243,38 +280,47 @@ mod win32 {
         GATEWAY_URL = Some(gateway_url.to_string());
 
         let class_name = to_wide("KeyleSSHTray");
-        let h_instance = GetModuleHandleW(null_mut());
+        let h_instance = GetModuleHandleW(null());
 
         let wc = WNDCLASSEXW {
-            cb_size: size_of::<WNDCLASSEXW>() as UINT,
+            cb_size: size_of::<WNDCLASSEXW>() as u32,
             style: 0,
-            lpfn_wnd_proc: Some(wnd_proc),
+            lpfn_wnd_proc: wnd_proc,
             cb_cls_extra: 0,
             cb_wnd_extra: 0,
             h_instance,
-            h_icon: 0,
-            h_cursor: 0,
-            hbr_background: 0,
-            lpsz_menu_name: null_mut(),
+            h_icon: null() as HICON,
+            h_cursor: null() as HCURSOR,
+            hbr_background: null() as HBRUSH,
+            lpsz_menu_name: null(),
             lpsz_class_name: class_name.as_ptr(),
-            h_icon_sm: 0,
+            h_icon_sm: null() as HICON,
         };
-        RegisterClassExW(&wc);
+
+        let atom = RegisterClassExW(&wc);
+        if atom == 0 {
+            eprintln!("[Tray] RegisterClassExW failed: {}", GetLastError());
+            return;
+        }
 
         let title = to_wide("KeyleSSH");
         let hwnd = CreateWindowExW(
             0, class_name.as_ptr(), title.as_ptr(),
             0, 0, 0, 0, 0,
-            0, 0, h_instance, null_mut(),
+            HWND_MESSAGE, null() as HMENU, h_instance, null() as *mut std::ffi::c_void,
         );
-        TRAY_HWND = hwnd;
+
+        if hwnd.is_null() {
+            eprintln!("[Tray] CreateWindowExW failed: {}", GetLastError());
+            return;
+        }
+        eprintln!("[Tray] Hidden window created: {:?}", hwnd);
 
         add_tray_icon(hwnd);
-        eprintln!("[Gateway] System tray icon active");
 
         // Win32 message loop
         let mut msg: MSG = zeroed();
-        while GetMessageW(&mut msg, 0, 0, 0) > 0 {
+        while GetMessageW(&mut msg, null() as HWND, 0, 0) > 0 {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
