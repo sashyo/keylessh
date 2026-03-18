@@ -918,6 +918,17 @@ async fn handle_request(
         return make_response(StatusCode::OK, resp_headers, r#"{"status":"ok"}"#);
     }
 
+    // Logs page
+    if effective_path == "/logs" {
+        resp_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"));
+        return make_response(StatusCode::OK, resp_headers, LOGS_HTML);
+    }
+
+    // Logs SSE stream
+    if effective_path == "/logs/stream" {
+        return handle_logs_stream(resp_headers);
+    }
+
     // ── TideCloak reverse proxy (/realms/*, /resources/*, /admin) ──
     if effective_path.starts_with("/realms/")
         || effective_path.starts_with("/resources/")
@@ -2109,3 +2120,164 @@ fn make_binary_response(status: StatusCode, headers: HeaderMap, body: &[u8]) -> 
         .body(Body::from(body.to_vec()))
         .unwrap_or_else(|_| Response::new(Body::from("Internal error")))
 }
+
+// ── Log streaming via SSE ───────────────────────────────────────
+
+fn handle_logs_stream(mut resp_headers: HeaderMap) -> Response {
+    use futures_util::stream::StreamExt;
+    use tokio_stream::wrappers::BroadcastStream;
+
+    let rx = match crate::logstream::subscribe() {
+        Some(rx) => rx,
+        None => {
+            return make_response(StatusCode::SERVICE_UNAVAILABLE, resp_headers, "Log stream not available");
+        }
+    };
+
+    let stream = BroadcastStream::new(rx).filter_map(|result| async move {
+        match result {
+            Ok(line) => {
+                let escaped = line.replace('\\', "\\\\").replace('\n', "\\n").replace('\r', "");
+                Some(Ok::<_, std::convert::Infallible>(format!("data: {escaped}\n\n")))
+            }
+            Err(_) => None,
+        }
+    });
+
+    resp_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
+    resp_headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    resp_headers.insert(header::CONNECTION, HeaderValue::from_static("keep-alive"));
+
+    let body = Body::from_stream(stream);
+    let mut response = Response::builder().status(StatusCode::OK);
+    for (name, value) in resp_headers.iter() {
+        response = response.header(name, value);
+    }
+    response.body(body).unwrap_or_else(|_| Response::new(Body::from("Internal error")))
+}
+
+// ── Logs HTML page ──────────────────────────────────────────────
+
+pub static LOGS_HTML: &str = r##"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KeyleSSH Gateway - Logs</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+         background: #0f172a; color: #e2e8f0; height: 100vh; display: flex; flex-direction: column; }
+  .header { padding: 0.75rem 1rem; background: #1e293b; border-bottom: 1px solid #334155;
+            display: flex; align-items: center; gap: 1rem; flex-shrink: 0; }
+  .header h1 { font-size: 1rem; color: #38bdf8; font-weight: 600; }
+  .status { font-size: 0.8rem; padding: 0.2rem 0.6rem; border-radius: 9999px; }
+  .status.connected { background: #064e3b; color: #34d399; }
+  .status.disconnected { background: #7f1d1d; color: #fca5a5; }
+  .controls { margin-left: auto; display: flex; gap: 0.5rem; }
+  .controls button { padding: 0.3rem 0.75rem; background: #334155; color: #94a3b8; border: 1px solid #475569;
+                     border-radius: 4px; cursor: pointer; font-size: 0.75rem; font-family: inherit; }
+  .controls button:hover { background: #475569; color: #e2e8f0; }
+  #log { flex: 1; overflow-y: auto; padding: 0.5rem 1rem; font-size: 0.8rem; line-height: 1.5; }
+  .line { white-space: pre-wrap; word-break: break-all; padding: 1px 0; }
+  .line:hover { background: #1e293b; }
+  .level-ERROR { color: #f87171; }
+  .level-WARN { color: #fbbf24; }
+  .level-INFO { color: #38bdf8; }
+  .level-DEBUG { color: #a78bfa; }
+  .level-TRACE { color: #64748b; }
+  .timestamp { color: #64748b; }
+  .filter { padding: 0.3rem 0.5rem; background: #1e293b; color: #e2e8f0; border: 1px solid #334155;
+            border-radius: 4px; font-size: 0.75rem; font-family: inherit; width: 200px; outline: none; }
+  .filter:focus { border-color: #38bdf8; }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>KeyleSSH Gateway Logs</h1>
+  <span id="status" class="status disconnected">disconnected</span>
+  <div class="controls">
+    <input type="text" id="filter" class="filter" placeholder="Filter logs...">
+    <button onclick="toggleAutoScroll()">Auto-scroll: ON</button>
+    <button onclick="clearLogs()">Clear</button>
+  </div>
+</div>
+<div id="log"></div>
+<script>
+let autoScroll = true;
+let filterText = '';
+const logEl = document.getElementById('log');
+const statusEl = document.getElementById('status');
+const filterInput = document.getElementById('filter');
+
+filterInput.addEventListener('input', (e) => {
+  filterText = e.target.value.toLowerCase();
+  document.querySelectorAll('.line').forEach(el => {
+    el.style.display = el.textContent.toLowerCase().includes(filterText) || !filterText ? '' : 'none';
+  });
+});
+
+function toggleAutoScroll() {
+  autoScroll = !autoScroll;
+  event.target.textContent = 'Auto-scroll: ' + (autoScroll ? 'ON' : 'OFF');
+}
+
+function clearLogs() {
+  logEl.innerHTML = '';
+}
+
+function addLine(text) {
+  const div = document.createElement('div');
+  div.className = 'line';
+
+  // Color by level
+  const levels = ['ERROR', 'WARN', 'INFO', 'DEBUG', 'TRACE'];
+  for (const lvl of levels) {
+    if (text.startsWith(lvl + ' ')) {
+      div.classList.add('level-' + lvl);
+      break;
+    }
+  }
+
+  div.textContent = text;
+  if (filterText && !text.toLowerCase().includes(filterText)) {
+    div.style.display = 'none';
+  }
+  logEl.appendChild(div);
+
+  // Keep max 5000 lines
+  while (logEl.children.length > 5000) {
+    logEl.removeChild(logEl.firstChild);
+  }
+
+  if (autoScroll) {
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+}
+
+function connect() {
+  const proto = location.protocol === 'https:' ? 'https:' : location.protocol;
+  const es = new EventSource(location.origin + '/logs/stream');
+
+  es.onopen = () => {
+    statusEl.textContent = 'connected';
+    statusEl.className = 'status connected';
+  };
+
+  es.onmessage = (e) => {
+    addLine(e.data);
+  };
+
+  es.onerror = () => {
+    statusEl.textContent = 'disconnected';
+    statusEl.className = 'status disconnected';
+    es.close();
+    setTimeout(connect, 2000);
+  };
+}
+
+connect();
+</script>
+</body>
+</html>
+"##;

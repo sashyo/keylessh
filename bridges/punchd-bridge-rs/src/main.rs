@@ -2,11 +2,13 @@ use std::sync::Arc;
 
 mod auth;
 mod config;
+mod logstream;
 mod proxy;
 mod rdcleanpath;
 mod setup;
 mod stun;
 mod tls;
+mod tray;
 mod webrtc;
 
 #[tokio::main]
@@ -14,7 +16,16 @@ async fn main() {
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("Failed to install rustls crypto provider");
-    tracing_subscriber::fmt::init();
+    // Init logging: stderr + broadcast to web UI
+    {
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+        logstream::init();
+        tracing_subscriber::registry()
+            .with(tracing_subscriber::fmt::layer())
+            .with(logstream::BroadcastLayer)
+            .init();
+    }
 
     // First-run setup: if no config, serve web UI
     setup::run_setup_if_needed().await;
@@ -55,12 +66,15 @@ async fn main() {
     let addr = format!("0.0.0.0:{}", config.listen_port);
     let scheme = if config.https { "https" } else { "http" };
 
-    // Health server on separate port
+    // Health + logs server on separate port (plain HTTP)
     let health_addr = format!("0.0.0.0:{}", config.health_port);
-    let health_app = axum::Router::new().route(
-        "/health",
-        axum::routing::get(|| async { axum::Json(serde_json::json!({"status": "ok"})) }),
-    );
+    let health_app = axum::Router::new()
+        .route(
+            "/health",
+            axum::routing::get(|| async { axum::Json(serde_json::json!({"status": "ok"})) }),
+        )
+        .route("/logs", axum::routing::get(serve_logs_page))
+        .route("/logs/stream", axum::routing::get(serve_logs_stream));
 
     // STUN registration
     let local_addr = std::env::var("GATEWAY_ADDRESS").unwrap_or_else(|_| {
@@ -92,6 +106,11 @@ async fn main() {
         auth: Some(auth.clone()),
         tc_client_id: Some(tc_config.resource.clone()),
     });
+
+    // System tray icon
+    let logs_url = format!("http://localhost:{}/logs", config.health_port);
+    let gateway_url = format!("{scheme}://localhost:{}", config.listen_port);
+    tray::spawn_tray(logs_url, gateway_url);
 
     // Startup banner
     eprintln!("[Gateway] KeyleSSH Gateway (local-facing)");
@@ -172,4 +191,27 @@ async fn main() {
         eprintln!("[Gateway] HTTP listening on {addr}");
         axum::serve(listener, app).await.unwrap();
     }
+}
+
+// ── Logs handlers for the health server ─────────────────────────
+
+use axum::response::{Html, Sse};
+use axum::response::sse::Event;
+
+async fn serve_logs_page() -> Html<&'static str> {
+    Html(proxy::http_proxy::LOGS_HTML)
+}
+
+async fn serve_logs_stream() -> Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>> {
+    use futures_util::StreamExt;
+    use tokio_stream::wrappers::BroadcastStream;
+
+    let rx = logstream::subscribe().expect("log stream not initialized");
+    let stream = BroadcastStream::new(rx).filter_map(|result| async move {
+        match result {
+            Ok(line) => Some(Ok(Event::default().data(line))),
+            Err(_) => None,
+        }
+    });
+    Sse::new(stream)
 }
