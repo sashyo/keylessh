@@ -721,7 +721,20 @@ pub fn build_proxy_state(
     let tc_proxy_url = url::Url::parse(&format!("{base_url}/")).unwrap();
     let tc_public_origin = config.auth_server_public_url.clone();
 
-    let public_dir = PathBuf::from("public");
+    // Resolve public directory: check next to executable first, then cwd
+    let public_dir = {
+        let beside_exe = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|p| p.join("public")));
+        if beside_exe.as_ref().map_or(false, |p| p.exists()) {
+            beside_exe.unwrap()
+        } else if PathBuf::from("public").exists() {
+            std::fs::canonicalize("public").unwrap_or_else(|_| PathBuf::from("public"))
+        } else {
+            beside_exe.unwrap_or_else(|| PathBuf::from("public"))
+        }
+    };
+    eprintln!("[Gateway] Public dir: {}", public_dir.display());
 
     let http_client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
@@ -2119,7 +2132,8 @@ fn serve_text_file(
         }
     };
 
-    if !canonical.starts_with(&state.public_dir) {
+    let canonical_base = state.public_dir.canonicalize().unwrap_or_else(|_| state.public_dir.clone());
+    if !canonical.starts_with(&canonical_base) {
         resp_headers.insert(
             header::CONTENT_TYPE,
             HeaderValue::from_static("text/plain"),
@@ -2163,7 +2177,8 @@ fn serve_binary_file(
         }
     };
 
-    if !canonical.starts_with(&state.public_dir) {
+    let canonical_base = state.public_dir.canonicalize().unwrap_or_else(|_| state.public_dir.clone());
+    if !canonical.starts_with(&canonical_base) {
         resp_headers.insert(
             header::CONTENT_TYPE,
             HeaderValue::from_static("text/plain"),
