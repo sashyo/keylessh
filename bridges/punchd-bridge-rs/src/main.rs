@@ -4,6 +4,7 @@ mod auth;
 mod config;
 mod proxy;
 mod rdcleanpath;
+mod setup;
 mod stun;
 mod tls;
 mod webrtc;
@@ -14,6 +15,9 @@ async fn main() {
         .install_default()
         .expect("Failed to install rustls crypto provider");
     tracing_subscriber::fmt::init();
+
+    // First-run setup: if no config, serve web UI
+    setup::run_setup_if_needed().await;
 
     // Load config
     let config = config::load_config();
