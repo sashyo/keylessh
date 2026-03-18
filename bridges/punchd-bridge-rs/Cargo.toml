@@ -27,7 +27,7 @@ rand = "0.9"
 uuid = { version = "1", features = ["v4"] }
 rcgen = "0.13"
 tokio-rustls = "0.26"
-rustls = "0.23"
+rustls = { version = "0.23", features = ["ring"] }
 rustls-pemfile = "2"
 tokio-native-tls = "0.3"
 native-tls = "0.2"
