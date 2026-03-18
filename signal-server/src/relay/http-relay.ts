@@ -118,16 +118,21 @@ export function createHttpRelay(registry: Registry, useTls = false) {
     req: IncomingMessage,
     res: ServerResponse
   ): Promise<void> {
-    // Find target gateway (session affinity via cookie, then realm-based, then load-balance)
+    // Find target gateway
+    // For /realms/, /resources/, /admin/ paths: prefer realm-based routing so that
+    // auth flows reach the gateway hosting that TideCloak realm, even if the browser
+    // has a session cookie pointing to a different gateway.
     const gatewayIdRaw = parseCookie(req.headers.cookie, "gateway_relay");
     const gatewayId = gatewayIdRaw ? decodeURIComponent(gatewayIdRaw) : null;
-    let gateway = gatewayId ? registry.getGateway(gatewayId) : undefined;
+    let gateway: ReturnType<Registry["getGateway"]> | undefined;
+
+    const realmMatch = req.url?.match(/\/(?:realms|resources|admin)\/([^/]+)\//);
+    if (realmMatch) {
+      gateway = registry.getGatewayByRealm(realmMatch[1]);
+    }
 
     if (!gateway) {
-      const realmMatch = req.url?.match(/\/(?:realms|resources|admin)\/([^/]+)\//);
-      if (realmMatch) {
-        gateway = registry.getGatewayByRealm(realmMatch[1]);
-      }
+      gateway = gatewayId ? registry.getGateway(gatewayId) : undefined;
     }
 
     if (!gateway) {
