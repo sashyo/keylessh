@@ -26,7 +26,7 @@ async fn main() {
         use tracing_subscriber::EnvFilter;
         logstream::init();
         let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            EnvFilter::new("punchd_bridge_rs=info,warn")
+            EnvFilter::new("punchd_gateway=info,warn")
         });
         tracing_subscriber::registry()
             .with(filter)
