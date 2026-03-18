@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::env;
 use std::fs;
 use std::net::UdpSocket;
@@ -7,11 +9,55 @@ use base64::Engine;
 use rand::Rng;
 use serde::Deserialize;
 
+// ── Config file schema (gateway.toml) ───────────────────────────
+
+#[derive(Deserialize, Default, Debug)]
+struct GatewayToml {
+    #[serde(default)]
+    gateway_id: Option<String>,
+    #[serde(default)]
+    stun_server_url: Option<String>,
+    #[serde(default)]
+    api_secret: Option<String>,
+    #[serde(default)]
+    backends: Option<String>,
+    #[serde(default)]
+    listen_port: Option<u16>,
+    #[serde(default)]
+    health_port: Option<u16>,
+    #[serde(default)]
+    https: Option<bool>,
+    #[serde(default)]
+    tls_hostname: Option<String>,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    ice_servers: Option<String>,
+    #[serde(default)]
+    turn_server: Option<String>,
+    #[serde(default)]
+    turn_secret: Option<String>,
+    #[serde(default)]
+    tidecloak_config_path: Option<String>,
+    #[serde(default)]
+    tidecloak_config_b64: Option<String>,
+    #[serde(default)]
+    auth_server_public_url: Option<String>,
+    #[serde(default)]
+    tc_internal_url: Option<String>,
+    #[serde(default)]
+    strip_auth_header: Option<bool>,
+}
+
+// ── Public types ────────────────────────────────────────────────
+
 #[derive(Clone, Debug)]
 pub struct BackendEntry {
     pub name: String,
     pub url: String,
-    pub protocol: String, // "http" or "rdp"
+    pub protocol: String,
     pub no_auth: bool,
     pub strip_auth: bool,
 }
@@ -70,132 +116,170 @@ pub struct TidecloakConfig {
     #[serde(rename = "public-client", default)]
     pub public_client: Option<bool>,
     pub jwk: JwkSet,
-    // Allow extra fields
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
-pub fn load_config() -> ServerConfig {
-    let stun_server_url = require_env("STUN_SERVER_URL");
-    let backends = parse_backends();
-    let backend_url = backends.first().map(|b| b.url.clone()).unwrap_or_default();
+// ── Config file path ────────────────────────────────────────────
 
-    if backend_url.is_empty() {
-        eprintln!("[Gateway] BACKENDS or BACKEND_URL is required");
+pub fn config_file_path() -> PathBuf {
+    // Look next to the executable first, then current dir
+    if let Ok(exe) = env::current_exe() {
+        let beside_exe = exe.parent().unwrap_or(exe.as_ref()).join("gateway.toml");
+        if beside_exe.exists() {
+            return beside_exe;
+        }
+    }
+    PathBuf::from("gateway.toml")
+}
+
+fn load_toml() -> GatewayToml {
+    let path = config_file_path();
+    if path.exists() {
+        let content = fs::read_to_string(&path).unwrap_or_else(|e| {
+            eprintln!("[Gateway] Failed to read {}: {e}", path.display());
+            std::process::exit(1);
+        });
+        toml::from_str(&content).unwrap_or_else(|e| {
+            eprintln!("[Gateway] Failed to parse {}: {e}", path.display());
+            std::process::exit(1);
+        })
+    } else {
+        GatewayToml::default()
+    }
+}
+
+// ── Helper: read value from TOML > env var > default ────────────
+
+fn get_val(toml_val: &Option<String>, env_name: &str) -> Option<String> {
+    if let Some(v) = toml_val {
+        if !v.is_empty() {
+            return Some(v.clone());
+        }
+    }
+    env::var(env_name).ok().filter(|v| !v.is_empty())
+}
+
+fn get_val_or(toml_val: &Option<String>, env_name: &str, default: &str) -> String {
+    get_val(toml_val, env_name).unwrap_or_else(|| default.to_string())
+}
+
+fn generate_gateway_id() -> String {
+    let mut rng = rand::rng();
+    let bytes: [u8; 4] = rng.random();
+    format!("gateway-{}", hex::encode(&bytes))
+}
+
+// ── Main config loader ──────────────────────────────────────────
+
+pub fn load_config() -> ServerConfig {
+    let mut toml_cfg = load_toml();
+
+    // If no config file AND no critical env vars, run first-time setup
+    let has_config_file = config_file_path().exists();
+    let has_env = env::var("STUN_SERVER_URL").is_ok() || env::var("BACKENDS").is_ok();
+
+    if !has_config_file && !has_env {
+        eprintln!("[Gateway] No gateway.toml found and no environment variables set.");
+        eprintln!("[Gateway] Run the gateway once to launch the setup wizard, or create gateway.toml manually.");
         std::process::exit(1);
     }
 
-    let gateway_id = env::var("GATEWAY_ID").unwrap_or_else(|_| {
-        let mut rng = rand::rng();
-        let bytes: [u8; 8] = rng.random();
-        format!("gateway-{}", hex::encode(&bytes))
-    });
+    // Resolve values: TOML > env var > default
+    let stun_server_url = get_val(&toml_cfg.stun_server_url, "STUN_SERVER_URL")
+        .unwrap_or_else(|| {
+            eprintln!("[Gateway] STUN_SERVER_URL is required (set in gateway.toml or env)");
+            std::process::exit(1);
+        });
+
+    let api_secret = get_val(&toml_cfg.api_secret, "API_SECRET")
+        .unwrap_or_else(|| {
+            eprintln!("[Gateway] API_SECRET is required (set in gateway.toml or env)");
+            std::process::exit(1);
+        });
+
+    let backends_str = get_val(&toml_cfg.backends, "BACKENDS")
+        .or_else(|| env::var("BACKEND_URL").ok().map(|u| format!("Default={u}")));
+    let backends = backends_str
+        .map(|s| parse_backends_str(&s))
+        .unwrap_or_default();
+
+    let backend_url = backends.first().map(|b| b.url.clone()).unwrap_or_default();
+    if backend_url.is_empty() {
+        eprintln!("[Gateway] No backends configured (set backends in gateway.toml or BACKENDS env)");
+        std::process::exit(1);
+    }
+
+    let gateway_id = get_val(&toml_cfg.gateway_id, "GATEWAY_ID")
+        .unwrap_or_else(generate_gateway_id);
+
+    let turn_secret = get_val(&toml_cfg.turn_secret, "TURN_SECRET").unwrap_or_default();
+    if turn_secret.is_empty() {
+        eprintln!("[Gateway] WARNING: TURN secret is empty — TURN credentials will be disabled");
+    }
+
+    let ice_servers = get_val(&toml_cfg.ice_servers, "ICE_SERVERS")
+        .map(|s| s.split(',').map(|s| s.trim().to_string()).collect())
+        .unwrap_or_else(|| derive_ice_servers(&stun_server_url));
 
     ServerConfig {
-        listen_port: env::var("LISTEN_PORT")
-            .ok()
-            .and_then(|s| s.parse().ok())
+        listen_port: toml_cfg.listen_port
+            .or_else(|| env::var("LISTEN_PORT").ok().and_then(|s| s.parse().ok()))
             .unwrap_or(7891),
-        health_port: env::var("HEALTH_PORT")
-            .ok()
-            .and_then(|s| s.parse().ok())
+        health_port: toml_cfg.health_port
+            .or_else(|| env::var("HEALTH_PORT").ok().and_then(|s| s.parse().ok()))
             .unwrap_or(7892),
         backend_url,
         backends,
-        stun_server_url: stun_server_url.clone(),
+        stun_server_url,
         gateway_id,
-        strip_auth_header: env::var("STRIP_AUTH_HEADER")
-            .map(|v| v == "true")
+        strip_auth_header: toml_cfg.strip_auth_header
+            .or_else(|| env::var("STRIP_AUTH_HEADER").ok().map(|v| v == "true"))
             .unwrap_or(false),
-        auth_server_public_url: env::var("AUTH_SERVER_PUBLIC_URL").ok(),
-        ice_servers: env::var("ICE_SERVERS")
-            .ok()
-            .map(|s| s.split(',').map(|s| s.to_string()).collect())
-            .unwrap_or_else(|| derive_ice_servers(&stun_server_url)),
-        turn_server: env::var("TURN_SERVER").ok(),
-        turn_secret: warn_if_empty("TURN_SECRET"),
-        api_secret: require_secret("API_SECRET"),
-        display_name: env::var("GATEWAY_DISPLAY_NAME").ok(),
-        description: env::var("GATEWAY_DESCRIPTION").ok(),
-        https: env::var("HTTPS").map(|v| v != "false").unwrap_or(true),
-        tls_hostname: env::var("TLS_HOSTNAME").unwrap_or_else(|_| "localhost".into()),
-        tc_internal_url: env::var("TC_INTERNAL_URL").ok(),
+        auth_server_public_url: get_val(&toml_cfg.auth_server_public_url, "AUTH_SERVER_PUBLIC_URL"),
+        ice_servers,
+        turn_server: get_val(&toml_cfg.turn_server, "TURN_SERVER"),
+        turn_secret,
+        api_secret,
+        display_name: get_val(&toml_cfg.display_name, "GATEWAY_DISPLAY_NAME"),
+        description: get_val(&toml_cfg.description, "GATEWAY_DESCRIPTION"),
+        https: toml_cfg.https
+            .or_else(|| env::var("HTTPS").ok().map(|v| v != "false"))
+            .unwrap_or(true),
+        tls_hostname: get_val_or(&toml_cfg.tls_hostname, "TLS_HOSTNAME", "localhost"),
+        tc_internal_url: get_val(&toml_cfg.tc_internal_url, "TC_INTERNAL_URL"),
     }
 }
 
-fn parse_backends() -> Vec<BackendEntry> {
-    if let Ok(backends_env) = env::var("BACKENDS") {
-        return backends_env
-            .split(',')
-            .filter_map(|entry| {
-                let eq = entry.find('=')?;
-                let name = entry[..eq].trim().to_string();
-                let mut raw_url = entry[eq + 1..].trim().to_string();
-                let mut no_auth = false;
-                let mut strip_auth = false;
-
-                loop {
-                    let lower = raw_url.to_lowercase();
-                    if lower.ends_with(";noauth") {
-                        no_auth = true;
-                        raw_url.truncate(raw_url.len() - ";noauth".len());
-                        raw_url = raw_url.trim().to_string();
-                    } else if lower.ends_with(";stripauth") {
-                        strip_auth = true;
-                        raw_url.truncate(raw_url.len() - ";stripauth".len());
-                        raw_url = raw_url.trim().to_string();
-                    } else {
-                        break;
-                    }
-                }
-
-                let protocol = if raw_url.starts_with("rdp://") {
-                    "rdp"
-                } else {
-                    "http"
-                };
-
-                if raw_url.is_empty() {
-                    return None;
-                }
-
-                Some(BackendEntry {
-                    name,
-                    url: raw_url,
-                    protocol: protocol.to_string(),
-                    no_auth,
-                    strip_auth,
-                })
-            })
-            .collect();
-    }
-
-    if let Ok(backend_url) = env::var("BACKEND_URL") {
-        let name = env::var("GATEWAY_DISPLAY_NAME").unwrap_or_else(|_| "Default".into());
-        return vec![BackendEntry {
-            name,
-            url: backend_url,
-            protocol: "http".into(),
-            no_auth: false,
-            strip_auth: false,
-        }];
-    }
-
-    vec![]
-}
+// ── TideCloak config loader ─────────────────────────────────────
 
 pub fn load_tidecloak_config() -> TidecloakConfig {
-    let config_data = if let Ok(b64) = env::var("TIDECLOAK_CONFIG_B64") {
-        eprintln!("[Gateway] Loading JWKS from TIDECLOAK_CONFIG_B64");
+    let toml_cfg = load_toml();
+
+    let config_data = if let Some(b64) = get_val(&toml_cfg.tidecloak_config_b64, "TIDECLOAK_CONFIG_B64") {
+        eprintln!("[Gateway] Loading JWKS from base64 config");
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(&b64)
-            .expect("Invalid base64 in TIDECLOAK_CONFIG_B64");
-        String::from_utf8(bytes).expect("Invalid UTF-8 in TIDECLOAK_CONFIG_B64")
+            .expect("Invalid base64 in TideCloak config");
+        String::from_utf8(bytes).expect("Invalid UTF-8 in TideCloak config")
     } else {
-        let path = resolve_tidecloak_path();
+        let path = get_val(&toml_cfg.tidecloak_config_path, "TIDECLOAK_CONFIG_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                // Look next to the executable
+                if let Ok(exe) = env::current_exe() {
+                    let dir = exe.parent().unwrap_or(exe.as_ref());
+                    let beside = dir.join("tidecloak.json");
+                    if beside.exists() {
+                        return beside;
+                    }
+                }
+                PathBuf::from("tidecloak.json")
+            });
         eprintln!("[Gateway] Loading JWKS from {}", path.display());
         fs::read_to_string(&path).unwrap_or_else(|e| {
             eprintln!("[Gateway] Failed to read {}: {e}", path.display());
+            eprintln!("[Gateway] Place tidecloak.json next to the executable or set tidecloak_config_path in gateway.toml");
             std::process::exit(1);
         })
     };
@@ -213,6 +297,56 @@ pub fn load_tidecloak_config() -> TidecloakConfig {
     config
 }
 
+// ── Backend string parser ───────────────────────────────────────
+
+fn parse_backends_str(input: &str) -> Vec<BackendEntry> {
+    input
+        .split(',')
+        .filter_map(|entry| {
+            let eq = entry.find('=')?;
+            let name = entry[..eq].trim().to_string();
+            let mut raw_url = entry[eq + 1..].trim().to_string();
+            let mut no_auth = false;
+            let mut strip_auth = false;
+
+            loop {
+                let lower = raw_url.to_lowercase();
+                if lower.ends_with(";noauth") {
+                    no_auth = true;
+                    raw_url.truncate(raw_url.len() - ";noauth".len());
+                    raw_url = raw_url.trim().to_string();
+                } else if lower.ends_with(";stripauth") {
+                    strip_auth = true;
+                    raw_url.truncate(raw_url.len() - ";stripauth".len());
+                    raw_url = raw_url.trim().to_string();
+                } else {
+                    break;
+                }
+            }
+
+            let protocol = if raw_url.starts_with("rdp://") {
+                "rdp"
+            } else {
+                "http"
+            };
+
+            if raw_url.is_empty() {
+                return None;
+            }
+
+            Some(BackendEntry {
+                name,
+                url: raw_url,
+                protocol: protocol.to_string(),
+                no_auth,
+                strip_auth,
+            })
+        })
+        .collect()
+}
+
+// ── Helpers ─────────────────────────────────────────────────────
+
 fn derive_ice_servers(ws_url: &str) -> Vec<String> {
     if let Ok(url) = url::Url::parse(ws_url) {
         let mut host = url.host_str().unwrap_or("localhost").to_string();
@@ -226,7 +360,6 @@ fn derive_ice_servers(ws_url: &str) -> Vec<String> {
 }
 
 fn detect_lan_ip() -> String {
-    // Connect to a public IP to find which local interface is used
     if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
         if socket.connect("8.8.8.8:80").is_ok() {
             if let Ok(addr) = socket.local_addr() {
@@ -237,38 +370,6 @@ fn detect_lan_ip() -> String {
     "127.0.0.1".to_string()
 }
 
-fn require_env(name: &str) -> String {
-    env::var(name).unwrap_or_else(|_| {
-        eprintln!("[Gateway] {name} is required");
-        std::process::exit(1);
-    })
-}
-
-fn require_secret(name: &str) -> String {
-    let val = env::var(name).unwrap_or_default();
-    if val.is_empty() {
-        eprintln!("[Gateway] {name} is required (cannot be empty)");
-        std::process::exit(1);
-    }
-    val
-}
-
-fn warn_if_empty(name: &str) -> String {
-    let val = env::var(name).unwrap_or_default();
-    if val.is_empty() {
-        eprintln!("[Gateway] WARNING: {name} is empty — TURN credentials will be disabled");
-    }
-    val
-}
-
-fn resolve_tidecloak_path() -> PathBuf {
-    if let Ok(path) = env::var("TIDECLOAK_CONFIG_PATH") {
-        return PathBuf::from(path);
-    }
-    PathBuf::from("data/tidecloak.json")
-}
-
-// hex encoding helper (avoid adding a dep for this)
 mod hex {
     pub fn encode(bytes: &[u8]) -> String {
         bytes.iter().map(|b| format!("{b:02x}")).collect()

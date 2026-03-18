@@ -408,12 +408,20 @@ impl ProxyState {
             .build()
             .expect("Failed to build HTTP client");
 
-        // Resolve public directory relative to executable
-        let public_dir = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("public");
+        // Resolve public directory: check next to executable first, then cwd
+        let public_dir = {
+            let beside_exe = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|p| p.join("public")));
+            if beside_exe.as_ref().map_or(false, |p| p.exists()) {
+                beside_exe.unwrap()
+            } else if PathBuf::from("public").exists() {
+                std::fs::canonicalize("public").unwrap_or_else(|_| PathBuf::from("public"))
+            } else {
+                beside_exe.unwrap_or_else(|| PathBuf::from("public"))
+            }
+        };
+        eprintln!("[Gateway] Public dir: {}", public_dir.display());
 
         Self {
             use_tls: config.https,
