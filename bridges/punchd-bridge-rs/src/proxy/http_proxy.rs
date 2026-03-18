@@ -891,7 +891,7 @@ async fn handle_request(
 
     // Auth: login
     if effective_path == "/auth/login" {
-        return handle_auth_login(&state, &query_string, &host, resp_headers);
+        return handle_auth_login(&state, &query_string, &host, resp_headers).await;
     }
 
     // Auth: callback
@@ -1532,7 +1532,7 @@ fn compute_turn_credential(secret: &str, username: &str) -> String {
     base64::Engine::encode(&base64::engine::general_purpose::STANDARD, mac.finalize().into_bytes())
 }
 
-fn handle_auth_login(
+async fn handle_auth_login(
     state: &ProxyState,
     query: &str,
     host: &str,
@@ -1544,8 +1544,9 @@ fn handle_auth_login(
     let original_url = sanitize_redirect(params.get("redirect").map(|s| s.as_str()).unwrap_or("/"));
     let callback_url = get_callback_url(host, state.use_tls);
 
-    let endpoints = state.get_browser_endpoints();
-    let (auth_url, state_param) = build_auth_url(&endpoints, &state.client_id, &callback_url, &original_url);
+    // Build the auth URL using the *server-side* endpoints (pointing to actual Keycloak)
+    let server_endpoints = &state.server_endpoints;
+    let (auth_url, state_param) = build_auth_url(server_endpoints, &state.client_id, &callback_url, &original_url);
     let (nonce, _redirect) = parse_state(&state_param);
 
     let secure = if state.use_tls { "; Secure" } else { "" };
@@ -1553,14 +1554,87 @@ fn handle_auth_login(
         "oidc_nonce={nonce}; HttpOnly; Path=/auth/callback; Max-Age=600; SameSite=Lax{secure}"
     );
 
-    resp_headers.insert(
-        header::LOCATION,
-        HeaderValue::from_str(&auth_url).unwrap(),
-    );
-    if let Ok(v) = HeaderValue::from_str(&nonce_cookie) {
-        resp_headers.insert(header::SET_COOKIE, v);
+    // Proxy the Keycloak login page server-side instead of redirecting the browser.
+    // The STUN relay doesn't forward /realms/... paths, so we fetch inline and
+    // follow redirects server-side, returning the final login HTML to the browser.
+    let login_client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()
+        .unwrap_or_else(|_| state.http_client.clone());
+
+    let tc_resp: reqwest::Response = match login_client
+        .get(&auth_url)
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("Auth login proxy error: {e}");
+            resp_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"));
+            return make_response(
+                StatusCode::BAD_GATEWAY,
+                resp_headers,
+                &format!("<h2>Auth server unavailable</h2><p>{e}</p><p><a href=\"/auth/login?redirect={}\">Retry</a></p>",
+                    percent_encoding::utf8_percent_encode(&original_url, percent_encoding::NON_ALPHANUMERIC)),
+            );
+        }
+    };
+
+    let status = tc_resp.status();
+    let tc_headers = tc_resp.headers().clone();
+    let tc_origin = state.tc_proxy_url.origin().ascii_serialization();
+
+    // Copy relevant headers from Keycloak response
+    for (name, value) in tc_headers.iter() {
+        match name.as_str() {
+            "content-encoding" | "transfer-encoding" | "content-length" | "set-cookie" => continue,
+            _ => { resp_headers.append(name.clone(), value.clone()); }
+        }
     }
-    make_response(StatusCode::FOUND, resp_headers, "")
+
+    // Set the nonce cookie
+    if let Ok(v) = HeaderValue::from_str(&nonce_cookie) {
+        resp_headers.append(header::SET_COOKIE, v);
+    }
+
+    // If Keycloak returned a redirect (shouldn't happen with Policy::limited(5)),
+    // rewrite it so it goes through the gateway
+    if status.is_redirection() {
+        if let Some(loc) = tc_headers.get(header::LOCATION) {
+            if let Ok(loc_str) = loc.to_str() {
+                let rewritten = loc_str.replace(&tc_origin, "");
+                if let Ok(v) = HeaderValue::from_str(&rewritten) {
+                    resp_headers.insert(header::LOCATION, v);
+                }
+            }
+        }
+        return make_response(status, resp_headers, "");
+    }
+
+    // Read the HTML body and rewrite Keycloak internal URLs
+    let body_bytes = match tc_resp.bytes().await {
+        Ok(b) => b.to_vec(),
+        Err(e) => {
+            tracing::error!("Auth login read error: {e}");
+            return make_response(StatusCode::BAD_GATEWAY, resp_headers, "Auth server error");
+        }
+    };
+
+    let mut html = String::from_utf8_lossy(&body_bytes).to_string();
+
+    // Rewrite all Keycloak internal URLs to go through the gateway
+    html = html.replace(&tc_origin, "");
+    html = html.replace(
+        &tc_origin.replace('/', "\\/"),
+        "",
+    );
+
+    resp_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"));
+    resp_headers.remove(header::CONTENT_LENGTH);
+
+    make_response(status, resp_headers, &html)
 }
 
 async fn handle_auth_callback(
