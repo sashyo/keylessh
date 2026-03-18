@@ -4,6 +4,7 @@ import { Socket, connect } from "net";
 import { jwtVerify, createLocalJWKSet, JWTPayload } from "jose";
 import { readFileSync, existsSync } from "fs";
 import { join } from "path";
+import { createPublicKey, createHash, verify as cryptoVerify } from "crypto";
 
 /**
  * TCP Bridge — Stateless WebSocket-to-TCP forwarder for SSH connections.
@@ -110,6 +111,99 @@ async function verifyToken(token: string): Promise<JWTPayload | null> {
   }
 }
 
+// ── DPoP Proof Verification (RFC 9449) ──────────────────────────
+
+function base64UrlEncode(buf: Buffer): string {
+  return buf.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function base64UrlDecode(str: string): Buffer {
+  let s = str.replace(/-/g, "+").replace(/_/g, "/");
+  while (s.length % 4) s += "=";
+  return Buffer.from(s, "base64");
+}
+
+function computeJwkThumbprint(jwk: any): string {
+  let canonical: string;
+  if (jwk.kty === "EC") {
+    canonical = `{"crv":"${jwk.crv}","kty":"${jwk.kty}","x":"${jwk.x}","y":"${jwk.y}"}`;
+  } else if (jwk.kty === "OKP") {
+    canonical = `{"crv":"${jwk.crv}","kty":"${jwk.kty}","x":"${jwk.x}"}`;
+  } else if (jwk.kty === "RSA") {
+    canonical = `{"e":"${jwk.e}","kty":"${jwk.kty}","n":"${jwk.n}"}`;
+  } else {
+    throw new Error(`Unsupported key type: ${jwk.kty}`);
+  }
+  return base64UrlEncode(createHash("sha256").update(canonical).digest());
+}
+
+const seenJtis = new Map<string, number>();
+
+function checkAndStoreJti(jti: string): boolean {
+  const now = Date.now();
+  if (seenJtis.size > 1000) {
+    seenJtis.forEach((exp, k) => { if (exp < now) seenJtis.delete(k); });
+  }
+  if (seenJtis.has(jti)) return false;
+  seenJtis.set(jti, now + 120_000);
+  return true;
+}
+
+function verifyDPoPProof(
+  proofJwt: string,
+  httpMethod: string,
+  httpUrl: string,
+  expectedJkt?: string,
+): { valid: boolean; error?: string } {
+  try {
+    const parts = proofJwt.split(".");
+    if (parts.length !== 3) return { valid: false, error: "Invalid JWT structure" };
+
+    const header = JSON.parse(base64UrlDecode(parts[0]).toString());
+    const payload = JSON.parse(base64UrlDecode(parts[1]).toString());
+
+    if (header.typ !== "dpop+jwt") return { valid: false, error: "Invalid typ" };
+
+    const supportedAlgs = ["EdDSA", "ES256", "ES384", "ES512"];
+    if (!supportedAlgs.includes(header.alg)) return { valid: false, error: `Unsupported alg: ${header.alg}` };
+    if (!header.jwk) return { valid: false, error: "Missing jwk in header" };
+
+    const publicKey = createPublicKey({ key: header.jwk, format: "jwk" });
+    const signInput = `${parts[0]}.${parts[1]}`;
+    const signature = base64UrlDecode(parts[2]);
+    const alg = header.alg === "EdDSA" ? null : header.alg.toLowerCase().replace("es", "sha");
+    if (!cryptoVerify(alg, Buffer.from(signInput), publicKey, signature)) {
+      return { valid: false, error: "Invalid signature" };
+    }
+
+    if (payload.htm !== httpMethod) return { valid: false, error: `htm mismatch` };
+    const expectedHtu = httpUrl.split("?")[0];
+    if (payload.htu !== expectedHtu) return { valid: false, error: "htu mismatch" };
+
+    const now = Math.floor(Date.now() / 1000);
+    if (Math.abs(now - payload.iat) > 120) return { valid: false, error: "iat too far from current time" };
+    if (!payload.jti || !checkAndStoreJti(payload.jti)) return { valid: false, error: "jti missing or replayed" };
+
+    if (expectedJkt) {
+      const thumbprint = computeJwkThumbprint(header.jwk);
+      if (thumbprint !== expectedJkt) return { valid: false, error: "JWK thumbprint does not match cnf.jkt" };
+    }
+
+    return { valid: true };
+  } catch (err) {
+    return { valid: false, error: `DPoP verification error: ${err}` };
+  }
+}
+
+function extractCnfJkt(token: string): string | undefined {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3) return undefined;
+    const payload = JSON.parse(base64UrlDecode(parts[1]).toString());
+    return payload?.cnf?.jkt;
+  } catch { return undefined; }
+}
+
 // Load config on startup
 if (!loadConfig()) {
   console.error("[Bridge] Failed to load TideCloak config. Exiting.");
@@ -143,10 +237,22 @@ const wss = new WebSocketServer({ server });
 
 wss.on("connection", async (ws: WebSocket, req) => {
   const url = new URL(req.url || "/", `http://${req.headers.host}`);
-  const token = url.searchParams.get("token");
   const host = url.searchParams.get("host");
   const port = parseInt(url.searchParams.get("port") || "22", 10);
   const sessionId = url.searchParams.get("sessionId");
+
+  // Extract token: Authorization header (DPoP or Bearer) first, then query param
+  let token: string | null = null;
+  let isDPoP = false;
+  const authHeader = req.headers.authorization;
+  if (authHeader?.startsWith("DPoP ")) {
+    token = authHeader.slice(5);
+    isDPoP = true;
+  } else if (authHeader?.startsWith("Bearer ")) {
+    token = authHeader.slice(7);
+  } else {
+    token = url.searchParams.get("token");
+  }
 
   if (!token) {
     ws.close(4001, "Missing token");
@@ -164,6 +270,38 @@ wss.on("connection", async (ws: WebSocket, req) => {
     ws.close(4002, "Invalid token");
     return;
   }
+
+  // DPoP proof verification (RFC 9449)
+  const cnfJkt = extractCnfJkt(token);
+  const dpopQueryProof = url.searchParams.get("dpop");
+  if (isDPoP) {
+    const dpopProof = req.headers["dpop"] as string | undefined;
+    if (!dpopProof) {
+      ws.close(4003, "DPoP proof required");
+      return;
+    }
+    const requestUrl = `${req.headers["x-forwarded-proto"] || "http"}://${req.headers.host}${(req.url || "/").split("?")[0]}`;
+    const result = verifyDPoPProof(dpopProof, "GET", requestUrl, cnfJkt);
+    if (!result.valid) {
+      console.warn("[Bridge] DPoP proof verification failed:", result.error);
+      ws.close(4003, `DPoP proof invalid: ${result.error}`);
+      return;
+    }
+  } else if (dpopQueryProof) {
+    // DPoP proof passed as query param (WebSocket can't set custom headers)
+    const requestUrl = `${req.headers["x-forwarded-proto"] || "http"}://${req.headers.host}${(req.url || "/").split("?")[0]}`;
+    const result = verifyDPoPProof(dpopQueryProof, "GET", requestUrl, cnfJkt);
+    if (!result.valid) {
+      console.warn("[Bridge] DPoP query proof verification failed:", result.error);
+      ws.close(4003, `DPoP proof invalid: ${result.error}`);
+      return;
+    }
+  } else if (cnfJkt && authHeader) {
+    // Token is DPoP-bound but used Bearer scheme via header — reject
+    ws.close(4003, "DPoP-bound token requires DPoP authorization scheme");
+    return;
+  }
+  // Note: query-param tokens without dpop proof still accepted (backwards compat)
 
   const userId = payload.sub || "unknown";
   console.log(`[Bridge] Connection: ${userId} -> ${host}:${port} (session: ${sessionId})`);
