@@ -104,6 +104,7 @@ async fn handle_save(
     let turn_secret = get("turn_secret");
     let listen_port = get("listen_port");
     let health_port = get("health_port");
+    let auth_server_public_url = get("auth_server_public_url");
 
     // Validate required fields
     if stun_server_url.is_empty() || api_secret.is_empty() || backends.is_empty() {
@@ -142,6 +143,9 @@ async fn handle_save(
     }
     if !tc_config_b64.is_empty() {
         write_field(&mut toml, "tidecloak_config_b64", &tc_config_b64);
+    }
+    if !auth_server_public_url.is_empty() {
+        write_field(&mut toml, "auth_server_public_url", &auth_server_public_url);
     }
     toml.push('\n');
     toml.push_str("# Server\n");
@@ -289,6 +293,10 @@ const SETUP_HTML: &str = r##"<!DOCTYPE html>
         <textarea id="tidecloak_config_b64" name="tidecloak_config_b64"
                   placeholder="eyJyZWFsbSI6..."></textarea>
       </div>
+      <label for="auth_server_public_url">Auth Server Public URL</label>
+      <div class="hint">Public URL of TideCloak if different from auth-server-url in config (e.g. https://staging.dauth.me)</div>
+      <input type="text" id="auth_server_public_url" name="auth_server_public_url"
+             placeholder="https://staging.dauth.me">
     </div>
 
     <div class="section">

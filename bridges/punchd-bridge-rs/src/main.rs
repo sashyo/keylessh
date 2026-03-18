@@ -1,3 +1,5 @@
+#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
+
 use std::sync::Arc;
 
 mod auth;
@@ -17,11 +19,17 @@ async fn main() {
         .install_default()
         .expect("Failed to install rustls crypto provider");
     // Init logging: stderr + broadcast to web UI
+    // Default: INFO for our crate, WARN for dependencies
     {
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
+        use tracing_subscriber::EnvFilter;
         logstream::init();
+        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            EnvFilter::new("punchd_bridge_rs=info,warn")
+        });
         tracing_subscriber::registry()
+            .with(filter)
             .with(tracing_subscriber::fmt::layer())
             .with(logstream::BroadcastLayer)
             .init();
