@@ -1,5 +1,5 @@
 [package]
-name = "punchd-bridge-rs"
+name = "punchd-gateway"
 version = "0.1.0"
 edition = "2021"
 
@@ -41,6 +41,9 @@ hostname = "0.4"
 toml = "0.8"
 tokio-stream = { version = "0.1", features = ["sync"] }
 serde_urlencoded = "0.7"
+
+[build-dependencies]
+winresource = "0.1"
 
 [profile.release]
 strip = true
