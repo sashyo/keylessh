@@ -123,7 +123,6 @@ import {
   GetRawChangeSetRequest,
   AddApprovalWithSignedRequest,
   GetClientEvents,
-  syncPolicyToTideCloak,
 } from "./lib/tidecloakApi";
 import type { ChangeSetRequest, AccessApproval } from "./lib/auth/keycloakTypes";
 import { getAllowedSshUsersFromToken } from "./lib/auth/sshUsers";
@@ -138,6 +137,7 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
+
   // ============================================
   // Stripe Webhook (unauthenticated, must come before auth middleware)
   // ============================================
@@ -393,26 +393,7 @@ export async function registerRoutes(
         return;
       }
 
-      // Refresh and check if SSH access is blocked due to over-limit
-      const token = req.accessToken;
-      if (token) {
-        try {
-          const users = await tidecloakAdmin.getUsers(token);
-          // Count ALL enabled users (including admins) for the limit check
-          const enabledCount = users.filter(u => u.enabled).length;
-          const subscription = await subscriptionStorage.getSubscription();
-          const tier = (subscription?.tier as SubscriptionTier) || 'free';
-          const tierConfig = subscriptionTiers[tier];
-          const userLimit = tierConfig.maxUsers;
-          const isUsersOverLimit = userLimit !== -1 && enabledCount > userLimit;
-          const serverCounts = await subscriptionStorage.getServerCounts();
-          const serverLimit = tierConfig.maxServers;
-          const isServersOverLimit = serverLimit !== -1 && serverCounts.enabled > serverLimit;
-          await subscriptionStorage.updateOverLimitStatus(isUsersOverLimit, isServersOverLimit);
-        } catch {
-          // If we can't refresh, continue with cached status
-        }
-      }
+      // Check if SSH access is blocked due to over-limit (uses cached status)
       const sshStatus = await subscriptionStorage.isSshBlocked();
       if (sshStatus.blocked) {
         res.status(403).json({ message: sshStatus.reason || "SSH access is currently disabled" });
@@ -530,26 +511,7 @@ export async function registerRoutes(
           return;
         }
 
-        // Refresh and check if SSH access is blocked due to over-limit
-        const token = req.accessToken;
-        if (token) {
-          try {
-            const users = await tidecloakAdmin.getUsers(token);
-            // Count ALL enabled users (including admins) for the limit check
-            const enabledCount = users.filter(u => u.enabled).length;
-            const subscription = await subscriptionStorage.getSubscription();
-            const tier = (subscription?.tier as SubscriptionTier) || 'free';
-            const tierConfig = subscriptionTiers[tier];
-            const userLimit = tierConfig.maxUsers;
-            const isUsersOverLimit = userLimit !== -1 && enabledCount > userLimit;
-            const serverCounts = await subscriptionStorage.getServerCounts();
-            const serverLimit = tierConfig.maxServers;
-            const isServersOverLimit = serverLimit !== -1 && serverCounts.enabled > serverLimit;
-            await subscriptionStorage.updateOverLimitStatus(isUsersOverLimit, isServersOverLimit);
-          } catch {
-            // If we can't refresh, continue with cached status
-          }
-        }
+        // Check if SSH access is blocked due to over-limit (uses cached status)
         const sshStatus = await subscriptionStorage.isSshBlocked();
         if (sshStatus.blocked) {
           res.status(403).json({ message: sshStatus.reason || "SSH access is currently disabled" });
@@ -578,29 +540,23 @@ export async function registerRoutes(
     authenticate,
     async (req: AuthenticatedRequest, res) => {
       try {
-        // Refresh the over-limit status using the user's token for real-time accuracy
-        const token = req.accessToken;
-        if (token) {
+        // Client provides enabledUsers count (fetched direct from TideCloak via DPoP)
+        const enabledUserCount = parseInt(req.query.enabledUsers as string) || 0;
+        if (enabledUserCount > 0) {
           try {
-            const users = await tidecloakAdmin.getUsers(token);
-            // Count ALL enabled users (including admins) for the limit check
-            // Admins count toward the limit, they just can't be individually disabled
-            const enabledCount = users.filter(u => u.enabled).length;
             const subscription = await subscriptionStorage.getSubscription();
             const tier = (subscription?.tier as SubscriptionTier) || 'free';
             const tierConfig = subscriptionTiers[tier];
             const userLimit = tierConfig.maxUsers;
-            const isUsersOverLimit = userLimit !== -1 && enabledCount > userLimit;
+            const isUsersOverLimit = userLimit !== -1 && enabledUserCount > userLimit;
             const serverCounts = await subscriptionStorage.getServerCounts();
             const serverLimit = tierConfig.maxServers;
             const isServersOverLimit = serverLimit !== -1 && serverCounts.enabled > serverLimit;
-            log(`SSH access check: ${enabledCount} enabled users (limit: ${userLimit}), ${serverCounts.enabled} enabled servers (limit: ${serverLimit}), usersOver: ${isUsersOverLimit}, serversOver: ${isServersOverLimit}`);
+            log(`SSH access check: ${enabledUserCount} enabled users (limit: ${userLimit}), ${serverCounts.enabled} enabled servers (limit: ${serverLimit}), usersOver: ${isUsersOverLimit}, serversOver: ${isServersOverLimit}`);
             await subscriptionStorage.updateOverLimitStatus(isUsersOverLimit, isServersOverLimit);
           } catch (err) {
             log(`Failed to refresh over-limit status: ${err}`);
           }
-        } else {
-          log(`SSH access check: no token available`);
         }
 
         const status = await subscriptionStorage.isSshBlocked();
@@ -673,22 +629,7 @@ export async function registerRoutes(
         return;
       }
 
-      // Check subscription limits
-      try {
-        const users = await tidecloakAdmin.getUsers(token);
-        const enabledCount = users.filter(u => u.enabled).length;
-        const subscription = await subscriptionStorage.getSubscription();
-        const tier = (subscription?.tier as SubscriptionTier) || 'free';
-        const tierConfig = subscriptionTiers[tier];
-        const userLimit = tierConfig.maxUsers;
-        const isUsersOverLimit = userLimit !== -1 && enabledCount > userLimit;
-        const serverCounts = await subscriptionStorage.getServerCounts();
-        const serverLimit = tierConfig.maxServers;
-        const isServersOverLimit = serverLimit !== -1 && serverCounts.enabled > serverLimit;
-        await subscriptionStorage.updateOverLimitStatus(isUsersOverLimit, isServersOverLimit);
-      } catch {
-        // If we can't refresh, continue with cached status
-      }
+      // Check subscription limits (uses cached status — refreshed by admin dashboard)
       const sshStatus = await subscriptionStorage.isSshBlocked();
       if (sshStatus.blocked) {
         res.status(403).json({ valid: false, error: "SSH access is currently disabled" });
@@ -1984,28 +1925,20 @@ export async function registerRoutes(
           // Continue with commit even if extraction fails
         }
 
-        // Sync to TideCloak so the admin UI can display it
-        try {
-          const token = req.accessToken!;
-          const syncUrl = `${token ? "has token" : "NO TOKEN"}`;
-          console.log(`[PolicySync] Starting sync for role=${pendingPolicy.roleId}, token=${syncUrl}, policyData=${policyDataBase64 ? policyDataBase64.substring(0, 20) + "..." : "empty"}`);
-          await syncPolicyToTideCloak(token, {
-            roleId: pendingPolicy.roleId,
-            contractCode: pendingPolicy.contractCode,
-            approvalType: "implicit",
-            executionType: "private",
-            threshold: pendingPolicy.threshold,
-            policyData: policyDataBase64 || "",
-          });
-          log(`Synced policy for role ${pendingPolicy.roleId} to TideCloak`);
-        } catch (syncError) {
-          log(`Warning: Failed to sync policy to TideCloak: ${syncError}`);
-        }
-
         await pendingPolicyStorage.commitPolicy(id, req.user?.email || "unknown");
-
         log(`SSH policy ${id} committed by ${req.user?.email}`);
-        res.json({ success: true });
+
+        // Return sync data so client can sync to TideCloak directly via DPoP
+        const syncData = {
+          roleId: pendingPolicy.roleId,
+          contractCode: pendingPolicy.contractCode,
+          approvalType: "implicit" as const,
+          executionType: "private" as const,
+          threshold: pendingPolicy.threshold,
+          policyData: policyDataBase64 || "",
+        };
+
+        res.json({ success: true, syncData });
       } catch (error) {
         log(`Failed to commit policy: ${error}`);
         res.status(500).json({ error: error instanceof Error ? error.message : "Internal Server Error" });
@@ -3088,13 +3021,10 @@ export async function registerRoutes(
     requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
-        // Get users from TideCloak and count total/enabled
-        // Admins count toward the limit, they just can't be individually disabled
-        const users = await tidecloakAdmin.getUsers(token);
+        // Client provides user counts (fetched direct from TideCloak via DPoP)
         const userCounts = {
-          total: users.length, // All users for usage display
-          enabled: users.filter(u => u.enabled).length, // All enabled users (including admins) for over-limit check
+          total: parseInt(req.query.totalUsers as string) || 0,
+          enabled: parseInt(req.query.enabledUsers as string) || 0,
         };
 
         // Always validate local subscription against Stripe to ensure consistency
@@ -3247,9 +3177,8 @@ export async function registerRoutes(
 
         let currentCount: number;
         if (resource === 'user') {
-          const token = req.accessToken!;
-          const users = await tidecloakAdmin.getUsers(token);
-          currentCount = users.length;
+          // Client provides user count (fetched direct from TideCloak via DPoP)
+          currentCount = parseInt(req.query.count as string) || 0;
         } else {
           currentCount = await subscriptionStorage.getServerCount();
         }

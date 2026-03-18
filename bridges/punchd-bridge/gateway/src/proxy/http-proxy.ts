@@ -25,6 +25,7 @@ import {
   request as httpsRequest,
 } from "https";
 import { createHmac, randomBytes } from "crypto";
+import { verifyDPoPProof, extractCnfJkt } from "../auth/dpop.js";
 import { readFileSync, realpathSync } from "fs";
 import { join, resolve, sep } from "path";
 import type { TidecloakAuth } from "../auth/tidecloak.js";
@@ -1116,19 +1117,54 @@ export function createProxy(options: ProxyOptions): {
         // Backend handles its own auth — skip JWT validation
         stats.authorizedRequests++;
       } else {
-        // Extract JWT: cookie first, then Authorization header
+        // Extract JWT: cookie first, then Authorization header (Bearer or DPoP)
         const cookies = parseCookies(req.headers.cookie);
         let token = cookies["gateway_access"] || null;
+        let isDPoP = false;
 
         if (!token) {
           const authHeader = req.headers.authorization;
-          if (authHeader?.startsWith("Bearer ")) {
+          if (authHeader?.startsWith("DPoP ")) {
+            token = authHeader.slice(5);
+            isDPoP = true;
+          } else if (authHeader?.startsWith("Bearer ")) {
             token = authHeader.slice(7);
           }
         }
 
         // Validate JWT
         payload = token ? await options.auth.verifyToken(token) : null;
+
+        // DPoP proof verification (RFC 9449)
+        if (payload && token) {
+          const cnfJkt = extractCnfJkt(token);
+
+          if (isDPoP) {
+            const dpopProof = req.headers["dpop"] as string | undefined;
+            if (!dpopProof) {
+              stats.rejectedRequests++;
+              res.writeHead(401, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ error: "DPoP proof required" }));
+              return;
+            }
+
+            const requestUrl = `${req.headers["x-forwarded-proto"] || "https"}://${req.headers.host}${(url).split("?")[0]}`;
+            const result = verifyDPoPProof(dpopProof, req.method || "GET", requestUrl, cnfJkt);
+            if (!result.valid) {
+              console.warn("[Gateway] DPoP proof verification failed:", result.error);
+              stats.rejectedRequests++;
+              res.writeHead(401, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ error: `DPoP proof invalid: ${result.error}` }));
+              return;
+            }
+          } else if (cnfJkt) {
+            // Token is DPoP-bound but request used Bearer/cookie — reject
+            stats.rejectedRequests++;
+            res.writeHead(401, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "DPoP-bound token requires DPoP authorization scheme" }));
+            return;
+          }
+        }
 
         // If access token expired, try refreshing with refresh token
         if (!payload && cookies["gateway_refresh"]) {
