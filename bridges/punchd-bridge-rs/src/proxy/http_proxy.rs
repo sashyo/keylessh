@@ -250,20 +250,8 @@ fn rewrite_location(
         .to_string();
     }
 
-    // Also rewrite URL-encoded TC origins embedded in query params (e.g. IDP callback URLs)
-    if !tc_origin.is_empty() {
-        let encoded_tc = percent_encoding::utf8_percent_encode(
-            tc_origin,
-            percent_encoding::NON_ALPHANUMERIC,
-        )
-        .to_string();
-        let encoded_replacement = percent_encoding::utf8_percent_encode(
-            replacement,
-            percent_encoding::NON_ALPHANUMERIC,
-        )
-        .to_string();
-        result = result.replace(&encoded_tc, &encoded_replacement);
-    }
+    // NOTE: Do NOT rewrite URL-encoded origins in query params — Tide IDP
+    // redirect_uri is signed and must not be modified.
 
     result
 }
@@ -1915,14 +1903,8 @@ async fn handle_tc_proxy(
         proxy_headers.insert(header::HOST, v);
     }
 
-    // Tell KC the real public origin so it generates correct URLs (IDP callbacks, etc.)
-    proxy_headers.insert(
-        HeaderName::from_static("x-forwarded-proto"),
-        HeaderValue::from_static(if state.use_tls { "https" } else { "http" }),
-    );
-    if let Ok(v) = HeaderValue::from_str(host) {
-        proxy_headers.insert(HeaderName::from_static("x-forwarded-host"), v);
-    }
+    // NOTE: Do NOT set X-Forwarded-Proto/Host — KC must generate URLs with its
+    // own hostname (localhost:8080) because the Tide IDP redirect_uri is signed.
 
     // Inject stored TC cookies
     let jar_cookies = state.get_tc_cookie_header(&tc_session_id);
