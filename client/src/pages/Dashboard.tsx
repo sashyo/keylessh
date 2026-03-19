@@ -13,6 +13,7 @@ import { Input } from "@/components/ui/input";
 import type { ServerWithAccess, ActiveSession } from "@shared/schema";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 import { RefreshButton } from "@/components/RefreshButton";
+import { IAMService } from "@tidecloak/js";
 import { api, type GatewayEndpoint } from "@/lib/api";
 
 type ServiceItem =
@@ -530,7 +531,7 @@ export default function Dashboard() {
     const token = localStorage.getItem("access_token");
     if (!token) return;
 
-    await fetch(`/api/sessions/${sessionId}`, {
+    await IAMService.secureFetch(`${window.location.origin}/api/sessions/${sessionId}`, {
       method: "DELETE",
       headers: { Authorization: `Bearer ${token}` },
     });

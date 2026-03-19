@@ -11,8 +11,14 @@ import type { Session } from "@shared/schema";
 import type { KeyPair } from "@microsoft/dev-tunnels-ssh";
 import type { Signer } from "@microsoft/dev-tunnels-ssh";
 import type { Verifier } from "@microsoft/dev-tunnels-ssh";
+import { IAMService } from "@tidecloak/js";
 import { SftpClient } from "./sftp";
 import { ScpClient } from "./scp";
+
+function toAbsoluteUrl(path: string): string {
+  if (path.startsWith("http://") || path.startsWith("https://")) return path;
+  return `${window.location.origin}${path}`;
+}
 
 function sshWriteString(value: Buffer): Buffer {
   const len = Buffer.alloc(4);
@@ -389,7 +395,7 @@ export class BrowserSSHClient {
     const relativeTime = (timestamp - this.recordingStartTime) / 1000;
 
     // Fire and forget - don't await to avoid blocking terminal I/O
-    fetch(`/api/sessions/${this.sessionId}/record`, {
+    IAMService.secureFetch(toAbsoluteUrl(`/api/sessions/${this.sessionId}/record`), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -437,7 +443,7 @@ export class BrowserSSHClient {
     if (!token) return;
 
     // Fire and forget - don't await to avoid blocking file operations
-    fetch(`/api/sessions/${this.sessionId}/file-op`, {
+    IAMService.secureFetch(toAbsoluteUrl(`/api/sessions/${this.sessionId}/file-op`), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -604,7 +610,7 @@ export class BrowserSSHClient {
       throw new Error("Not authenticated");
     }
 
-    const res = await fetch("/api/sessions", {
+    const res = await IAMService.secureFetch(toAbsoluteUrl("/api/sessions"), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -667,7 +673,8 @@ export class BrowserSSHClient {
     if (!token) return;
 
     try {
-      fetch(`/api/sessions/${this.sessionId}`, {
+      // secureFetch adds DPoP proof; fire-and-forget on page unload
+      IAMService.secureFetch(toAbsoluteUrl(`/api/sessions/${this.sessionId}`), {
         method: "DELETE",
         headers: { Authorization: `Bearer ${token}` },
         keepalive: true,
@@ -685,7 +692,7 @@ export class BrowserSSHClient {
     if (!token) return;
 
     try {
-      await fetch(`/api/sessions/${this.sessionId}`, {
+      await IAMService.secureFetch(toAbsoluteUrl(`/api/sessions/${this.sessionId}`), {
         method: "DELETE",
         headers: {
           Authorization: `Bearer ${token}`,
@@ -694,7 +701,7 @@ export class BrowserSSHClient {
     } catch {
       // Retry once on failure
       try {
-        await fetch(`/api/sessions/${this.sessionId}`, {
+        await IAMService.secureFetch(toAbsoluteUrl(`/api/sessions/${this.sessionId}`), {
           method: "DELETE",
           headers: {
             Authorization: `Bearer ${token}`,
@@ -868,7 +875,7 @@ export class BrowserSSHClient {
     if (!token) return;
 
     try {
-      const res = await fetch(`/api/sessions/${this.sessionId}/start-recording`, {
+      const res = await IAMService.secureFetch(toAbsoluteUrl(`/api/sessions/${this.sessionId}/start-recording`), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -907,7 +914,7 @@ export class BrowserSSHClient {
     if (!token) return;
 
     try {
-      await fetch(`/api/sessions/${this.sessionId}/end-recording`, {
+      await IAMService.secureFetch(toAbsoluteUrl(`/api/sessions/${this.sessionId}/end-recording`), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

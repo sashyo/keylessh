@@ -47,6 +47,26 @@ import {
 const mockFetch = vi.fn();
 global.fetch = mockFetch;
 
+// Mock tidecloakAdmin — these functions now call TideCloak directly via DPoP
+vi.mock("@/lib/tidecloakAdmin", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/tidecloakAdmin")>();
+  return {
+    ...actual,
+    getUsers: vi.fn().mockResolvedValue([]),
+    getUsersWithRoles: vi.fn().mockResolvedValue([]),
+    getClientRoles: vi.fn().mockResolvedValue([]),
+    getAllRoles: vi.fn().mockResolvedValue([]),
+    addUser: vi.fn().mockResolvedValue(undefined),
+    deleteUser: vi.fn().mockResolvedValue(undefined),
+    setUserEnabled: vi.fn().mockResolvedValue(undefined),
+    createRole: vi.fn().mockResolvedValue(undefined),
+    deleteRole: vi.fn().mockResolvedValue({ approvalCreated: false }),
+    prefetchAdminData: vi.fn(),
+    invalidateUsersCache: vi.fn(),
+    invalidateRolesCache: vi.fn(),
+  };
+});
+
 // Mock localStorage for token storage
 const localStorageMock = {
   getItem: vi.fn(),
@@ -233,24 +253,20 @@ describe("API Client", () => {
    * Admin endpoints for user management.
    */
   describe("api.admin.users", () => {
-    // GET /api/admin/users - list all users in realm
+    // Users are now fetched via TideCloak directly (tc.getUsersWithRoles)
     it("should list users", async () => {
-      const users = [{ id: "1", email: "test@example.com" }];
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve(users),
-      });
+      const tc = await import("@/lib/tidecloakAdmin");
+      const mockUsers = [{ id: "1", email: "test@example.com", clientRoles: [] }];
+      vi.mocked(tc.getUsersWithRoles).mockResolvedValueOnce(mockUsers as any);
 
       const result = await api.admin.users.list();
-      expect(result).toEqual(users);
+      expect(result).toHaveLength(1);
+      expect(result[0].id).toBe("1");
     });
 
-    // POST /api/admin/users/add - create new user
+    // User creation goes through tc.addUser (TideCloak direct)
     it("should add a user", async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve({ message: "User created" }),
-      });
+      const tc = await import("@/lib/tidecloakAdmin");
 
       await api.admin.users.add({
         username: "newuser",
@@ -259,45 +275,30 @@ describe("API Client", () => {
         email: "new@example.com",
       });
 
-      expect(mockFetch).toHaveBeenCalledWith(
-        "/api/admin/users/add",
-        expect.objectContaining({
-          method: "POST",
-        })
-      );
+      expect(tc.addUser).toHaveBeenCalledWith({
+        username: "newuser",
+        firstName: "New",
+        lastName: "User",
+        email: "new@example.com",
+      });
     });
 
-    // DELETE /api/admin/users?userId=xxx - delete user
+    // User deletion goes through tc.deleteUser (TideCloak direct)
     it("should delete a user", async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve({ success: true }),
-      });
+      const tc = await import("@/lib/tidecloakAdmin");
 
       await api.admin.users.delete("user-123");
 
-      expect(mockFetch).toHaveBeenCalledWith(
-        "/api/admin/users?userId=user-123",
-        expect.objectContaining({ method: "DELETE" })
-      );
+      expect(tc.deleteUser).toHaveBeenCalledWith("user-123");
     });
 
-    // PUT /api/admin/users/:id/enabled - enable/disable user
+    // Enable/disable goes through tc.setUserEnabled (TideCloak direct)
     it("should set user enabled status", async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve({ success: true, enabled: false }),
-      });
+      const tc = await import("@/lib/tidecloakAdmin");
 
       await api.admin.users.setEnabled("user-123", false);
 
-      expect(mockFetch).toHaveBeenCalledWith(
-        "/api/admin/users/user-123/enabled",
-        expect.objectContaining({
-          method: "PUT",
-          body: JSON.stringify({ enabled: false }),
-        })
-      );
+      expect(tc.setUserEnabled).toHaveBeenCalledWith("user-123", false);
     });
   });
 
@@ -306,48 +307,32 @@ describe("API Client", () => {
    * Admin endpoints for role management.
    */
   describe("api.admin.roles", () => {
-    // GET /api/admin/roles - list all realm roles
+    // Roles are now fetched via TideCloak directly (tc.getClientRoles)
     it("should list roles", async () => {
-      const roles = { roles: [{ id: "1", name: "admin" }] };
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve(roles),
-      });
+      const tc = await import("@/lib/tidecloakAdmin");
+      vi.mocked(tc.getClientRoles).mockResolvedValueOnce([{ id: "1", name: "admin" }] as any);
 
       const result = await api.admin.roles.list();
-      expect(result).toEqual(roles);
+      expect(result.roles).toHaveLength(1);
+      expect(result.roles[0].name).toBe("admin");
     });
 
-    // POST /api/admin/roles - create new role
+    // Role creation goes through tc.createRole (TideCloak direct)
     it("should create a role", async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve({ success: "Role created" }),
-      });
+      const tc = await import("@/lib/tidecloakAdmin");
 
       await api.admin.roles.create({ name: "new-role", description: "A new role" });
 
-      expect(mockFetch).toHaveBeenCalledWith(
-        "/api/admin/roles",
-        expect.objectContaining({
-          method: "POST",
-        })
-      );
+      expect(tc.createRole).toHaveBeenCalledWith({ name: "new-role", description: "A new role" });
     });
 
-    // DELETE /api/admin/roles?roleName=xxx - delete role
+    // Role deletion goes through tc.deleteRole (TideCloak direct)
     it("should delete a role", async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve({ success: "Role deleted" }),
-      });
+      const tc = await import("@/lib/tidecloakAdmin");
 
       await api.admin.roles.delete("my-role");
 
-      expect(mockFetch).toHaveBeenCalledWith(
-        "/api/admin/roles?roleName=my-role",
-        expect.objectContaining({ method: "DELETE" })
-      );
+      expect(tc.deleteRole).toHaveBeenCalledWith("my-role");
     });
   });
 
@@ -425,8 +410,11 @@ describe("API Client", () => {
    * License and subscription management.
    */
   describe("api.admin.license", () => {
-    // GET /api/admin/license - get current license info
+    // License info: first calls tc.getUsers() to count, then hits server
     it("should get license info", async () => {
+      const tc = await import("@/lib/tidecloakAdmin");
+      vi.mocked(tc.getUsers).mockResolvedValueOnce([{ enabled: true }] as any);
+
       const license = { tier: "pro", tierName: "Pro" };
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -435,10 +423,14 @@ describe("API Client", () => {
 
       const result = await api.admin.license.get();
       expect(result).toEqual(license);
+      expect(tc.getUsers).toHaveBeenCalled();
     });
 
-    // GET /api/admin/license/check/:resource - check resource limits
+    // License limit check: calls tc.getUsers() for user count, then server
     it("should check resource limit", async () => {
+      const tc = await import("@/lib/tidecloakAdmin");
+      vi.mocked(tc.getUsers).mockResolvedValueOnce([{ enabled: true }] as any);
+
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({ allowed: true, current: 3, limit: 5 }),
