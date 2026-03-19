@@ -18,6 +18,67 @@ const getNonAdminTcUrl = () => `${getKeycloakAuthServer()}/realms/${getRealm_()}
 
 const REALM_MGMT = "realm-management";
 
+// ============================================
+// Caching layer — avoids repeated slow calls to TideCloak
+// ============================================
+
+interface CacheEntry<T> {
+  data: T;
+  expiry: number;
+}
+
+const cache = new Map<string, CacheEntry<any>>();
+const CACHE_TTL_MS = 30_000; // 30 seconds
+
+function getCached<T>(key: string): T | undefined {
+  const entry = cache.get(key);
+  if (!entry) return undefined;
+  if (Date.now() > entry.expiry) {
+    cache.delete(key);
+    return undefined;
+  }
+  return entry.data as T;
+}
+
+function setCache<T>(key: string, data: T, ttl = CACHE_TTL_MS): void {
+  cache.set(key, { data, expiry: Date.now() + ttl });
+}
+
+export function invalidateCache(prefix?: string): void {
+  if (!prefix) {
+    cache.clear();
+    return;
+  }
+  cache.forEach((_, key) => {
+    if (key.startsWith(prefix)) cache.delete(key);
+  });
+}
+
+// Concurrency-limited Promise.all — runs at most `limit` tasks in parallel
+async function promiseAllLimited<T>(
+  tasks: (() => Promise<T>)[],
+  limit: number
+): Promise<T[]> {
+  const results: T[] = new Array(tasks.length);
+  let idx = 0;
+
+  async function worker() {
+    while (idx < tasks.length) {
+      const i = idx++;
+      results[i] = await tasks[i]();
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(limit, tasks.length) }, () => worker());
+  await Promise.all(workers);
+  return results;
+}
+
+// Server-side client lookup cache (equivalent to client-side _clientCache)
+const clientCache = new Map<string, { data: ClientRepresentation; expiry: number }>();
+const CLIENT_CACHE_TTL = 300_000; // 5 minutes — clients rarely change
+
+
 // Sync a committed policy to TideCloak's SSH policies table
 export const syncPolicyToTideCloak = async (
   token: string,
@@ -143,6 +204,11 @@ export const getRoleById = async (
 export const getClientRoles = async (
   token: string
 ): Promise<RoleRepresentation[]> => {
+  // Check cache
+  const cacheKey = "clientRoles";
+  const cached = getCached<RoleRepresentation[]>(cacheKey);
+  if (cached) return cached;
+
   const client: ClientRepresentation | null = await getClientByClientId(
     getClient(),
     token
@@ -162,11 +228,14 @@ export const getClientRoles = async (
     return [];
   }
   const roleRes: RoleRepresentation[] = await response.json();
-  const roles: RoleRepresentation[] = await Promise.all(
-    roleRes.map(async (r) => {
-      return await getRoleById(r!.id!, token);
-    })
+
+  // Fetch full role details with concurrency limit instead of all-at-once
+  const roles = await promiseAllLimited(
+    roleRes.map((r) => () => getRoleById(r!.id!, token)),
+    5
   );
+
+  setCache(cacheKey, roles);
   return roles;
 };
 
@@ -202,6 +271,11 @@ export const getClientByClientId = async (
   clientId: string,
   token: string
 ): Promise<ClientRepresentation | null> => {
+  // Check cache first — client representations rarely change
+  const cacheKey = `client:${clientId}`;
+  const cached = clientCache.get(cacheKey);
+  if (cached && Date.now() < cached.expiry) return cached.data;
+
   try {
     const response = await fetch(`${getTcUrl()}/clients?clientId=${clientId}`, {
       method: "GET",
@@ -214,7 +288,9 @@ export const getClientByClientId = async (
       return null;
     }
     const clients: ClientRepresentation[] = await response.json();
-    return clients.length > 0 ? clients[0] : null;
+    const result = clients.length > 0 ? clients[0] : null;
+    if (result) clientCache.set(cacheKey, { data: result, expiry: Date.now() + CLIENT_CACHE_TTL });
+    return result;
   } catch (error) {
     console.error("Error fetching client by clientId:", error);
     return null;
@@ -225,6 +301,10 @@ export const getClientById = async (
   id: string,
   token: string
 ): Promise<ClientRepresentation | null> => {
+  const cacheKey = `clientById:${id}`;
+  const cached = clientCache.get(cacheKey);
+  if (cached && Date.now() < cached.expiry) return cached.data;
+
   try {
     const response = await fetch(`${getTcUrl()}/clients/${id}`, {
       method: "GET",
@@ -236,7 +316,9 @@ export const getClientById = async (
       console.error(`Error fetching client by id: ${response.statusText}`);
       return null;
     }
-    return await response.json();
+    const result = await response.json();
+    if (result) clientCache.set(cacheKey, { data: result, expiry: Date.now() + CLIENT_CACHE_TTL });
+    return result;
   } catch (error) {
     console.error("Error fetching client by id:", error);
     return null;

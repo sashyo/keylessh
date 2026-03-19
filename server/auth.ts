@@ -21,6 +21,7 @@ import {
   DeleteRole,
   DeleteRoleResult,
   getClientById,
+  invalidateCache,
 } from "./lib/tidecloakApi";
 import { UserRepresentation, RoleRepresentation, ClientRepresentation } from "./lib/auth/keycloakTypes";
 import { getResource } from "./lib/auth/tidecloakConfig";
@@ -321,14 +322,39 @@ export interface AdminRole {
   clientId?: string;
 }
 
+// Simple TTL cache for expensive aggregated queries
+interface CacheEntry<T> { data: T; expiry: number; }
+const usersCache: { entry?: CacheEntry<AdminUser[]> } = {};
+const USERS_CACHE_TTL = 30_000; // 30 seconds
+
+// Concurrency-limited Promise.all
+async function limitedAll<T>(tasks: (() => Promise<T>)[], limit: number): Promise<T[]> {
+  const results: T[] = new Array(tasks.length);
+  let idx = 0;
+  async function worker() {
+    while (idx < tasks.length) {
+      const i = idx++;
+      results[i] = await tasks[i]();
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, tasks.length) }, () => worker()));
+  return results;
+}
+
 // TideCloak Admin API wrapper class
 export class TidecloakAdmin {
-  // Get all users with their roles
+  // Get all users with their roles (cached, concurrency-limited)
   async getUsers(token: string): Promise<AdminUser[]> {
+    // Return cached if fresh
+    if (usersCache.entry && Date.now() < usersCache.entry.expiry) {
+      return usersCache.entry.data;
+    }
+
     const allUsers = await GetUsers(token);
 
-    const users: AdminUser[] = await Promise.all(
-      allUsers.map(async (u: UserRepresentation) => {
+    // Fetch role mappings with concurrency limit of 5
+    const users: AdminUser[] = await limitedAll(
+      allUsers.map((u: UserRepresentation) => async () => {
         const userRoles = await GetUserRoleMappings(u.id!, token);
         const userClientRoles = userRoles.clientMappings
           ? Object.values(userRoles.clientMappings).flatMap(
@@ -336,7 +362,6 @@ export class TidecloakAdmin {
             )
           : [];
 
-        // Check if user has admin role (tide-realm-admin)
         const isAdmin = userClientRoles.includes(ADMIN_ROLE);
 
         return {
@@ -347,12 +372,14 @@ export class TidecloakAdmin {
           username: u.username,
           role: userClientRoles,
           linked: !!u.attributes?.vuid?.[0],
-          enabled: u.enabled !== false, // Default to true if not set
+          enabled: u.enabled !== false,
           isAdmin,
         };
-      })
+      }),
+      5
     );
 
+    usersCache.entry = { data: users, expiry: Date.now() + USERS_CACHE_TTL };
     return users;
   }
 
@@ -369,6 +396,7 @@ export class TidecloakAdmin {
       enabled: true,
     };
     await AddUser(userRep, token);
+    usersCache.entry = undefined;
   }
 
   // Update user profile
@@ -378,6 +406,7 @@ export class TidecloakAdmin {
     data: { firstName: string; lastName: string; email: string }
   ): Promise<void> {
     await UpdateUser(userId, data.firstName, data.lastName, data.email, token);
+    usersCache.entry = undefined;
   }
 
   // Update user roles
@@ -393,16 +422,19 @@ export class TidecloakAdmin {
     for (const role of rolesToRemove) {
       await RemoveUserRole(userId, role, token);
     }
+    usersCache.entry = undefined;
   }
 
   // Delete user
   async deleteUser(token: string, userId: string): Promise<void> {
     await DeleteUser(userId, token);
+    usersCache.entry = undefined;
   }
 
   // Enable or disable a user
   async setUserEnabled(token: string, userId: string, enabled: boolean): Promise<void> {
     await SetUserEnabled(userId, enabled, token);
+    usersCache.entry = undefined;
   }
 
   // Get Tide link URL for account linking
@@ -487,6 +519,7 @@ export class TidecloakAdmin {
       description: roleData.description,
     };
     await createRoleForClient(client.id!, roleRep, token);
+    invalidateCache("clientRoles");
   }
 
   // Update a role
@@ -499,11 +532,14 @@ export class TidecloakAdmin {
       description: roleData.description,
     };
     await UpdateRole(roleRep, token);
+    invalidateCache("clientRoles");
   }
 
   // Delete a role
   async deleteRole(token: string, roleName: string): Promise<DeleteRoleResult> {
-    return await DeleteRole(roleName, token);
+    const result = await DeleteRole(roleName, token);
+    invalidateCache("clientRoles");
+    return result;
   }
 }
 

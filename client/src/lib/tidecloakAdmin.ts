@@ -138,11 +138,71 @@ const REALM_MGMT = "realm-management";
 const ADMIN_ROLE = "tide-realm-admin";
 
 // ============================================
+// Caching + concurrency helpers
+// ============================================
+
+interface CacheEntry<T> { data: T; expiry: number; }
+
+const _usersWithRolesCache: { entry?: CacheEntry<any[]> } = {};
+const _rolesCache: { entry?: CacheEntry<RoleRepresentation[]> } = {};
+const CACHE_TTL = 30_000; // 30 seconds
+
+/** Run async tasks with a concurrency limit */
+async function limitedAll<T>(tasks: (() => Promise<T>)[], limit: number): Promise<T[]> {
+  const results: T[] = new Array(tasks.length);
+  let idx = 0;
+  async function worker() {
+    while (idx < tasks.length) {
+      const i = idx++;
+      results[i] = await tasks[i]();
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, tasks.length) }, () => worker()));
+  return results;
+}
+
+/** Invalidate user/role caches (call after mutations) */
+export function invalidateUsersCache(): void { _usersWithRolesCache.entry = undefined; }
+export function invalidateRolesCache(): void { _rolesCache.entry = undefined; }
+
+// ============================================
 // User Management
 // ============================================
 
 export async function getUsers(): Promise<UserRepresentation[]> {
   return tcFetch<UserRepresentation[]>("/users?briefRepresentation=false");
+}
+
+/**
+ * Fetch all users with their role mappings in a single cached, concurrency-limited call.
+ * Returns users with an added `clientRoles: string[]` field.
+ * Concurrency is limited to 5 to avoid overwhelming TideCloak.
+ */
+export async function getUsersWithRoles(
+  users?: UserRepresentation[]
+): Promise<(UserRepresentation & { clientRoles: string[] })[]> {
+  // Return cached if fresh
+  if (_usersWithRolesCache.entry && Date.now() < _usersWithRolesCache.entry.expiry) {
+    return _usersWithRolesCache.entry.data;
+  }
+
+  const allUsers = users ?? await getUsers();
+
+  const result = await limitedAll(
+    allUsers.map((u) => async () => {
+      const mappings = await tcFetch<MappingsRepresentation>(`/users/${u.id}/role-mappings`).catch(() => ({} as MappingsRepresentation));
+      const clientRoles = mappings.clientMappings
+        ? Object.values(mappings.clientMappings).flatMap(
+            (m: any) => m.mappings?.map((r: any) => r.name!) || []
+          )
+        : [];
+      return { ...u, clientRoles };
+    }),
+    5
+  );
+
+  _usersWithRolesCache.entry = { data: result, expiry: Date.now() + CACHE_TTL };
+  return result;
 }
 
 export async function getUserByVuid(vuid: string): Promise<UserRepresentation[]> {
@@ -155,6 +215,7 @@ export async function addUser(userRep: { username: string; firstName: string; la
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(userRep),
   });
+  invalidateUsersCache();
 }
 
 export async function updateUser(userId: string, data: { firstName: string; lastName: string; email: string }): Promise<void> {
@@ -165,10 +226,12 @@ export async function updateUser(userId: string, data: { firstName: string; last
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(updated),
   });
+  invalidateUsersCache();
 }
 
 export async function deleteUser(userId: string): Promise<void> {
   await tcFetch(`/users/${userId}`, { method: "DELETE" });
+  invalidateUsersCache();
 }
 
 export async function setUserEnabled(userId: string, enabled: boolean): Promise<void> {
@@ -179,6 +242,7 @@ export async function setUserEnabled(userId: string, enabled: boolean): Promise<
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(updated),
   });
+  invalidateUsersCache();
 }
 
 export async function getUserRoleMappings(userId: string): Promise<MappingsRepresentation> {
@@ -202,15 +266,23 @@ export async function getTideLinkUrl(userId: string, redirectUri: string): Promi
 // ============================================
 
 export async function getClientRoles(): Promise<RoleRepresentation[]> {
+  // Return cached if fresh
+  if (_rolesCache.entry && Date.now() < _rolesCache.entry.expiry) {
+    return _rolesCache.entry.data;
+  }
+
   const clientId = await getClientId();
   const client = await getClientByClientId(clientId);
   if (!client) return [];
 
   const roles = await tcFetch<RoleRepresentation[]>(`/clients/${client.id}/roles`);
-  // Fetch full role details
-  const fullRoles = await Promise.all(
-    roles.map(r => tcFetch<RoleRepresentation>(`/roles-by-id/${r.id}`))
+  // Fetch full role details with concurrency limit
+  const fullRoles = await limitedAll(
+    roles.map(r => () => tcFetch<RoleRepresentation>(`/roles-by-id/${r.id}`)),
+    5
   );
+
+  _rolesCache.entry = { data: fullRoles, expiry: Date.now() + CACHE_TTL };
   return fullRoles;
 }
 
@@ -242,6 +314,7 @@ export async function createRole(data: { name: string; description?: string }): 
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data),
   });
+  invalidateRolesCache();
 }
 
 export async function updateRole(roleRep: { name: string; description?: string }): Promise<void> {
@@ -254,6 +327,7 @@ export async function updateRole(roleRep: { name: string; description?: string }
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(roleRep),
   });
+  invalidateRolesCache();
 }
 
 export async function deleteRole(roleName: string): Promise<{ approvalCreated: boolean; message?: string }> {
@@ -262,6 +336,7 @@ export async function deleteRole(roleName: string): Promise<{ approvalCreated: b
   if (!client) throw new Error("Client not found");
 
   await tcFetch(`/clients/${client.id}/roles/${roleName}`, { method: "DELETE" });
+  invalidateRolesCache();
 
   // Check if role still exists (approval created instead of immediate delete)
   try {
@@ -289,6 +364,7 @@ export async function grantUserRole(userId: string, roleName: string): Promise<v
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify([role]),
   });
+  invalidateUsersCache();
 }
 
 export async function removeUserRole(userId: string, roleName: string): Promise<void> {
@@ -308,6 +384,7 @@ export async function removeUserRole(userId: string, roleName: string): Promise<
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify([{ id: role.id, name: role.name }]),
   });
+  invalidateUsersCache();
 }
 
 // ============================================

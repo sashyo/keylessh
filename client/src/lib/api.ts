@@ -174,26 +174,18 @@ export const api = {
       list: async (): Promise<AdminUser[]> => {
         const users = await tc.getUsers();
         const ADMIN_ROLE = "tide-realm-admin";
-        return Promise.all(users.map(async (u) => {
-          const mappings = await tc.getUserRoleMappings(u.id!);
-          const clientRoles = mappings.clientMappings
-            ? Object.values(mappings.clientMappings).flatMap(
-                (m: any) => m.mappings?.map((r: any) => r.name!) || []
-              )
-            : [];
-          const isAdmin = clientRoles.includes(ADMIN_ROLE);
-          return {
-            id: u.id ?? "",
-            firstName: u.firstName ?? "",
-            lastName: u.lastName ?? "",
-            email: u.email ?? "",
-            username: u.username,
-            role: clientRoles,
-            linked: !!(u.attributes as any)?.vuid?.[0],
-            enabled: u.enabled !== false,
-            isAdmin,
-          } as AdminUser;
-        }));
+        const usersWithRoles = await tc.getUsersWithRoles(users);
+        return usersWithRoles.map((u: any) => ({
+          id: u.id ?? "",
+          firstName: u.firstName ?? "",
+          lastName: u.lastName ?? "",
+          email: u.email ?? "",
+          username: u.username,
+          role: u.clientRoles,
+          linked: !!(u.attributes as any)?.vuid?.[0],
+          enabled: u.enabled !== false,
+          isAdmin: u.clientRoles.includes(ADMIN_ROLE),
+        } as AdminUser));
       },
       add: async (data: { username: string; firstName: string; lastName: string; email: string }) => {
         await tc.addUser(data);
