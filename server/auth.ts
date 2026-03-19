@@ -125,7 +125,7 @@ function verifyDPoPProof(
 
     // Check htu (HTTP URL, without query string)
     const expectedHtu = httpUrl.split("?")[0];
-    if (payload.htu !== expectedHtu) return { valid: false, error: `htu mismatch` };
+    if (payload.htu !== expectedHtu) return { valid: false, error: `htu mismatch: got=${payload.htu} expected=${expectedHtu}` };
 
     // Check iat freshness (allow 2 minute skew)
     const now = Math.floor(Date.now() / 1000);
