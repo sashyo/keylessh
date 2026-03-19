@@ -222,30 +222,50 @@ fn rewrite_location(
     port_map: &HashMap<String, String>,
     replacement: &str,
 ) -> String {
-    // Rewrite TideCloak origin first
+    let mut result;
+
+    // Rewrite TideCloak origin first (at start of Location)
     if !tc_origin.is_empty() && location.starts_with(tc_origin) {
         let rest = &location[tc_origin.len()..];
         let suffix = if rest.is_empty() { "/" } else { rest };
-        return format!("{replacement}{suffix}");
-    }
-    // Rewrite localhost:PORT
-    let re = Regex::new(r"^https?://localhost(:\d+)?").unwrap();
-    re.replace(location, |caps: &regex::Captures| {
-        if let Some(port_group) = caps.get(1) {
-            let port = &port_group.as_str()[1..]; // strip leading ':'
-            if let Some(name) = port_map.get(port) {
-                return format!(
-                    "/__b/{}",
-                    percent_encoding::utf8_percent_encode(
-                        name,
-                        percent_encoding::NON_ALPHANUMERIC
-                    )
-                );
+        result = format!("{replacement}{suffix}");
+    } else {
+        // Rewrite localhost:PORT at start
+        let re = Regex::new(r"^https?://localhost(:\d+)?").unwrap();
+        result = re.replace(location, |caps: &regex::Captures| {
+            if let Some(port_group) = caps.get(1) {
+                let port = &port_group.as_str()[1..]; // strip leading ':'
+                if let Some(name) = port_map.get(port) {
+                    return format!(
+                        "/__b/{}",
+                        percent_encoding::utf8_percent_encode(
+                            name,
+                            percent_encoding::NON_ALPHANUMERIC
+                        )
+                    );
+                }
             }
-        }
-        replacement.to_string()
-    })
-    .to_string()
+            replacement.to_string()
+        })
+        .to_string();
+    }
+
+    // Also rewrite URL-encoded TC origins embedded in query params (e.g. IDP callback URLs)
+    if !tc_origin.is_empty() {
+        let encoded_tc = percent_encoding::utf8_percent_encode(
+            tc_origin,
+            percent_encoding::NON_ALPHANUMERIC,
+        )
+        .to_string();
+        let encoded_replacement = percent_encoding::utf8_percent_encode(
+            replacement,
+            percent_encoding::NON_ALPHANUMERIC,
+        )
+        .to_string();
+        result = result.replace(&encoded_tc, &encoded_replacement);
+    }
+
+    result
 }
 
 /// Rewrite all localhost:PORT URLs in HTML body to /__b/<name>.
@@ -1895,6 +1915,15 @@ async fn handle_tc_proxy(
         proxy_headers.insert(header::HOST, v);
     }
 
+    // Tell KC the real public origin so it generates correct URLs (IDP callbacks, etc.)
+    proxy_headers.insert(
+        HeaderName::from_static("x-forwarded-proto"),
+        HeaderValue::from_static(if state.use_tls { "https" } else { "http" }),
+    );
+    if let Ok(v) = HeaderValue::from_str(host) {
+        proxy_headers.insert(HeaderName::from_static("x-forwarded-host"), v);
+    }
+
     // Inject stored TC cookies
     let jar_cookies = state.get_tc_cookie_header(&tc_session_id);
     if !jar_cookies.is_empty() {
@@ -1979,8 +2008,19 @@ async fn handle_tc_proxy(
             || name_str == "transfer-encoding"
             || name_str == "content-security-policy"
             || name_str == "content-security-policy-report-only"
-            || name_str == "set-cookie"
         {
+            continue;
+        }
+        // Forward KC's Set-Cookie headers (AUTH_SESSION_ID etc.) so the browser
+        // can send them directly on IDP callbacks that bypass the tc_sess jar.
+        if name_str == "set-cookie" {
+            // Rewrite cookie domain/path if KC used internal origin
+            let cookie_str = value.to_str().unwrap_or("");
+            let tc_origin = state.tc_proxy_url.origin().ascii_serialization();
+            let rewritten = cookie_str.replace(&tc_origin, &public_base);
+            if let Ok(v) = HeaderValue::from_str(&rewritten) {
+                resp_headers.append(name.clone(), v);
+            }
             continue;
         }
         resp_headers.append(name.clone(), value.clone());
