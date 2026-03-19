@@ -60,6 +60,7 @@ export interface Registry {
   getClient(id: string): RegisteredClient | undefined;
   getAvailableGateway(): RegisteredGateway | undefined;
   getGatewayByRealm(realm: string): RegisteredGateway | undefined;
+  getGatewayByBackend(backendName: string): RegisteredGateway | undefined;
   getAllGateways(): RegisteredGateway[];
   updateClientReflexive(id: string, address: string): void;
   updateClientConnection(id: string, connectionType: ConnectionType): void;
@@ -180,6 +181,20 @@ export function createRegistry(): Registry {
       let minClients = Infinity;
       for (const gateway of gateways.values()) {
         if (gateway.metadata.realm === realm && gateway.pairedClients.size < minClients) {
+          minClients = gateway.pairedClients.size;
+          best = gateway;
+        }
+      }
+      return best;
+    },
+
+    getGatewayByBackend(backendName) {
+      // Find gateway that has the given backend registered.
+      let best: RegisteredGateway | undefined;
+      let minClients = Infinity;
+      for (const gateway of gateways.values()) {
+        const hasBackend = gateway.metadata.backends?.some(b => b.name === backendName);
+        if (hasBackend && gateway.pairedClients.size < minClients) {
           minClients = gateway.pairedClients.size;
           best = gateway;
         }
