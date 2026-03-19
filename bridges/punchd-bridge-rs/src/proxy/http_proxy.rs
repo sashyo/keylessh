@@ -1913,11 +1913,13 @@ async fn handle_tc_proxy(
         }
     }
 
+    let tc_base_path = state.tc_proxy_url.path().trim_end_matches('/');
     let tc_url = format!(
-        "{}://{}{}{}",
+        "{}://{}{}{}{}",
         state.tc_proxy_url.scheme(),
         state.tc_proxy_url.host_str().unwrap_or("localhost"),
         state.tc_proxy_url.port().map(|p| format!(":{p}")).unwrap_or_default(),
+        tc_base_path,
         url,
     );
 
