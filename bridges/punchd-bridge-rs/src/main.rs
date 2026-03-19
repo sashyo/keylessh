@@ -206,6 +206,7 @@ async fn main() {
                     });
                     let _ = hyper::server::conn::http1::Builder::new()
                         .serve_connection(io, service)
+                        .with_upgrades()
                         .await;
                 }
             });
