@@ -188,16 +188,10 @@ export async function getUsers(): Promise<UserRepresentation[]> {
 
 /**
  * Fetch all users with their roles using a role-centric approach.
- * Instead of N calls (one per user for role-mappings), this makes R calls
- * (one per role to get its members) — typically far fewer since roles << users.
- *
- * 1. Fetch all users (1 call)
- * 2. Fetch client roles (1 call, cached)
- * 3. For each role, fetch users in that role (R calls)
- * 4. Also fetch admin role members (1 call)
- * 5. Build userId → roles map and merge
- *
- * Total: ~R+3 calls instead of N+1
+ * Maximizes parallelism: fires users, client lookups, role list, and admin
+ * members all concurrently. Only 2 sequential rounds:
+ *   Round 1: users + both client lookups + role list (all parallel)
+ *   Round 2: role-member fetches (all parallel)
  */
 export async function getUsersWithRoles(
   users?: UserRepresentation[]
@@ -207,30 +201,44 @@ export async function getUsersWithRoles(
     return _usersWithRolesCache.entry.data;
   }
 
-  const allUsers = users ?? await getUsers();
+  // --- Round 1: fire everything we can in parallel ---
+  const appClientIdP = getClientId();
+  const usersP = users ? Promise.resolve(users) : getUsers();
 
-  // Build a map of userId → role names
+  // Resolve app client + realm-management client in parallel with users
+  const [allUsers, appClientId] = await Promise.all([usersP, appClientIdP]);
+
+  // Now look up both clients and the role list in parallel
+  const [appClient, rmClient] = await Promise.all([
+    getClientByClientId(appClientId),
+    getClientByClientId(REALM_MGMT),
+  ]);
+
+  // --- Round 2: fetch role list + admin members in parallel ---
+  const [roles, adminUsers] = await Promise.all([
+    appClient?.id
+      ? tcFetch<RoleRepresentation[]>(`/clients/${appClient.id}/roles`).catch(() => [] as RoleRepresentation[])
+      : [] as RoleRepresentation[],
+    rmClient?.id
+      ? tcFetch<UserRepresentation[]>(
+          `/clients/${rmClient.id}/roles/${encodeURIComponent(ADMIN_ROLE)}/users`
+        ).catch(() => [] as UserRepresentation[])
+      : [] as UserRepresentation[],
+  ]);
+
+  // --- Round 3: fetch members for each role in parallel ---
   const userRolesMap = new Map<string, string[]>();
 
-  // Get the app client
-  const appClientId = await getClientId();
-  const appClient = await getClientByClientId(appClientId);
-
-  if (appClient?.id) {
-    // Fetch client role list (cached)
-    const roles = await tcFetch<RoleRepresentation[]>(`/clients/${appClient.id}/roles`).catch(() => []);
-
-    // For each role, fetch which users have it — all in parallel (R is small)
+  if (appClient?.id && roles.length > 0) {
     const roleUserPairs = await Promise.all(
       roles.map(async (role) => {
-        const usersInRole = await tcFetch<UserRepresentation[]>(
+        const members = await tcFetch<UserRepresentation[]>(
           `/clients/${appClient.id}/roles/${encodeURIComponent(role.name!)}/users`
         ).catch(() => []);
-        return { roleName: role.name!, userIds: usersInRole.map(u => u.id!) };
+        return { roleName: role.name!, userIds: members.map(u => u.id!) };
       })
     );
 
-    // Populate the map
     for (const { roleName, userIds } of roleUserPairs) {
       for (const uid of userIds) {
         const existing = userRolesMap.get(uid) || [];
@@ -240,22 +248,13 @@ export async function getUsersWithRoles(
     }
   }
 
-  // Also check admin role (tide-realm-admin under realm-management client)
-  try {
-    const rmClient = await getClientByClientId(REALM_MGMT);
-    if (rmClient?.id) {
-      const adminUsers = await tcFetch<UserRepresentation[]>(
-        `/clients/${rmClient.id}/roles/${encodeURIComponent(ADMIN_ROLE)}/users`
-      ).catch(() => []);
-      for (const u of adminUsers) {
-        const existing = userRolesMap.get(u.id!) || [];
-        existing.push(ADMIN_ROLE);
-        userRolesMap.set(u.id!, existing);
-      }
-    }
-  } catch { /* admin role fetch failed, skip */ }
+  // Merge admin role members
+  for (const u of adminUsers) {
+    const existing = userRolesMap.get(u.id!) || [];
+    existing.push(ADMIN_ROLE);
+    userRolesMap.set(u.id!, existing);
+  }
 
-  // Merge users with their roles
   const result = allUsers.map(u => ({
     ...u,
     clientRoles: userRolesMap.get(u.id!) || [],
