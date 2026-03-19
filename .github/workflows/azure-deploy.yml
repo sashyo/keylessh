@@ -31,16 +31,19 @@ jobs:
         run: |
           # Create a clean deployment directory
           mkdir -p deploy
+
           # Copy build output
           cp -r dist deploy/
-          # Copy data folder (contains tidecloak.json config)
-          cp -r data deploy/
+
           # Copy package files for production dependencies
           cp package.json deploy/
           cp package-lock.json deploy/
+
           # Install production dependencies only
           cd deploy
           npm ci --omit=dev
+          npm rebuild better-sqlite3
+
           # Create web.config for IIS (Azure App Service uses this)
           cat > web.config << 'EOF'
           <?xml version="1.0" encoding="utf-8"?>
@@ -75,6 +78,7 @@ jobs:
             </system.webServer>
           </configuration>
           EOF
+
       - name: Deploy to Azure Web App
         uses: azure/webapps-deploy@v3
         with:
