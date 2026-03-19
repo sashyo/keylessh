@@ -172,9 +172,8 @@ export const api = {
     },
     users: {
       list: async (): Promise<AdminUser[]> => {
-        const users = await tc.getUsers();
         const ADMIN_ROLE = "tide-realm-admin";
-        const usersWithRoles = await tc.getUsersWithRoles(users);
+        const usersWithRoles = await tc.getUsersWithRoles();
         return usersWithRoles.map((u: any) => ({
           id: u.id ?? "",
           firstName: u.firstName ?? "",

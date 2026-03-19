@@ -2,6 +2,7 @@ import { createContext, useContext, useState, useEffect, useCallback, useRef, ty
 import { TideCloakContextProvider, useTideCloak } from "@tidecloak/react";
 import { IAMService } from "@tidecloak/js";
 import type { OIDCUser, UserRole, AuthState } from "@shared/schema";
+import { prefetchAdminData } from "../lib/tidecloakAdmin";
 
 export enum ApprovalStatus {
   approved = "approved",
@@ -114,6 +115,9 @@ function TideCloakAuthBridge({ children, authConfig }: { children: ReactNode; au
           isAuthenticated: true,
           isLoading: false,
         });
+
+        // Prefetch admin data so caches are warm when user navigates to admin pages
+        prefetchAdminData();
         return;
       }
 

@@ -48,7 +48,7 @@ import { api, type PolicyTemplate, type TemplateParameter, type GatewayEndpoint 
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 import { RefreshButton } from "@/components/RefreshButton";
 import { useAuth, useAuthConfig } from "@/contexts/AuthContext";
-import { KeyRound, Pencil, Plus, Trash2, Search, Shield, FileCode, Globe } from "lucide-react";
+import { KeyRound, Pencil, Plus, Trash2, Search, Shield, FileCode, Globe, ChevronLeft, ChevronRight } from "lucide-react";
 import type { AdminRole } from "@shared/schema";
 import { ADMIN_ROLE_SET } from "@shared/config/roles";
 import { createSshPolicyRequest, createSshPolicyRequestWithCode, bytesToBase64, SSH_MODEL_IDS, SSH_FORSETI_CONTRACT } from "@/lib/sshPolicy";
@@ -503,6 +503,14 @@ export default function AdminRoles() {
       (role.description?.toLowerCase().includes(search.toLowerCase()) ?? false)
   );
 
+  const ROLES_PER_PAGE = 5;
+  const [rolesPage, setRolesPage] = useState(0);
+  const totalRolesPages = Math.ceil(filteredRoles.length / ROLES_PER_PAGE);
+  const paginatedRoles = useMemo(() => {
+    const start = rolesPage * ROLES_PER_PAGE;
+    return filteredRoles.slice(start, start + ROLES_PER_PAGE);
+  }, [filteredRoles, rolesPage]);
+
   const sshRoleCount = useMemo(
     () => roles.filter((r) => /^ssh[:\-]/i.test(r.name)).length,
     [roles]
@@ -551,7 +559,7 @@ export default function AdminRoles() {
             <Input
               placeholder="Search roles..."
               value={search}
-              onChange={(e) => setSearch(e.target.value)}
+              onChange={(e) => { setSearch(e.target.value); setRolesPage(0); }}
               className="pl-9"
               data-testid="search-roles"
             />
@@ -572,6 +580,7 @@ export default function AdminRoles() {
               ))}
             </div>
           ) : filteredRoles.length > 0 ? (
+            <>
             <Table>
               <TableHeader>
                 <TableRow>
@@ -582,7 +591,7 @@ export default function AdminRoles() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {filteredRoles.map((role) => (
+                {paginatedRoles.map((role) => (
                   <TableRow key={role.id} data-testid={`role-row-${role.id}`}>
                     <TableCell>
                       <div className="flex items-center gap-3">
@@ -638,6 +647,23 @@ export default function AdminRoles() {
                 ))}
               </TableBody>
             </Table>
+            {totalRolesPages > 1 && (
+              <div className="flex items-center justify-between px-4 py-3 border-t border-border">
+                <p className="text-sm text-muted-foreground">
+                  Showing {rolesPage * ROLES_PER_PAGE + 1}–{Math.min((rolesPage + 1) * ROLES_PER_PAGE, filteredRoles.length)} of {filteredRoles.length}
+                </p>
+                <div className="flex items-center gap-1">
+                  <Button variant="ghost" size="icon" disabled={rolesPage === 0} onClick={() => setRolesPage(p => p - 1)}>
+                    <ChevronLeft className="h-4 w-4" />
+                  </Button>
+                  <span className="text-sm px-2">{rolesPage + 1} / {totalRolesPages}</span>
+                  <Button variant="ghost" size="icon" disabled={rolesPage >= totalRolesPages - 1} onClick={() => setRolesPage(p => p + 1)}>
+                    <ChevronRight className="h-4 w-4" />
+                  </Button>
+                </div>
+              </div>
+            )}
+            </>
           ) : (
             <div className="flex flex-col items-center justify-center py-12 text-center">
               <KeyRound className="h-12 w-12 text-muted-foreground mb-4" />

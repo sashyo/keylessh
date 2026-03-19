@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { useQuery, useMutation, useIsFetching } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -39,7 +39,7 @@ import { useToast } from "@/hooks/use-toast";
 import { queryClient } from "@/lib/queryClient";
 import { api } from "@/lib/api";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
-import { Users, Pencil, Search, Shield, User as UserIcon, Plus, Trash2, X, Link, Unlink, Copy, Check, AlertCircle, Clock } from "lucide-react";
+import { Users, Pencil, Search, Shield, User as UserIcon, Plus, Trash2, X, Link, Unlink, Copy, Check, AlertCircle, Clock, ChevronLeft, ChevronRight } from "lucide-react";
 import type { AdminUser } from "@shared/schema";
 import type { AccessApproval } from "@/lib/api";
 import { UpgradeBanner } from "@/components/UpgradeBanner";
@@ -315,6 +315,21 @@ export default function AdminUsers() {
       user.lastName.toLowerCase().includes(search.toLowerCase())
   );
 
+  const USERS_PER_PAGE = 5;
+  const [usersPage, setUsersPage] = useState(0);
+  const totalUsersPages = Math.ceil((filteredUsers?.length || 0) / USERS_PER_PAGE);
+  const paginatedUsers = useMemo(() => {
+    if (!filteredUsers) return [];
+    const start = usersPage * USERS_PER_PAGE;
+    return filteredUsers.slice(start, start + USERS_PER_PAGE);
+  }, [filteredUsers, usersPage]);
+
+  // Reset to first page when search changes
+  const handleSearchChange = (value: string) => {
+    setSearch(value);
+    setUsersPage(0);
+  };
+
   const isUpdating = updateProfileMutation.isPending || updateRolesMutation.isPending;
 
   return (
@@ -380,7 +395,7 @@ export default function AdminUsers() {
             <Input
               placeholder="Search users..."
               value={search}
-              onChange={(e) => setSearch(e.target.value)}
+              onChange={(e) => handleSearchChange(e.target.value)}
               className="pl-9"
               data-testid="search-users"
             />
@@ -401,6 +416,7 @@ export default function AdminUsers() {
               ))}
             </div>
           ) : filteredUsers && filteredUsers.length > 0 ? (
+            <>
             <Table>
               <TableHeader>
                 <TableRow>
@@ -412,7 +428,7 @@ export default function AdminUsers() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {filteredUsers.map((user) => {
+                {paginatedUsers.map((user) => {
                   const userRoles = Array.isArray(user.role) ? user.role : user.role ? [user.role] : [];
                   const isAdmin = userRoles.some((r) => r.toLowerCase().includes("admin"));
                   return (
@@ -529,6 +545,23 @@ export default function AdminUsers() {
                 })}
               </TableBody>
             </Table>
+            {totalUsersPages > 1 && (
+              <div className="flex items-center justify-between px-4 py-3 border-t border-border">
+                <p className="text-sm text-muted-foreground">
+                  Showing {usersPage * USERS_PER_PAGE + 1}–{Math.min((usersPage + 1) * USERS_PER_PAGE, filteredUsers!.length)} of {filteredUsers!.length}
+                </p>
+                <div className="flex items-center gap-1">
+                  <Button variant="ghost" size="icon" disabled={usersPage === 0} onClick={() => setUsersPage(p => p - 1)}>
+                    <ChevronLeft className="h-4 w-4" />
+                  </Button>
+                  <span className="text-sm px-2">{usersPage + 1} / {totalUsersPages}</span>
+                  <Button variant="ghost" size="icon" disabled={usersPage >= totalUsersPages - 1} onClick={() => setUsersPage(p => p + 1)}>
+                    <ChevronRight className="h-4 w-4" />
+                  </Button>
+                </div>
+              </div>
+            )}
+            </>
           ) : (
             <div className="flex flex-col items-center justify-center py-12 text-center">
               <Users className="h-12 w-12 text-muted-foreground mb-4" />

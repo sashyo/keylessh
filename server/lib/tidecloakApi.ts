@@ -227,13 +227,9 @@ export const getClientRoles = async (
     console.error(`Error fetching client roles: ${response.statusText}`);
     return [];
   }
-  const roleRes: RoleRepresentation[] = await response.json();
-
-  // Fetch full role details with concurrency limit instead of all-at-once
-  const roles = await promiseAllLimited(
-    roleRes.map((r) => () => getRoleById(r!.id!, token)),
-    5
-  );
+  // The list endpoint already returns id, name, description, clientRole, containerId
+  // No need to re-fetch each role by ID
+  const roles: RoleRepresentation[] = await response.json();
 
   setCache(cacheKey, roles);
   return roles;
