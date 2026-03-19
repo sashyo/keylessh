@@ -299,11 +299,19 @@ fn extract_peer_cert_chain(tls_stream: &TlsStream<TcpStream>) -> Vec<Vec<u8>> {
 /// Check whether the JWT payload has a "dest:<destination>" role.
 /// Looks in both realm_access.roles and resource_access[tc_client_id].roles.
 fn check_dest_roles(payload: &JwtPayload, destination: &str, tc_client_id: Option<&str>) -> bool {
-    let required_role = format!("dest:{destination}");
+    // Accept both "dest:<name>" and "dest:<gateway>:<name>" role formats
+    let required_simple = format!("dest:{destination}");
+
+    let check_roles = |roles: &[String]| -> bool {
+        roles.iter().any(|r| {
+            r == &required_simple
+                || (r.starts_with("dest:") && r.ends_with(&format!(":{destination}")))
+        })
+    };
 
     // Check realm_access.roles
     if let Some(ref ra) = payload.realm_access {
-        if ra.roles.iter().any(|r| r == &required_role) {
+        if check_roles(&ra.roles) {
             return true;
         }
     }
@@ -313,10 +321,12 @@ fn check_dest_roles(payload: &JwtPayload, destination: &str, tc_client_id: Optio
     {
         if let Some(client_obj) = resource_access.get(client_id) {
             if let Some(roles) = client_obj.get("roles").and_then(|v| v.as_array()) {
-                for role in roles {
-                    if role.as_str() == Some(&required_role) {
-                        return true;
-                    }
+                let role_strs: Vec<String> = roles
+                    .iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect();
+                if check_roles(&role_strs) {
+                    return true;
                 }
             }
         }
