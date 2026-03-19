@@ -213,19 +213,19 @@ async fn run_session(
         let _ = tls_write.shutdown().await;
     });
 
-    // Task: RDP server -> client (PDU-aware: sends complete RDP frames)
+    // Task: RDP server -> client
     let send_binary_s2c = send_binary.clone();
     let send_close_s2c = send_close.clone();
     let s2c = tokio::spawn(async move {
+        let mut buf = vec![0u8; 65536];
         loop {
-            match read_rdp_pdu(&mut tls_read).await {
-                Ok(pdu) => {
-                    (send_binary_s2c)(pdu);
+            match tls_read.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    (send_binary_s2c)(buf[..n].to_vec());
                 }
                 Err(e) => {
-                    if !e.contains("EOF") {
-                        tracing::error!("Relay s2c read error: {e}");
-                    }
+                    tracing::error!("Relay s2c read error: {e}");
                     break;
                 }
             }
@@ -245,89 +245,6 @@ async fn run_session(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/// Read a complete RDP PDU from the TLS stream.
-/// Handles both TPKT (0x03) and Fast-Path framing.
-async fn read_rdp_pdu<R: tokio::io::AsyncRead + Unpin>(reader: &mut R) -> Result<Vec<u8>, String> {
-    // Read first byte to determine PDU type
-    let mut first = [0u8; 1];
-    reader
-        .read_exact(&mut first)
-        .await
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::UnexpectedEof {
-                "EOF".to_string()
-            } else {
-                format!("Read error: {e}")
-            }
-        })?;
-
-    if first[0] == 0x03 {
-        // TPKT: 4-byte header [0x03, 0x00, len_hi, len_lo]
-        let mut rest = [0u8; 3];
-        reader
-            .read_exact(&mut rest)
-            .await
-            .map_err(|e| format!("TPKT header read error: {e}"))?;
-        let total_len = ((rest[1] as usize) << 8) | (rest[2] as usize);
-        if total_len < 4 || total_len > 1_048_576 {
-            return Err(format!("Invalid TPKT length: {total_len}"));
-        }
-        let mut pdu = Vec::with_capacity(total_len);
-        pdu.push(first[0]);
-        pdu.extend_from_slice(&rest);
-        if total_len > 4 {
-            pdu.resize(total_len, 0);
-            reader
-                .read_exact(&mut pdu[4..])
-                .await
-                .map_err(|e| format!("TPKT payload read error: {e}"))?;
-        }
-        Ok(pdu)
-    } else {
-        // Fast-Path: byte 0 = action|flags, then variable-length encoding
-        let mut len_byte = [0u8; 1];
-        reader
-            .read_exact(&mut len_byte)
-            .await
-            .map_err(|e| format!("Fast-Path length read error: {e}"))?;
-
-        let total_len = if len_byte[0] & 0x80 == 0 {
-            // Single-byte length
-            len_byte[0] as usize
-        } else {
-            // Two-byte length: (byte1 & 0x7f) << 8 | byte2
-            let mut len2 = [0u8; 1];
-            reader
-                .read_exact(&mut len2)
-                .await
-                .map_err(|e| format!("Fast-Path length2 read error: {e}"))?;
-            ((len_byte[0] as usize & 0x7f) << 8) | (len2[0] as usize)
-        };
-
-        if total_len < 2 || total_len > 1_048_576 {
-            return Err(format!("Invalid Fast-Path length: {total_len}"));
-        }
-
-        let header_len = if len_byte[0] & 0x80 == 0 { 2 } else { 3 };
-        let mut pdu = Vec::with_capacity(total_len);
-        pdu.push(first[0]);
-        pdu.push(len_byte[0]);
-        if header_len == 3 {
-            // Already read the second length byte into len2 above, but we need to include it
-            // Re-derive from total_len since len2 was consumed
-            pdu.push((total_len & 0xff) as u8);
-        }
-        if total_len > header_len {
-            pdu.resize(total_len, 0);
-            reader
-                .read_exact(&mut pdu[header_len..])
-                .await
-                .map_err(|e| format!("Fast-Path payload read error: {e}"))?;
-        }
-        Ok(pdu)
-    }
-}
 
 /// Read a TPKT frame: 4-byte header [0x03, 0x00, len_hi, len_lo] + payload.
 async fn read_tpkt_frame(stream: &mut TcpStream) -> Result<Vec<u8>, String> {

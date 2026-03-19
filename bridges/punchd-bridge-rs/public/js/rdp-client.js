@@ -446,10 +446,11 @@
     peerConnection.onconnectionstatechange = function () {
       var state = peerConnection.connectionState;
       console.log("[RDP] Connection state:", state);
-      if (state === "failed" || state === "disconnected") {
+      if (state === "failed") {
         cleanup();
         scheduleReconnect();
       }
+      // Note: "disconnected" is transient — ICE often recovers. Don't tear down.
     };
 
     peerConnection.createOffer()
