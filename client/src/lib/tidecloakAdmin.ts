@@ -322,15 +322,12 @@ export async function getClientRoles(): Promise<RoleRepresentation[]> {
   const client = await getClientByClientId(clientId);
   if (!client) return [];
 
+  // The list endpoint already returns id, name, description, clientRole, containerId
+  // No need to re-fetch each role by ID
   const roles = await tcFetch<RoleRepresentation[]>(`/clients/${client.id}/roles`);
-  // Fetch full role details with concurrency limit
-  const fullRoles = await limitedAll(
-    roles.map(r => () => tcFetch<RoleRepresentation>(`/roles-by-id/${r.id}`)),
-    5
-  );
 
-  _rolesCache.entry = { data: fullRoles, expiry: Date.now() + CACHE_TTL };
-  return fullRoles;
+  _rolesCache.entry = { data: roles, expiry: Date.now() + CACHE_TTL };
+  return roles;
 }
 
 export async function getTideRealmAdminRole(): Promise<RoleRepresentation> {
