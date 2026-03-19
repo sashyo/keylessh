@@ -118,16 +118,33 @@ export function createHttpRelay(registry: Registry, useTls = false) {
     req: IncomingMessage,
     res: ServerResponse
   ): Promise<void> {
-    // Find target gateway (session affinity via cookie, then realm-based, then load-balance)
+    // Find target gateway
+    // For /__b/<name>/ paths: route to the gateway that has that backend.
+    // For /realms/, /resources/, /admin/ paths: prefer realm-based routing so that
+    // auth flows reach the gateway hosting that TideCloak realm, even if the browser
+    // has a session cookie pointing to a different gateway.
     const gatewayIdRaw = parseCookie(req.headers.cookie, "gateway_relay");
     const gatewayId = gatewayIdRaw ? decodeURIComponent(gatewayIdRaw) : null;
-    let gateway = gatewayId ? registry.getGateway(gatewayId) : undefined;
+    let gateway: ReturnType<Registry["getGateway"]> | undefined;
+
+    // Backend-based routing: /__b/<name>/ → gateway that has that backend
+    const backendMatch = req.url?.match(/^\/__b\/([^/]+)\//);
+    if (backendMatch) {
+      const backendName = decodeURIComponent(backendMatch[1]);
+      gateway = registry.getGatewayByBackend(backendName);
+      console.log(`[HTTP-Relay] Backend routing: backend=${backendName}, found=${gateway?.id || "none"}, url=${req.url?.substring(0, 80)}`);
+    }
 
     if (!gateway) {
       const realmMatch = req.url?.match(/\/(?:realms|resources|admin)\/([^/]+)\//);
       if (realmMatch) {
         gateway = registry.getGatewayByRealm(realmMatch[1]);
+        console.log(`[HTTP-Relay] Realm routing: realm=${realmMatch[1]}, found=${gateway?.id || "none"}, cookie=${gatewayId || "none"}, url=${req.url?.substring(0, 80)}`);
       }
+    }
+
+    if (!gateway) {
+      gateway = gatewayId ? registry.getGateway(gatewayId) : undefined;
     }
 
     if (!gateway) {

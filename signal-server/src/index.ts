@@ -551,9 +551,17 @@ const requestHandler = async (req: import("http").IncomingMessage, res: import("
   }
 
   // ── TideCloak reverse proxy (/realms/*, /resources/*) ─────────
-  // Proxy auth traffic directly to TideCloak with server-side cookie jar.
-  // This keeps the Tide callback on the signal server's origin so cookies work.
+  // If a registered gateway serves this realm, relay to it instead of
+  // proxying to the signal server's own TideCloak instance.
   if (path.startsWith("/realms/") || path.startsWith("/resources/")) {
+    const realmMatch = path.match(/\/(?:realms|resources)\/([^/]+)\//);
+    if (realmMatch) {
+      const realmGateway = registry.getGatewayByRealm(realmMatch[1]);
+      if (realmGateway) {
+        relayHandler(req, res);
+        return;
+      }
+    }
     const proto = req.headers["x-forwarded-proto"] || (useTls ? "https" : "http");
     const host = req.headers.host || "localhost";
     const publicOrigin = `${proto}://${host}`;
