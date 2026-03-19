@@ -212,7 +212,8 @@ export async function authenticate(
         return;
       }
 
-      const requestUrl = `${req.protocol}://${req.get("host")}${req.originalUrl.split("?")[0]}`;
+      const proto = req.headers["x-forwarded-proto"] || req.protocol;
+      const requestUrl = `${proto}://${req.get("host")}${req.originalUrl.split("?")[0]}`;
       const result = verifyDPoPProof(dpopProof, req.method, requestUrl, cnfJkt);
       if (!result.valid) {
         console.warn("[Auth] DPoP proof verification failed:", result.error);
