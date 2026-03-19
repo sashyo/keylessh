@@ -24,11 +24,12 @@ static ASSET_WASM_BG: &[u8] = include_bytes!("../../public/wasm/ironrdp_web_bg.w
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State};
 use axum::http::header::{self, HeaderMap, HeaderName, HeaderValue};
 use axum::http::{Method, Request, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
-use axum::routing::any;
+use axum::routing::{any, get};
 use axum::Router;
 use dashmap::DashMap;
 use regex::Regex;
@@ -771,8 +772,75 @@ pub fn build_router(state: Arc<ProxyState>) -> Router {
     });
 
     Router::new()
+        .route("/ws/rdcleanpath", get(handle_rdcleanpath_ws))
         .fallback(any(handle_request))
         .with_state(state)
+}
+
+// ── RDCleanPath WebSocket handler ────────────────────────────────
+
+async fn handle_rdcleanpath_ws(
+    State(state): State<Arc<ProxyState>>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    ws.protocols(["rdcleanpath"])
+        .on_upgrade(move |socket| handle_rdcleanpath_socket(socket, state))
+}
+
+async fn handle_rdcleanpath_socket(socket: WebSocket, state: Arc<ProxyState>) {
+    use futures_util::{SinkExt, StreamExt};
+
+    let (mut ws_sink, mut ws_stream) = socket.split();
+    let ws_sink = Arc::new(tokio::sync::Mutex::new(ws_sink));
+
+    let send_binary: crate::rdcleanpath::rdcleanpath_handler::SendBinaryFn = {
+        let sink = ws_sink.clone();
+        Arc::new(move |data: Vec<u8>| {
+            let sink = sink.clone();
+            tokio::spawn(async move {
+                let _ = sink.lock().await.send(Message::Binary(data.into())).await;
+            });
+        })
+    };
+
+    let send_close: crate::rdcleanpath::rdcleanpath_handler::SendCloseFn = {
+        let sink = ws_sink.clone();
+        Arc::new(move |code: u16, reason: String| {
+            let sink = sink.clone();
+            tokio::spawn(async move {
+                let _ = sink
+                    .lock()
+                    .await
+                    .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                        code,
+                        reason: reason.into(),
+                    })))
+                    .await;
+            });
+        })
+    };
+
+    let session = crate::rdcleanpath::rdcleanpath_handler::RDCleanPathSession::new(
+        crate::rdcleanpath::rdcleanpath_handler::RDCleanPathSessionOptions {
+            send_binary,
+            send_close,
+            backends: state.config.backends.clone(),
+            auth: state.auth.clone(),
+            gateway_id: state.gateway_id.clone(),
+            tc_client_id: Some(state.client_id.clone()),
+        },
+    );
+
+    // Forward incoming WebSocket messages to the RDCleanPath session
+    while let Some(Ok(msg)) = ws_stream.next().await {
+        match msg {
+            Message::Binary(data) => {
+                session.handle_message(data.to_vec());
+            }
+            Message::Close(_) => break,
+            _ => {}
+        }
+    }
 }
 
 // ── Main request handler ─────────────────────────────────────────
