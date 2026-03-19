@@ -5,7 +5,6 @@ import { verifyTideCloakToken, TokenPayload } from "./lib/auth/tideJWT";
 import crypto from "crypto";
 import {
   GetUsers,
-  GetUserRoleMappings,
   AddUser,
   UpdateUser,
   DeleteUser,
@@ -24,7 +23,7 @@ import {
   invalidateCache,
 } from "./lib/tidecloakApi";
 import { UserRepresentation, RoleRepresentation, ClientRepresentation } from "./lib/auth/keycloakTypes";
-import { getResource } from "./lib/auth/tidecloakConfig";
+import { getResource, getAuthOverrideUrl, getRealm } from "./lib/auth/tidecloakConfig";
 
 // Extended Request interface with user information
 export interface AuthenticatedRequest extends Request {
@@ -327,23 +326,9 @@ interface CacheEntry<T> { data: T; expiry: number; }
 const usersCache: { entry?: CacheEntry<AdminUser[]> } = {};
 const USERS_CACHE_TTL = 30_000; // 30 seconds
 
-// Concurrency-limited Promise.all
-async function limitedAll<T>(tasks: (() => Promise<T>)[], limit: number): Promise<T[]> {
-  const results: T[] = new Array(tasks.length);
-  let idx = 0;
-  async function worker() {
-    while (idx < tasks.length) {
-      const i = idx++;
-      results[i] = await tasks[i]();
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(limit, tasks.length) }, () => worker()));
-  return results;
-}
-
 // TideCloak Admin API wrapper class
 export class TidecloakAdmin {
-  // Get all users with their roles (cached, concurrency-limited)
+  // Get all users with their roles (role-centric approach: R+3 calls instead of N+1)
   async getUsers(token: string): Promise<AdminUser[]> {
     // Return cached if fresh
     if (usersCache.entry && Date.now() < usersCache.entry.expiry) {
@@ -352,32 +337,77 @@ export class TidecloakAdmin {
 
     const allUsers = await GetUsers(token);
 
-    // Fetch role mappings with concurrency limit of 5
-    const users: AdminUser[] = await limitedAll(
-      allUsers.map((u: UserRepresentation) => async () => {
-        const userRoles = await GetUserRoleMappings(u.id!, token);
-        const userClientRoles = userRoles.clientMappings
-          ? Object.values(userRoles.clientMappings).flatMap(
-              (m) => m.mappings?.map((role) => role.name!) || []
-            )
-          : [];
+    // Build userId → role names map using role-centric fetching
+    const userRolesMap = new Map<string, string[]>();
 
-        const isAdmin = userClientRoles.includes(ADMIN_ROLE);
+    // Get app client roles and their members
+    const appClient = await getClientByClientId(getResource(), token);
+    if (appClient?.id) {
+      const tcUrl = `${getAuthOverrideUrl()}/admin/realms/${getRealm()}`;
+      // Fetch role list for the app client
+      const rolesRes = await fetch(`${tcUrl}/clients/${appClient.id}/roles`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (rolesRes.ok) {
+        const roles: RoleRepresentation[] = await rolesRes.json();
 
-        return {
-          id: u.id ?? "",
-          firstName: u.firstName ?? "",
-          lastName: u.lastName ?? "",
-          email: u.email ?? "",
-          username: u.username,
-          role: userClientRoles,
-          linked: !!u.attributes?.vuid?.[0],
-          enabled: u.enabled !== false,
-          isAdmin,
-        };
-      }),
-      5
-    );
+        // For each role, fetch its users — all in parallel (R is small)
+        await Promise.all(
+          roles.map(async (role) => {
+            try {
+              const usersRes = await fetch(
+                `${tcUrl}/clients/${appClient.id}/roles/${encodeURIComponent(role.name!)}/users`,
+                { headers: { Authorization: `Bearer ${token}` } }
+              );
+              if (usersRes.ok) {
+                const roleUsers: UserRepresentation[] = await usersRes.json();
+                for (const u of roleUsers) {
+                  const existing = userRolesMap.get(u.id!) || [];
+                  existing.push(role.name!);
+                  userRolesMap.set(u.id!, existing);
+                }
+              }
+            } catch { /* skip failed role lookup */ }
+          })
+        );
+      }
+    }
+
+    // Also check admin role members
+    try {
+      const rmClient = await getClientByClientId(REALM_MANAGEMENT_CLIENT, token);
+      if (rmClient?.id) {
+        const tcUrl = `${getAuthOverrideUrl()}/admin/realms/${getRealm()}`;
+        const adminRes = await fetch(
+          `${tcUrl}/clients/${rmClient.id}/roles/${encodeURIComponent(ADMIN_ROLE)}/users`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+        if (adminRes.ok) {
+          const adminUsers: UserRepresentation[] = await adminRes.json();
+          for (const u of adminUsers) {
+            const existing = userRolesMap.get(u.id!) || [];
+            existing.push(ADMIN_ROLE);
+            userRolesMap.set(u.id!, existing);
+          }
+        }
+      }
+    } catch { /* admin role fetch failed */ }
+
+    const users: AdminUser[] = allUsers.map((u: UserRepresentation) => {
+      const userClientRoles = userRolesMap.get(u.id!) || [];
+      const isAdmin = userClientRoles.includes(ADMIN_ROLE);
+      return {
+        id: u.id ?? "",
+        firstName: u.firstName ?? "",
+        lastName: u.lastName ?? "",
+        email: u.email ?? "",
+        username: u.username,
+        role: userClientRoles,
+        linked: !!u.attributes?.vuid?.[0],
+        enabled: u.enabled !== false,
+        isAdmin,
+      };
+    });
 
     usersCache.entry = { data: users, expiry: Date.now() + USERS_CACHE_TTL };
     return users;
