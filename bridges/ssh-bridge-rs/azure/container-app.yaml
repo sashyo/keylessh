@@ -1,7 +1,7 @@
 # Azure Container Apps configuration
 # Deploy with: az containerapp create --yaml container-app.yaml
 
-name: keylessh-tcp-bridge
+name: keylessh-ssh-bridge
 type: Microsoft.App/containerApps
 location: eastus
 properties:
@@ -22,8 +22,8 @@ properties:
 
   template:
     containers:
-      - name: tcp-bridge
-        image: <ACR_NAME>.azurecr.io/keylessh-tcp-bridge:latest
+      - name: ssh-bridge
+        image: <ACR_NAME>.azurecr.io/keylessh-ssh-bridge:latest
         resources:
           cpu: 0.25
           memory: 0.5Gi

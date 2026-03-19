@@ -23,6 +23,7 @@ use tokio::net::TcpStream;
 use tokio::sync::Notify;
 
 mod logstream;
+mod setup;
 mod tray;
 
 // ── Config types ─────────────────────────────────────────────────
@@ -79,20 +80,23 @@ fn resolve_config_path() -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.exists())
 }
 
-fn load_config() -> Result<TidecloakConfig, String> {
-    let config_data = if let Ok(adapter) = env::var("client_adapter") {
+fn load_config() -> Result<(TidecloakConfig, u16), String> {
+    let (config_data, saved_port) = if let Ok(adapter) = env::var("client_adapter") {
         tracing::info!("Loading config from client_adapter env variable");
-        adapter
+        (adapter, None)
     } else if let Ok(b64) = env::var("TIDECLOAK_CONFIG_B64") {
         tracing::info!("Loading config from TIDECLOAK_CONFIG_B64");
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(&b64)
             .map_err(|e| format!("Base64 decode error: {e}"))?;
-        String::from_utf8(bytes).map_err(|e| format!("UTF-8 error: {e}"))?
+        (String::from_utf8(bytes).map_err(|e| format!("UTF-8 error: {e}"))?, None)
+    } else if let Some((json, port)) = setup::load_saved_config() {
+        tracing::info!("Loading config from {}", setup::config_file_path().display());
+        (json, Some(port))
     } else {
-        let path = resolve_config_path().ok_or("No tidecloak.json found in data directory")?;
+        let path = resolve_config_path().ok_or("No tidecloak.json found. Run the setup wizard or provide config.")?;
         tracing::info!("Loading config from {}", path.display());
-        fs::read_to_string(&path).map_err(|e| format!("Read error: {e}"))?
+        (fs::read_to_string(&path).map_err(|e| format!("Read error: {e}"))?, None)
     };
 
     let config: TidecloakConfig =
@@ -102,8 +106,12 @@ fn load_config() -> Result<TidecloakConfig, String> {
         return Err("No JWKS keys found in config".into());
     }
 
+    let port = saved_port.unwrap_or(
+        env::var("PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(8081)
+    );
+
     tracing::info!("JWKS loaded successfully");
-    Ok(config)
+    Ok((config, port))
 }
 
 // ── Base64url helpers ────────────────────────────────────────────
@@ -631,7 +639,7 @@ async fn main() {
         use tracing_subscriber::EnvFilter;
         logstream::init();
         let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            EnvFilter::new("tcp_bridge=info,warn")
+            EnvFilter::new("ssh_bridge=info,warn")
         });
         tracing_subscriber::registry()
             .with(filter)
@@ -640,12 +648,10 @@ async fn main() {
             .init();
     }
 
-    let port: u16 = env::var("PORT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(8081);
+    // First-run setup: if no config, serve web UI
+    setup::run_setup_if_needed().await;
 
-    let config = match load_config() {
+    let (config, port) = match load_config() {
         Ok(c) => c,
         Err(e) => {
             tracing::error!("Failed to load TideCloak config: {e}");
@@ -670,7 +676,7 @@ async fn main() {
     let logs_url = format!("http://localhost:{port}/logs");
     tray::spawn_tray(logs_url);
 
-    tracing::info!("TCP Bridge listening on port {port}");
+    tracing::info!("SSH Bridge listening on port {port}");
     tracing::info!("Health: http://localhost:{port}/health");
     tracing::info!("Logs:   http://localhost:{port}/logs");
 
@@ -745,7 +751,7 @@ static LOGS_HTML: &str = r##"<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>TCP Bridge - Logs</title>
+<title>SSH Bridge - Logs</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
@@ -776,7 +782,7 @@ static LOGS_HTML: &str = r##"<!DOCTYPE html>
 </head>
 <body>
 <div class="header">
-  <h1>TCP Bridge Logs</h1>
+  <h1>SSH Bridge Logs</h1>
   <span id="status" class="status disconnected">disconnected</span>
   <div class="controls">
     <input type="text" id="filter" class="filter" placeholder="Filter logs...">
