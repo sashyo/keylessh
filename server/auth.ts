@@ -221,9 +221,12 @@ export async function authenticate(
         return;
       }
     }
-    // Note: We accept Bearer even for DPoP-bound tokens (cnf.jkt present).
-    // IAMService.secureFetch only adds DPoP for TideCloak URLs, not for
-    // our own server. DPoP binding is still enforced at TideCloak.
+    // Enforce DPoP for DPoP-bound tokens (cnf.jkt present).
+    // If the token is bound but the client sent Bearer, reject it.
+    if (!isDPoP && cnfJkt) {
+      res.status(401).json({ message: "DPoP proof required for DPoP-bound token" });
+      return;
+    }
 
     req.user = extractUserFromPayload(payload);
     req.accessToken = token;
