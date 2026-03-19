@@ -1024,21 +1024,10 @@ async fn handle_ws_open(
     // Extract headers from the ws_open message (e.g., cookie for auth)
     let msg_headers = msg["headers"].as_object();
 
-    // Build a request with headers
-    let mut request = tokio_tungstenite::tungstenite::http::Request::builder()
-        .uri(&ws_url)
-        .header("Host", format!("127.0.0.1:{}", opts.listen_port));
-    if let Some(hdrs) = msg_headers {
-        for (key, val) in hdrs {
-            if let Some(v) = val.as_str() {
-                request = request.header(key.as_str(), v);
-            }
-        }
-    }
-    for p in &protocols {
-        request = request.header("Sec-WebSocket-Protocol", p.as_str());
-    }
-    let request = match request.body(()) {
+    // Build a WebSocket request from URL (adds upgrade/sec-websocket-key headers),
+    // then append custom headers (auth cookies, protocols).
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut request = match ws_url.into_client_request() {
         Ok(r) => r,
         Err(e) => {
             tracing::error!("[WebRTC] WS request build failed: {}", e);
@@ -1054,6 +1043,23 @@ async fn handle_ws_open(
             return;
         }
     };
+    if let Some(hdrs) = msg_headers {
+        for (key, val) in hdrs {
+            if let Some(v) = val.as_str() {
+                if let (Ok(name), Ok(value)) = (
+                    tokio_tungstenite::tungstenite::http::header::HeaderName::from_bytes(key.as_bytes()),
+                    tokio_tungstenite::tungstenite::http::HeaderValue::from_str(v),
+                ) {
+                    request.headers_mut().insert(name, value);
+                }
+            }
+        }
+    }
+    for p in &protocols {
+        if let Ok(v) = tokio_tungstenite::tungstenite::http::HeaderValue::from_str(p) {
+            request.headers_mut().append("Sec-WebSocket-Protocol", v);
+        }
+    }
 
     tracing::info!("[WebRTC] WS tunnel opened: {} (id: {})", ws_path, ws_id);
 
