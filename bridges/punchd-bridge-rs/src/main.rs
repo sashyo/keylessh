@@ -102,15 +102,30 @@ async fn main() {
         turn_secret: Some(config.turn_secret.clone()),
         use_tls: config.https,
         api_secret: config.api_secret.clone(),
-        metadata: serde_json::json!({
-            "displayName": config.display_name,
-            "description": config.description,
-            "backends": config.backends.iter().map(|b| serde_json::json!({
-                "name": b.name,
-                "protocol": b.protocol,
-            })).collect::<Vec<_>>(),
-            "realm": tc_config.realm,
-        }),
+        metadata: {
+            // Only advertise realm if this gateway hosts TideCloak locally.
+            // If tc_internal_url points to a remote STUN relay, advertising the realm
+            // causes the signal server to route /realms/ requests here, creating a loop.
+            let hosts_tc_locally = match &config.tc_internal_url {
+                None => true, // no override → using local auth-server-url
+                Some(url) => {
+                    let u = url.to_lowercase();
+                    u.contains("localhost") || u.contains("127.0.0.1") || u.contains("[::1]")
+                }
+            };
+            let mut meta = serde_json::json!({
+                "displayName": config.display_name,
+                "description": config.description,
+                "backends": config.backends.iter().map(|b| serde_json::json!({
+                    "name": b.name,
+                    "protocol": b.protocol,
+                })).collect::<Vec<_>>(),
+            });
+            if hosts_tc_locally {
+                meta["realm"] = serde_json::json!(tc_config.realm);
+            }
+            meta
+        },
         backends: config.backends.clone(),
         auth: Some(auth.clone()),
         tc_client_id: Some(tc_config.resource.clone()),
