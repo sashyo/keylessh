@@ -126,8 +126,14 @@ mod win32 {
     const HWND_MESSAGE: HWND = -3isize as HWND;
 
     // ── Win32 FFI ────────────────────────────────────────────
+    #[link(name = "kernel32")]
     extern "system" {
         fn GetModuleHandleW(name: *const u16) -> HINSTANCE;
+        fn GetLastError() -> u32;
+    }
+
+    #[link(name = "user32")]
+    extern "system" {
         fn RegisterClassExW(wc: *const WNDCLASSEXW) -> ATOM;
         fn CreateWindowExW(
             ex_style: u32, class: *const u16, title: *const u16,
@@ -139,7 +145,6 @@ mod win32 {
         fn TranslateMessage(msg: *const MSG) -> i32;
         fn DispatchMessageW(msg: *const MSG) -> LRESULT;
         fn PostQuitMessage(code: i32);
-        fn Shell_NotifyIconW(msg: u32, data: *mut NOTIFYICONDATAW) -> i32;
         fn LoadIconW(instance: HINSTANCE, name: *const u16) -> HICON;
         fn CreatePopupMenu() -> HMENU;
         fn AppendMenuW(menu: HMENU, flags: u32, id: usize, text: *const u16) -> i32;
@@ -147,7 +152,11 @@ mod win32 {
         fn DestroyMenu(menu: HMENU) -> i32;
         fn GetCursorPos(point: *mut POINT) -> i32;
         fn SetForegroundWindow(hwnd: HWND) -> i32;
-        fn GetLastError() -> u32;
+    }
+
+    #[link(name = "shell32")]
+    extern "system" {
+        fn Shell_NotifyIconW(msg: u32, data: *mut NOTIFYICONDATAW) -> i32;
     }
 
     // ── Globals (single tray instance) ───────────────────────
