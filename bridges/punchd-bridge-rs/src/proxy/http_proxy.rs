@@ -1716,7 +1716,7 @@ async fn handle_session_token(
             .entry(remote_addr.to_string())
             .or_insert_with(Vec::new);
         entry.retain(|t| now_ms_val - *t < 60_000);
-        if entry.len() >= 6 {
+        if entry.len() >= 30 {
             resp_headers.insert(
                 header::CONTENT_TYPE,
                 HeaderValue::from_static("application/json"),

@@ -509,11 +509,22 @@ async fn handle_http_request(
             Ok(resp) => {
                 let status = resp.status().as_u16();
 
-                // Collect response headers
+                // Collect response headers (accumulate multi-value headers like set-cookie)
                 let mut resp_headers = serde_json::Map::new();
                 for (name, value) in resp.headers().iter() {
                     if let Ok(v) = value.to_str() {
-                        resp_headers.insert(name.as_str().to_string(), json!(v));
+                        let key = name.as_str().to_string();
+                        if let Some(existing) = resp_headers.get_mut(&key) {
+                            // Convert to array if not already, then push
+                            if existing.is_array() {
+                                existing.as_array_mut().unwrap().push(json!(v));
+                            } else {
+                                let prev = existing.clone();
+                                *existing = json!([prev, v]);
+                            }
+                        } else {
+                            resp_headers.insert(key, json!(v));
+                        }
                     }
                 }
 
