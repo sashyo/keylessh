@@ -6,12 +6,12 @@ RESOURCE_GROUP="keylessh-rg"
 LOCATION="eastus"
 ENVIRONMENT_NAME="keylessh-env"
 ACR_NAME="keylesshacr"
-APP_NAME="keylessh-tcp-bridge"
+APP_NAME="keylessh-ssh-bridge"
 
 # Path to tidecloak.json config (required for JWT verification)
 TIDECLOAK_CONFIG="${TIDECLOAK_CONFIG:-../../data/tidecloak.json}"
 
-echo "=== KeyleSSH TCP Bridge (Rust) Deployment ==="
+echo "=== KeyleSSH SSH Bridge (Rust) Deployment ==="
 echo "Resource Group: $RESOURCE_GROUP"
 echo "Location: $LOCATION"
 echo "Container App: $APP_NAME"
@@ -98,7 +98,7 @@ BRIDGE_URL=$(az containerapp show \
 echo ""
 echo "=== Deployment Complete ==="
 echo ""
-echo "TCP Bridge URL: https://$BRIDGE_URL"
+echo "SSH Bridge URL: https://$BRIDGE_URL"
 echo ""
 echo "Add this to your main server environment:"
 echo "  BRIDGE_URL=wss://$BRIDGE_URL"

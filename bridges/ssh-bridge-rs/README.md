@@ -1,11 +1,11 @@
-# KeyleSSH TCP Bridge (Rust)
+# KeyleSSH SSH Bridge (Rust)
 
-Stateless, content-blind, WebSocket-to-TCP bridge microservice for SSH connections. Rust port of the Node.js tcp-bridge — same protocol, same auth, smaller binary, lower memory.
+Stateless, content-blind, WebSocket-to-TCP bridge microservice for SSH connections. Rust port of the Node.js ssh-bridge — same protocol, same auth, smaller binary, lower memory.
 
 ## What it does
 
 ```
-Browser -(SSH-over-WebSocket)-> TCP Bridge -(SSH-over-TCP)-> SSH Server
+Browser -(SSH-over-WebSocket)-> SSH Bridge -(SSH-over-TCP)-> SSH Server
 ```
 
 The bridge:
@@ -67,7 +67,7 @@ If neither env var is set, the bridge looks for `data/tidecloak.json` relative t
 ### Build and run
 
 ```bash
-cd bridges/tcp-bridge-rs
+cd bridges/ssh-bridge-rs
 
 # Development (debug build)
 cargo run
@@ -77,7 +77,7 @@ PORT=8088 cargo run
 
 # Production (optimized, ~5MB binary)
 cargo build --release
-PORT=8088 ./target/release/tcp-bridge-rs
+PORT=8088 ./target/release/ssh-bridge-rs
 ```
 
 ### Using the config from the main server
@@ -198,7 +198,7 @@ WebSocket URL: wss://bridge-host/?token=<jwt>&host=<ssh-host>&port=<ssh-port>&se
 
 ## Comparison with Node.js bridge
 
-| | Node.js (`tcp-bridge`) | Rust (`tcp-bridge-rs`) |
+| | Node.js (`ssh-bridge`) | Rust (`ssh-bridge-rs`) |
 |---|---|---|
 | Docker image | ~150 MB | ~15 MB |
 | Memory usage | ~50 MB idle | ~3 MB idle |

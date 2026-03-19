@@ -252,7 +252,7 @@ mod win32 {
         nid.u_flags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
         nid.u_callback_message = WM_TRAYICON;
         nid.h_icon = icon;
-        nid.sz_tip = wide_into_array::<128>("TCP Bridge");
+        nid.sz_tip = wide_into_array::<128>("SSH Bridge");
 
         eprintln!("[Tray] NOTIFYICONDATAW size: {} bytes", nid.cb_size);
 
@@ -278,7 +278,7 @@ mod win32 {
     pub unsafe fn run_tray(logs_url: &str) {
         LOGS_URL = Some(logs_url.to_string());
 
-        let class_name = to_wide("TcpBridgeTray");
+        let class_name = to_wide("SshBridgeTray");
         let h_instance = GetModuleHandleW(std::ptr::null());
 
         let wc = WNDCLASSEXW {
@@ -302,7 +302,7 @@ mod win32 {
             return;
         }
 
-        let title = to_wide("TCP Bridge");
+        let title = to_wide("SSH Bridge");
         let hwnd = CreateWindowExW(
             0, class_name.as_ptr(), title.as_ptr(),
             0, 0, 0, 0, 0,

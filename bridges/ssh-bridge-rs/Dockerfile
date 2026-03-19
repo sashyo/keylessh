@@ -20,10 +20,10 @@ WORKDIR /app
 
 ENV PORT=8080
 
-COPY --from=builder /app/target/release/tcp-bridge-rs ./tcp-bridge-rs
+COPY --from=builder /app/target/release/ssh-bridge-rs ./ssh-bridge-rs
 
 EXPOSE 8080
 
 USER nonroot
 
-ENTRYPOINT ["./tcp-bridge-rs"]
+ENTRYPOINT ["./ssh-bridge-rs"]

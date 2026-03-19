@@ -1,10 +1,10 @@
 [package]
-name = "tcp-bridge-rs"
+name = "ssh-bridge-rs"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "TCP-Bridge"
+name = "SSH-Bridge"
 path = "src/main.rs"
 
 [dependencies]
@@ -20,6 +20,7 @@ ring = "0.17"
 url = "2"
 dashmap = "6"
 tower = "0.5"
+serde_urlencoded = "0.7"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
