@@ -50,6 +50,8 @@
   var bulkChannel = null;
   var clientId = "rdp-" + crypto.randomUUID().replace(/-/g, "").slice(0, 8);
   var pairedGatewayId = null;
+  var pendingCandidates = [];
+  var remoteDescriptionSet = false;
   var reconnectAttempts = 0;
   var reconnectTimer = null;
   var backendName = null;
@@ -364,15 +366,29 @@
         if (peerConnection && msg.sdp) {
           peerConnection
             .setRemoteDescription(new RTCSessionDescription({ type: msg.sdpType || "answer", sdp: msg.sdp }))
+            .then(function () {
+              remoteDescriptionSet = true;
+              // Flush queued ICE candidates
+              pendingCandidates.forEach(function (c) {
+                peerConnection.addIceCandidate(c)
+                  .catch(function (err) { console.error("[RDP] addIceCandidate (queued) error:", err); });
+              });
+              pendingCandidates = [];
+            })
             .catch(function (err) { console.error("[RDP] setRemoteDescription error:", err); });
         }
         break;
 
       case "candidate":
         if (peerConnection && msg.candidate) {
-          peerConnection
-            .addIceCandidate(new RTCIceCandidate({ candidate: msg.candidate.candidate, sdpMid: msg.candidate.mid }))
-            .catch(function (err) { console.error("[RDP] addIceCandidate error:", err); });
+          var iceCandidate = new RTCIceCandidate({ candidate: msg.candidate.candidate, sdpMid: msg.candidate.mid });
+          if (remoteDescriptionSet) {
+            peerConnection
+              .addIceCandidate(iceCandidate)
+              .catch(function (err) { console.error("[RDP] addIceCandidate error:", err); });
+          } else {
+            pendingCandidates.push(iceCandidate);
+          }
         }
         break;
 
@@ -391,6 +407,8 @@
   function startWebRTC() {
     if (!pairedGatewayId) return;
 
+    pendingCandidates = [];
+    remoteDescriptionSet = false;
     setStatus("connecting", "Establishing P2P connection...");
 
     var iceServers = [];

@@ -247,9 +247,10 @@ impl PeerHandler {
             let cid = cid.clone();
             Box::pin(async move {
                 if let Some(c) = candidate {
-                    let candidate_str = c.to_json().map(|j| j.candidate).unwrap_or_default();
-                    let mid = c.stats_id.clone();
-                    tracing::info!("[WebRTC] Local ICE candidate: {}", candidate_str);
+                    let json_init = c.to_json().ok();
+                    let candidate_str = json_init.as_ref().map(|j| j.candidate.clone()).unwrap_or_default();
+                    let mid = json_init.as_ref().and_then(|j| j.sdp_mid.clone()).unwrap_or_else(|| "0".to_string());
+                    tracing::info!("[WebRTC] Local ICE candidate: {} (mid={})", candidate_str, mid);
                     let _ = send_sig.send(json!({
                         "type": "candidate",
                         "fromId": gateway_id,
