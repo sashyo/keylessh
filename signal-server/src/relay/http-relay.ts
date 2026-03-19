@@ -129,6 +129,7 @@ export function createHttpRelay(registry: Registry, useTls = false) {
     const realmMatch = req.url?.match(/\/(?:realms|resources|admin)\/([^/]+)\//);
     if (realmMatch) {
       gateway = registry.getGatewayByRealm(realmMatch[1]);
+      console.log(`[HTTP-Relay] Realm routing: realm=${realmMatch[1]}, found=${gateway?.id || "none"}, cookie=${gatewayId || "none"}, url=${req.url?.substring(0, 80)}`);
     }
 
     if (!gateway) {
