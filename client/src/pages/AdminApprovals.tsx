@@ -69,6 +69,7 @@ function AccessApprovalsTab() {
   const { data: approvals = [], isLoading, refetch } = useQuery<AccessApproval[]>({
     queryKey: ["/api/admin/access-approvals"],
     queryFn: api.admin.accessApprovals.list,
+    staleTime: 30_000,
   });
   const isFetching = useIsFetching({ queryKey: ["/api/admin/access-approvals"] }) > 0;
 
@@ -384,6 +385,7 @@ function RoleApprovalsTab() {
   const { data: approvals = [], isLoading, refetch } = useQuery<RoleApproval[]>({
     queryKey: ["/api/admin/role-approvals"],
     queryFn: api.admin.roleApprovals.list,
+    staleTime: 30_000,
   });
   const isFetching = useIsFetching({ queryKey: ["/api/admin/role-approvals"] }) > 0;
 
@@ -1219,16 +1221,19 @@ export default function AdminApprovals() {
   const { data: accessApprovals } = useQuery({
     queryKey: ["/api/admin/access-approvals"],
     queryFn: api.admin.accessApprovals.list,
+    staleTime: 30_000,
   });
 
   const { data: roleApprovals } = useQuery({
     queryKey: ["/api/admin/role-approvals"],
     queryFn: api.admin.roleApprovals.list,
+    staleTime: 30_000,
   });
 
   const { data: pendingPolicies } = useQuery({
     queryKey: ["/api/admin/ssh-policies/pending"],
     queryFn: api.admin.sshPolicies.listPending,
+    staleTime: 30_000,
   });
 
   const accessPendingCount = accessApprovals?.length || 0;
