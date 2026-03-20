@@ -253,11 +253,11 @@ describe("API Client", () => {
    * Admin endpoints for user management.
    */
   describe("api.admin.users", () => {
-    // Users are now fetched via TideCloak directly (tc.getUsersWithRoles)
+    // Users are now fetched via TideCloak directly (tc.getUsers)
     it("should list users", async () => {
       const tc = await import("@/lib/tidecloakAdmin");
-      const mockUsers = [{ id: "1", email: "test@example.com", clientRoles: [] }];
-      vi.mocked(tc.getUsersWithRoles).mockResolvedValueOnce(mockUsers as any);
+      const mockUsers = [{ id: "1", email: "test@example.com" }];
+      vi.mocked(tc.getUsers).mockResolvedValueOnce(mockUsers as any);
 
       const result = await api.admin.users.list();
       expect(result).toHaveLength(1);
