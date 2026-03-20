@@ -501,20 +501,24 @@ export default function Dashboard() {
 
   const { data: servers, isLoading: serversLoading, refetch: refetchServers } = useQuery<ServerWithAccess[]>({
     queryKey: ["/api/servers"],
+    staleTime: 30_000,
   });
 
   const { data: sessions, isLoading: sessionsLoading, refetch: refetchSessions } = useQuery<ActiveSession[]>({
     queryKey: ["/api/sessions"],
+    staleTime: 15_000,
   });
 
   const { data: gatewayEndpoints, refetch: refetchGatewayEndpoints } = useQuery<GatewayEndpoint[]>({
     queryKey: ["/api/gateway-endpoints"],
     queryFn: api.gatewayEndpoints.list,
+    staleTime: 30_000,
   });
 
   const { data: sshAccessStatus } = useQuery({
     queryKey: ["/api/ssh/access-status"],
     queryFn: api.ssh.getAccessStatus,
+    staleTime: 60_000,
   });
 
   const isSshBlocked = sshAccessStatus?.blocked === true;
