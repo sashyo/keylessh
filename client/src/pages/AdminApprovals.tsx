@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState } from "react";
 import { useQuery, useMutation, useIsFetching } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -65,39 +65,18 @@ function bytesToBase64(bytes: Uint8Array): string {
 function AccessApprovalsTab() {
   const { toast } = useToast();
   const { vuid, approveTideRequests } = useAuth();
-  const [approvals, setApprovals] = useState<AccessApproval[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
 
-  const fetchAccessApprovals = useCallback(async () => {
-    setIsLoading(true);
-    try {
-      const data = await api.admin.accessApprovals.list();
-      setApprovals(data);
-      // Invalidate query cache so badge count updates
-      queryClient.invalidateQueries({ queryKey: ["/api/admin/access-approvals"] });
-      void queryClient.refetchQueries({ queryKey: ["/api/admin/access-approvals"] });
-    } catch (error) {
-      console.error("Error fetching access approvals:", error);
-      toast({
-        title: "Failed to fetch approvals",
-        description: error instanceof Error ? error.message : "Unknown error",
-        variant: "destructive",
-      });
-    } finally {
-      setIsLoading(false);
-    }
-  }, [toast]);
+  const { data: approvals = [], isLoading, refetch } = useQuery<AccessApproval[]>({
+    queryKey: ["/api/admin/access-approvals"],
+    queryFn: api.admin.accessApprovals.list,
+  });
+  const isFetching = useIsFetching({ queryKey: ["/api/admin/access-approvals"] }) > 0;
 
   const { secondsRemaining, refreshNow } = useAutoRefresh({
     intervalSeconds: 15,
-    refresh: fetchAccessApprovals,
-    isBlocked: isLoading,
+    refresh: () => refetch(),
+    isBlocked: isFetching,
   });
-
-  // Fetch approvals on mount and when vuid changes
-  useEffect(() => {
-    void refreshNow();
-  }, [vuid, refreshNow]);
 
   const handleCommit = async (id: string) => {
     const approval = approvals.find((a) => a.id === id);
@@ -401,37 +380,18 @@ function getPolicyStatusBadge(status: string) {
 function RoleApprovalsTab() {
   const { toast } = useToast();
   const { vuid, approveTideRequests } = useAuth();
-  const [approvals, setApprovals] = useState<RoleApproval[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
 
-  const fetchRoleApprovals = useCallback(async () => {
-    setIsLoading(true);
-    try {
-      const data = await api.admin.roleApprovals.list();
-      setApprovals(data);
-      queryClient.invalidateQueries({ queryKey: ["/api/admin/role-approvals"] });
-      void queryClient.refetchQueries({ queryKey: ["/api/admin/role-approvals"] });
-    } catch (error) {
-      console.error("Error fetching role approvals:", error);
-      toast({
-        title: "Failed to fetch role approvals",
-        description: error instanceof Error ? error.message : "Unknown error",
-        variant: "destructive",
-      });
-    } finally {
-      setIsLoading(false);
-    }
-  }, [toast]);
+  const { data: approvals = [], isLoading, refetch } = useQuery<RoleApproval[]>({
+    queryKey: ["/api/admin/role-approvals"],
+    queryFn: api.admin.roleApprovals.list,
+  });
+  const isFetching = useIsFetching({ queryKey: ["/api/admin/role-approvals"] }) > 0;
 
   const { secondsRemaining, refreshNow } = useAutoRefresh({
     intervalSeconds: 15,
-    refresh: fetchRoleApprovals,
-    isBlocked: isLoading,
+    refresh: () => refetch(),
+    isBlocked: isFetching,
   });
-
-  useEffect(() => {
-    void refreshNow();
-  }, [vuid, refreshNow]);
 
   const handleReview = async (id: string) => {
     const approval = approvals.find((a) => a.id === id);
@@ -1331,17 +1291,23 @@ export default function AdminApprovals() {
           </div>
 
           <CardContent className="p-0">
-            <TabsContent value="access" className="m-0">
-              <AccessApprovalsTab />
-            </TabsContent>
+            {activeTab === "access" && (
+              <TabsContent value="access" className="m-0" forceMount>
+                <AccessApprovalsTab />
+              </TabsContent>
+            )}
 
-            <TabsContent value="roles" className="m-0">
-              <RoleApprovalsTab />
-            </TabsContent>
+            {activeTab === "roles" && (
+              <TabsContent value="roles" className="m-0" forceMount>
+                <RoleApprovalsTab />
+              </TabsContent>
+            )}
 
-            <TabsContent value="policies" className="m-0">
-              <PolicyApprovalsTab />
-            </TabsContent>
+            {activeTab === "policies" && (
+              <TabsContent value="policies" className="m-0" forceMount>
+                <PolicyApprovalsTab />
+              </TabsContent>
+            )}
           </CardContent>
         </Tabs>
       </Card>
