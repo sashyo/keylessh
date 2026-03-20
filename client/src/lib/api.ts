@@ -28,7 +28,9 @@ async function apiRequest<T>(
   endpoint: string,
   options: RequestInit = {}
 ): Promise<T> {
-  const token = localStorage.getItem("access_token");
+  // Use the managed token so secureFetch recognises it and attaches DPoP.
+  // localStorage may hold a stale token after a refresh, causing a mismatch.
+  const token = await IAMService.getToken();
 
   const headers: HeadersInit = {
     "Content-Type": "application/json",
