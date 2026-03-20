@@ -64,20 +64,24 @@ function StatCardSkeleton() {
 export default function AdminDashboard() {
   const { data: servers, isLoading: serversLoading, refetch: refetchServers } = useQuery<ServerType[]>({
     queryKey: ["/api/admin/servers"],
+    staleTime: 30_000,
   });
 
   const { data: serverStatusData, isLoading: serverStatusLoading, refetch: refetchServerStatus } = useQuery<{
     statuses: Record<string, ServerStatus>;
   }>({
     queryKey: ["/api/admin/servers/status"],
+    staleTime: 30_000,
   });
 
   const { data: users, isLoading: usersLoading, refetch: refetchUsers } = useQuery<AdminUser[]>({
     queryKey: ["/api/admin/users"],
+    staleTime: 30_000,
   });
 
   const { data: sessions, isLoading: sessionsLoading, refetch: refetchSessions } = useQuery<ActiveSession[]>({
     queryKey: ["/api/admin/sessions"],
+    staleTime: 15_000,
   });
 
   const { data: accessApprovals } = useQuery({
@@ -95,6 +99,7 @@ export default function AdminDashboard() {
   const { data: licenseInfo } = useQuery<LicenseInfo>({
     queryKey: ["/api/admin/license"],
     queryFn: api.admin.license.get,
+    staleTime: 60_000,
   });
 
   const isFetchingServers = useIsFetching({ queryKey: ["/api/admin/servers"] }) > 0;
