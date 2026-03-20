@@ -169,7 +169,7 @@ export function invalidateRolesCache(): void { _rolesCache.entry = undefined; }
 /** Fire-and-forget prefetch of users+roles right after login so caches are warm */
 export function prefetchAdminData(): void {
   // These run in parallel, populate caches, errors are silently ignored
-  getUsersWithRoles().catch(() => {});
+  getUsers().catch(() => {});
   getClientRoles().catch(() => {});
 }
 

@@ -39,7 +39,7 @@ import { useToast } from "@/hooks/use-toast";
 import { queryClient } from "@/lib/queryClient";
 import { api } from "@/lib/api";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
-import { Users, Pencil, Search, Shield, User as UserIcon, Plus, Trash2, X, Link, Unlink, Copy, Check, AlertCircle, Clock, ChevronLeft, ChevronRight } from "lucide-react";
+import { Users, Pencil, Search, User as UserIcon, Plus, Trash2, X, Link, Unlink, Copy, Check, AlertCircle, Clock, ChevronLeft, ChevronRight } from "lucide-react";
 import type { AdminUser } from "@shared/schema";
 import type { AccessApproval } from "@/lib/api";
 import { UpgradeBanner } from "@/components/UpgradeBanner";
@@ -100,11 +100,13 @@ export default function AdminUsers() {
   const { data: rolesData } = useQuery({
     queryKey: ["/api/admin/roles/all"],
     queryFn: api.admin.roles.listAll,
+    enabled: !!editingUser,
   });
 
   const { data: accessApprovals, refetch: refetchAccessApprovals } = useQuery<AccessApproval[]>({
     queryKey: ["/api/admin/access-approvals"],
     queryFn: api.admin.accessApprovals.list,
+    enabled: !!editingUser,
   });
 
   const allRoles = rolesData?.roles || [];
@@ -421,7 +423,6 @@ export default function AdminUsers() {
               <TableHeader>
                 <TableRow>
                   <TableHead>User</TableHead>
-                  <TableHead className="hidden sm:table-cell">Roles</TableHead>
                   <TableHead className="hidden md:table-cell">Account Status</TableHead>
                   <TableHead className="hidden lg:table-cell">Access</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
@@ -429,75 +430,18 @@ export default function AdminUsers() {
               </TableHeader>
               <TableBody>
                 {paginatedUsers.map((user) => {
-                  const userRoles = Array.isArray(user.role) ? user.role : user.role ? [user.role] : [];
-                  const isAdmin = userRoles.some((r) => r.toLowerCase().includes("admin"));
                   return (
                     <TableRow key={user.id} data-testid={`user-row-${user.id}`}>
                       <TableCell>
                         <div className="flex items-center gap-3">
                           <div className="flex h-9 w-9 items-center justify-center rounded-full bg-primary/10">
-                            {isAdmin ? (
-                              <Shield className="h-4 w-4 text-primary" />
-                            ) : (
-                              <UserIcon className="h-4 w-4 text-primary" />
-                            )}
+                            <UserIcon className="h-4 w-4 text-primary" />
                           </div>
                           <div>
                             <p className="font-medium">{user.firstName} {user.lastName}</p>
                             <p className="text-xs text-muted-foreground">{user.email}</p>
                           </div>
                         </div>
-                      </TableCell>
-                      <TableCell className="hidden sm:table-cell">
-                        {(() => {
-                          const pendingRoles = getPendingRolesForUser(user.username);
-                          // Roles only in pending (not yet in user.role)
-                          const pendingNewRoles = pendingRoles.filter((r) => !userRoles.includes(r));
-                          // All roles to display: active + pending-only (deduplicated)
-                          const allDisplayRoles = [...userRoles, ...pendingNewRoles];
-                          const totalRoles = allDisplayRoles.length;
-                          const displayLimit = 2;
-                          const displayRoles = allDisplayRoles.slice(0, displayLimit);
-                          const remainingCount = totalRoles - displayLimit;
-
-                          return (
-                            <div className="flex flex-wrap gap-1">
-                              {totalRoles > 0 ? (
-                                <>
-                                  {displayRoles.map((role) => {
-                                    // A role is pending if it has an active change request
-                                    const isPending = pendingRoles.includes(role);
-                                    return isPending ? (
-                                      <Badge
-                                        key={role}
-                                        variant="outline"
-                                        className="text-xs text-muted-foreground bg-muted/50"
-                                      >
-                                        <Clock className="h-3 w-3 mr-1" />
-                                        {role}
-                                      </Badge>
-                                    ) : (
-                                      <Badge
-                                        key={role}
-                                        variant="outline"
-                                        className="text-xs bg-green-50 text-green-700 border-green-200 dark:bg-green-950/30 dark:text-green-400 dark:border-green-800"
-                                      >
-                                        {role}
-                                      </Badge>
-                                    );
-                                  })}
-                                  {remainingCount > 0 && (
-                                    <Badge variant="outline" className="text-xs">
-                                      +{remainingCount}
-                                    </Badge>
-                                  )}
-                                </>
-                              ) : (
-                                <span className="text-xs text-muted-foreground">No roles</span>
-                              )}
-                            </div>
-                          );
-                        })()}
                       </TableCell>
                       <TableCell className="hidden md:table-cell">
                         {user.linked ? (
@@ -513,22 +457,18 @@ export default function AdminUsers() {
                         )}
                       </TableCell>
                       <TableCell className="hidden lg:table-cell">
-                        {isAdmin ? (
-                          <span className="text-xs text-muted-foreground">Admin (cannot disable)</span>
-                        ) : (
-                          <div className="flex items-center gap-2">
-                            <Switch
-                              checked={user.enabled}
-                              onCheckedChange={(enabled) =>
-                                setEnabledMutation.mutate({ userId: user.id, enabled })
-                              }
-                              disabled={setEnabledMutation.isPending}
-                            />
-                            <span className={`text-xs ${user.enabled ? "text-green-600 dark:text-green-400" : "text-muted-foreground"}`}>
-                              {user.enabled ? "Enabled" : "Disabled"}
-                            </span>
-                          </div>
-                        )}
+                        <div className="flex items-center gap-2">
+                          <Switch
+                            checked={user.enabled}
+                            onCheckedChange={(enabled) =>
+                              setEnabledMutation.mutate({ userId: user.id, enabled })
+                            }
+                            disabled={setEnabledMutation.isPending}
+                          />
+                          <span className={`text-xs ${user.enabled ? "text-green-600 dark:text-green-400" : "text-muted-foreground"}`}>
+                            {user.enabled ? "Enabled" : "Disabled"}
+                          </span>
+                        </div>
                       </TableCell>
                       <TableCell className="text-right">
                         <Button

@@ -172,18 +172,17 @@ export const api = {
     },
     users: {
       list: async (): Promise<AdminUser[]> => {
-        const ADMIN_ROLE = "tide-realm-admin";
-        const usersWithRoles = await tc.getUsersWithRoles();
-        return usersWithRoles.map((u: any) => ({
+        const users = await tc.getUsers();
+        return users.map((u: any) => ({
           id: u.id ?? "",
           firstName: u.firstName ?? "",
           lastName: u.lastName ?? "",
           email: u.email ?? "",
           username: u.username,
-          role: u.clientRoles,
+          role: [],
           linked: !!(u.attributes as any)?.vuid?.[0],
           enabled: u.enabled !== false,
-          isAdmin: u.clientRoles.includes(ADMIN_ROLE),
+          isAdmin: false,
         } as AdminUser));
       },
       add: async (data: { username: string; firstName: string; lastName: string; email: string }) => {
@@ -195,12 +194,10 @@ export const api = {
         return { message: "User updated" };
       },
       updateRoles: async (data: { id: string; rolesToAdd?: string[]; rolesToRemove?: string[] }) => {
-        for (const role of data.rolesToAdd || []) {
-          await tc.grantUserRole(data.id, role);
-        }
-        for (const role of data.rolesToRemove || []) {
-          await tc.removeUserRole(data.id, role);
-        }
+        await Promise.all([
+          ...(data.rolesToAdd || []).map(role => tc.grantUserRole(data.id, role)),
+          ...(data.rolesToRemove || []).map(role => tc.removeUserRole(data.id, role)),
+        ]);
         return { message: "Roles updated" };
       },
       delete: async (userId: string) => {
