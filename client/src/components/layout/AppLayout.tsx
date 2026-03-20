@@ -119,29 +119,29 @@ export function AppLayout({ children }: AppLayoutProps) {
   });
 
   // Fetch change request counts for nav badge.
-  // Poll every 2 min with 2-min stale window to keep badge fresh without hammering TideCloak.
+  // Poll every 5 min to keep badge fresh without saturating TideCloak (voucher calls block behind these).
   const { data: accessApprovals } = useQuery({
     queryKey: ["/api/admin/access-approvals"],
     queryFn: api.admin.accessApprovals.list,
     enabled: isAdmin,
-    staleTime: 2 * 60_000,
-    refetchInterval: 2 * 60_000,
+    staleTime: 5 * 60_000,
+    refetchInterval: 5 * 60_000,
   });
 
   const { data: roleApprovals } = useQuery({
     queryKey: ["/api/admin/role-approvals"],
     queryFn: api.admin.roleApprovals.list,
     enabled: isAdmin,
-    staleTime: 2 * 60_000,
-    refetchInterval: 2 * 60_000,
+    staleTime: 5 * 60_000,
+    refetchInterval: 5 * 60_000,
   });
 
   const { data: pendingPolicies } = useQuery({
     queryKey: ["/api/admin/ssh-policies/pending"],
     queryFn: api.admin.sshPolicies.listPending,
     enabled: isAdmin,
-    staleTime: 2 * 60_000,
-    refetchInterval: 2 * 60_000,
+    staleTime: 5 * 60_000,
+    refetchInterval: 5 * 60_000,
   });
 
   // Calculate total pending change requests

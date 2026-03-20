@@ -62,7 +62,7 @@ function bytesToBase64(bytes: Uint8Array): string {
 }
 
 // Access Approvals Tab Component - Uses TideCloak API with Tide Enclave
-function AccessApprovalsTab() {
+function AccessApprovalsTab({ isActive }: { isActive: boolean }) {
   const { toast } = useToast();
   const { vuid, approveTideRequests } = useAuth();
 
@@ -74,6 +74,7 @@ function AccessApprovalsTab() {
 
   const { secondsRemaining, refreshNow } = useAutoRefresh({
     intervalSeconds: 60,
+    enabled: isActive,
     refresh: () => refetch(),
     isBlocked: isFetching,
   });
@@ -377,7 +378,7 @@ function getPolicyStatusBadge(status: string) {
 }
 
 // Role Approvals Tab Component - Uses TideCloak API for role change requests
-function RoleApprovalsTab() {
+function RoleApprovalsTab({ isActive }: { isActive: boolean }) {
   const { toast } = useToast();
   const { vuid, approveTideRequests } = useAuth();
 
@@ -389,6 +390,7 @@ function RoleApprovalsTab() {
 
   const { secondsRemaining, refreshNow } = useAutoRefresh({
     intervalSeconds: 60,
+    enabled: isActive,
     refresh: () => refetch(),
     isBlocked: isFetching,
   });
@@ -668,7 +670,7 @@ function RoleApprovalsTab() {
 
 // Policy Approvals Tab Component - SSH Signing Policy Approvals
 // Matches swarm's implementation with table view, multi-select, and Tide enclave
-function PolicyApprovalsTab() {
+function PolicyApprovalsTab({ isActive }: { isActive: boolean }) {
   const { toast } = useToast();
   const { vuid, approveTideRequests, executeTideRequest } = useAuth();
   const [selectedPolicies, setSelectedPolicies] = useState<string[]>([]);
@@ -686,6 +688,7 @@ function PolicyApprovalsTab() {
   const isFetchingPolicies = useIsFetching({ queryKey: ["/api/admin/ssh-policies/pending"] }) > 0;
   const { secondsRemaining, refreshNow } = useAutoRefresh({
     intervalSeconds: 60,
+    enabled: isActive,
     refresh: refetchPolicies,
     isBlocked: isFetchingPolicies || isProcessing,
   });
@@ -1307,15 +1310,15 @@ export default function AdminApprovals() {
 
           <CardContent className="p-0">
             <div className={activeTab === "access" ? "" : "hidden"}>
-              {mountedTabs.has("access") && <AccessApprovalsTab />}
+              {mountedTabs.has("access") && <AccessApprovalsTab isActive={activeTab === "access"} />}
             </div>
 
             <div className={activeTab === "roles" ? "" : "hidden"}>
-              {mountedTabs.has("roles") && <RoleApprovalsTab />}
+              {mountedTabs.has("roles") && <RoleApprovalsTab isActive={activeTab === "roles"} />}
             </div>
 
             <div className={activeTab === "policies" ? "" : "hidden"}>
-              {mountedTabs.has("policies") && <PolicyApprovalsTab />}
+              {mountedTabs.has("policies") && <PolicyApprovalsTab isActive={activeTab === "policies"} />}
             </div>
           </CardContent>
         </Tabs>
