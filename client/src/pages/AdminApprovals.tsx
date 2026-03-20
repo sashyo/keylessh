@@ -73,7 +73,7 @@ function AccessApprovalsTab() {
   });
 
   const { secondsRemaining, refreshNow } = useAutoRefresh({
-    intervalSeconds: 15,
+    intervalSeconds: 60,
     refresh: () => refetch(),
     isBlocked: isFetching,
   });
@@ -388,7 +388,7 @@ function RoleApprovalsTab() {
   });
 
   const { secondsRemaining, refreshNow } = useAutoRefresh({
-    intervalSeconds: 15,
+    intervalSeconds: 60,
     refresh: () => refetch(),
     isBlocked: isFetching,
   });
@@ -680,11 +680,12 @@ function PolicyApprovalsTab() {
   const { data: policiesData, isLoading: policiesLoading, refetch: refetchPolicies } = useQuery({
     queryKey: ["/api/admin/ssh-policies/pending"],
     queryFn: api.admin.sshPolicies.listPending,
+    staleTime: 30_000,
   });
 
   const isFetchingPolicies = useIsFetching({ queryKey: ["/api/admin/ssh-policies/pending"] }) > 0;
   const { secondsRemaining, refreshNow } = useAutoRefresh({
-    intervalSeconds: 15,
+    intervalSeconds: 60,
     refresh: refetchPolicies,
     isBlocked: isFetchingPolicies || isProcessing,
   });
