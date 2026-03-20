@@ -83,11 +83,13 @@ export default function AdminDashboard() {
   const { data: accessApprovals } = useQuery({
     queryKey: ["/api/admin/access-approvals"],
     queryFn: api.admin.accessApprovals.list,
+    staleTime: 60_000,
   });
 
   const { data: pendingPolicies } = useQuery({
     queryKey: ["/api/admin/ssh-policies/pending"],
     queryFn: api.admin.sshPolicies.listPending,
+    staleTime: 60_000,
   });
 
   const { data: licenseInfo } = useQuery<LicenseInfo>({

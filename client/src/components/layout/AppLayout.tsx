@@ -123,21 +123,24 @@ export function AppLayout({ children }: AppLayoutProps) {
     queryKey: ["/api/admin/access-approvals"],
     queryFn: api.admin.accessApprovals.list,
     enabled: isAdmin,
-    refetchInterval: 30000, // Refresh every 30 seconds
+    staleTime: 60_000, // Don't re-fetch on page nav within 60s
+    refetchInterval: 60_000, // Poll every 60s for badge updates
   });
 
   const { data: roleApprovals } = useQuery({
     queryKey: ["/api/admin/role-approvals"],
     queryFn: api.admin.roleApprovals.list,
     enabled: isAdmin,
-    refetchInterval: 30000,
+    staleTime: 60_000,
+    refetchInterval: 60_000,
   });
 
   const { data: pendingPolicies } = useQuery({
     queryKey: ["/api/admin/ssh-policies/pending"],
     queryFn: api.admin.sshPolicies.listPending,
     enabled: isAdmin,
-    refetchInterval: 30000,
+    staleTime: 60_000,
+    refetchInterval: 60_000,
   });
 
   // Calculate total pending change requests

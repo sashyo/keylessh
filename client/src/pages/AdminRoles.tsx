@@ -143,6 +143,7 @@ export default function AdminRoles() {
   const { data: accessApprovalsData } = useQuery({
     queryKey: ["/api/admin/access-approvals"],
     queryFn: api.admin.accessApprovals.list,
+    staleTime: 60_000,
   });
 
   // Calculate required approval threshold: 70% of active admins (min 1)
