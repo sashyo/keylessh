@@ -66,12 +66,11 @@ function AccessApprovalsTab() {
   const { toast } = useToast();
   const { vuid, approveTideRequests } = useAuth();
 
-  const { data: approvals = [], isLoading, refetch } = useQuery<AccessApproval[]>({
+  const { data: approvals = [], isFetching, refetch } = useQuery<AccessApproval[]>({
     queryKey: ["/api/admin/access-approvals"],
     queryFn: api.admin.accessApprovals.list,
     staleTime: 30_000,
   });
-  const isFetching = useIsFetching({ queryKey: ["/api/admin/access-approvals"] }) > 0;
 
   const { secondsRemaining, refreshNow } = useAutoRefresh({
     intervalSeconds: 15,
@@ -226,7 +225,7 @@ function AccessApprovalsTab() {
     <div className="p-4 border-b border-border flex items-center justify-end">
       <RefreshButton
         onClick={() => void refreshNow()}
-        isRefreshing={isLoading}
+        isRefreshing={isFetching}
         secondsRemaining={secondsRemaining}
         data-testid="refresh-approvals"
         title="Refresh now"
@@ -234,7 +233,7 @@ function AccessApprovalsTab() {
     </div>
   );
 
-  if (isLoading && approvals.length === 0) {
+  if (isFetching && approvals.length === 0) {
     return (
       <div>
         {refreshControls}
@@ -382,12 +381,11 @@ function RoleApprovalsTab() {
   const { toast } = useToast();
   const { vuid, approveTideRequests } = useAuth();
 
-  const { data: approvals = [], isLoading, refetch } = useQuery<RoleApproval[]>({
+  const { data: approvals = [], isFetching, refetch } = useQuery<RoleApproval[]>({
     queryKey: ["/api/admin/role-approvals"],
     queryFn: api.admin.roleApprovals.list,
     staleTime: 30_000,
   });
-  const isFetching = useIsFetching({ queryKey: ["/api/admin/role-approvals"] }) > 0;
 
   const { secondsRemaining, refreshNow } = useAutoRefresh({
     intervalSeconds: 15,
@@ -530,7 +528,7 @@ function RoleApprovalsTab() {
     <div className="p-4 border-b border-border flex items-center justify-end">
       <RefreshButton
         onClick={() => void refreshNow()}
-        isRefreshing={isLoading}
+        isRefreshing={isFetching}
         secondsRemaining={secondsRemaining}
         data-testid="refresh-role-approvals"
         title="Refresh now"
@@ -538,7 +536,7 @@ function RoleApprovalsTab() {
     </div>
   );
 
-  if (isLoading && approvals.length === 0) {
+  if (isFetching && approvals.length === 0) {
     return (
       <div>
         {refreshControls}
@@ -1217,6 +1215,18 @@ function PolicyApprovalsTab() {
 // Main AdminApprovals Component
 export default function AdminApprovals() {
   const [activeTab, setActiveTab] = useState<TabType>("access");
+  const [mountedTabs, setMountedTabs] = useState<Set<TabType>>(() => new Set<TabType>(["access"]));
+
+  const handleTabChange = (v: string) => {
+    const tab = v as TabType;
+    setActiveTab(tab);
+    setMountedTabs(prev => {
+      if (prev.has(tab)) return prev;
+      const next = new Set(prev);
+      next.add(tab);
+      return next;
+    });
+  };
 
   const { data: accessApprovals } = useQuery({
     queryKey: ["/api/admin/access-approvals"],
@@ -1256,7 +1266,7 @@ export default function AdminApprovals() {
       </div>
 
       <Card>
-        <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as TabType)}>
+        <Tabs value={activeTab} onValueChange={handleTabChange}>
           <div className="p-4 border-b border-border">
             <TabsList>
               <TabsTrigger value="access" className="flex items-center gap-2">
@@ -1296,23 +1306,17 @@ export default function AdminApprovals() {
           </div>
 
           <CardContent className="p-0">
-            {activeTab === "access" && (
-              <TabsContent value="access" className="m-0" forceMount>
-                <AccessApprovalsTab />
-              </TabsContent>
-            )}
+            <div className={activeTab === "access" ? "" : "hidden"}>
+              {mountedTabs.has("access") && <AccessApprovalsTab />}
+            </div>
 
-            {activeTab === "roles" && (
-              <TabsContent value="roles" className="m-0" forceMount>
-                <RoleApprovalsTab />
-              </TabsContent>
-            )}
+            <div className={activeTab === "roles" ? "" : "hidden"}>
+              {mountedTabs.has("roles") && <RoleApprovalsTab />}
+            </div>
 
-            {activeTab === "policies" && (
-              <TabsContent value="policies" className="m-0" forceMount>
-                <PolicyApprovalsTab />
-              </TabsContent>
-            )}
+            <div className={activeTab === "policies" ? "" : "hidden"}>
+              {mountedTabs.has("policies") && <PolicyApprovalsTab />}
+            </div>
           </CardContent>
         </Tabs>
       </Card>
