@@ -110,6 +110,7 @@ export default function AdminRoles() {
   const { data: rolesData, isLoading: rolesLoading, refetch: refetchRoles } = useQuery({
     queryKey: ["/api/admin/roles"],
     queryFn: api.admin.roles.list,
+    staleTime: 30_000,
   });
   const isFetchingRoles = useIsFetching({ queryKey: ["/api/admin/roles"] }) > 0;
   const { secondsRemaining, refreshNow } = useAutoRefresh({

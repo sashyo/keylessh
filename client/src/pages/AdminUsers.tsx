@@ -79,6 +79,7 @@ export default function AdminUsers() {
   const { data: users, isLoading: usersLoading, refetch: refetchUsers } = useQuery<AdminUser[]>({
     queryKey: ["/api/admin/users"],
     queryFn: api.admin.users.list,
+    staleTime: 30_000,
   });
 
   const { data: userLimit, refetch: refetchUserLimit } = useQuery({
@@ -101,6 +102,7 @@ export default function AdminUsers() {
     queryKey: ["/api/admin/roles/all"],
     queryFn: api.admin.roles.listAll,
     enabled: !!editingUser,
+    staleTime: 60_000,
   });
 
   const { data: accessApprovals, refetch: refetchAccessApprovals } = useQuery<AccessApproval[]>({
