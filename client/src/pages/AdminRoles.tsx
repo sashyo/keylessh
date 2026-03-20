@@ -364,7 +364,7 @@ export default function AdminRoles() {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            Authorization: `Bearer ${localStorage.getItem("access_token")}`,
+            Authorization: `Bearer ${await IAMService.getToken()}`,
           },
           body: JSON.stringify({
             policyRequest: bytesToBase64(initializedRequest.encode()),
@@ -465,7 +465,7 @@ export default function AdminRoles() {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            Authorization: `Bearer ${localStorage.getItem("access_token")}`,
+            Authorization: `Bearer ${await IAMService.getToken()}`,
           },
           body: JSON.stringify({
             policyRequest: bytesToBase64(initializedRequest.encode()),

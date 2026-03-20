@@ -532,7 +532,7 @@ export default function Dashboard() {
   }, [refetchServers, refetchSessions, refetchGatewayEndpoints]);
 
   const terminateSession = useCallback(async (sessionId: string) => {
-    const token = localStorage.getItem("access_token");
+    const token = await IAMService.getToken();
     if (!token) return;
 
     await IAMService.secureFetch(`${window.location.origin}/api/sessions/${sessionId}`, {

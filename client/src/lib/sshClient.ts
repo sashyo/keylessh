@@ -350,6 +350,7 @@ export class BrowserSSHClient {
   private rows: number = 24;
   private sessionId: string | null = null;
   private sessionEnded = false;
+  private managedToken: string | null = null;
   private isCleaningUp = false;
   private recordingStartTime: number | null = null;
   private recordingId: string | null = null;
@@ -389,24 +390,24 @@ export class BrowserSSHClient {
       return;
     }
 
-    const token = localStorage.getItem("access_token");
-    if (!token) return;
-
     const relativeTime = (timestamp - this.recordingStartTime) / 1000;
 
     // Fire and forget - don't await to avoid blocking terminal I/O
-    IAMService.secureFetch(toAbsoluteUrl(`/api/sessions/${this.sessionId}/record`), {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({
-        recordingId: this.recordingId,
-        time: Math.max(0, relativeTime), // Ensure non-negative time
-        eventType,
-        data,
-      }),
+    IAMService.getToken().then((token) => {
+      if (!token) return;
+      return IAMService.secureFetch(toAbsoluteUrl(`/api/sessions/${this.sessionId}/record`), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          recordingId: this.recordingId,
+          time: Math.max(0, relativeTime),
+          eventType,
+          data,
+        }),
+      });
     }).catch(() => {
       // Ignore recording errors - don't break the connection
     });
@@ -439,17 +440,17 @@ export class BrowserSSHClient {
   }): void {
     if (!this.sessionId) return;
 
-    const token = localStorage.getItem("access_token");
-    if (!token) return;
-
     // Fire and forget - don't await to avoid blocking file operations
-    IAMService.secureFetch(toAbsoluteUrl(`/api/sessions/${this.sessionId}/file-op`), {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify(event),
+    IAMService.getToken().then((token) => {
+      if (!token) return;
+      return IAMService.secureFetch(toAbsoluteUrl(`/api/sessions/${this.sessionId}/file-op`), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(event),
+      });
     }).catch(() => {
       // Ignore logging errors - don't break the connection
     });
@@ -605,10 +606,11 @@ export class BrowserSSHClient {
   }
 
   private async createSessionRecord(): Promise<string> {
-    const token = localStorage.getItem("access_token");
+    const token = await IAMService.getToken();
     if (!token) {
       throw new Error("Not authenticated");
     }
+    this.managedToken = token;
 
     const res = await IAMService.secureFetch(toAbsoluteUrl("/api/sessions"), {
       method: "POST",
@@ -669,11 +671,11 @@ export class BrowserSSHClient {
     if (!this.sessionId || this.sessionEnded) return;
     this.sessionEnded = true;
 
-    const token = localStorage.getItem("access_token");
+    const token = this.managedToken;
     if (!token) return;
 
     try {
-      // secureFetch adds DPoP proof; fire-and-forget on page unload
+      // Use managedToken so secureFetch recognises it and attaches DPoP
       IAMService.secureFetch(toAbsoluteUrl(`/api/sessions/${this.sessionId}`), {
         method: "DELETE",
         headers: { Authorization: `Bearer ${token}` },
@@ -688,7 +690,7 @@ export class BrowserSSHClient {
     if (!this.sessionId || this.sessionEnded) return;
     this.sessionEnded = true;
 
-    const token = localStorage.getItem("access_token");
+    const token = this.managedToken || await IAMService.getToken();
     if (!token) return;
 
     try {
@@ -871,7 +873,7 @@ export class BrowserSSHClient {
   private async startRecording(): Promise<void> {
     if (!this.sessionId) return;
 
-    const token = localStorage.getItem("access_token");
+    const token = this.managedToken || await IAMService.getToken();
     if (!token) return;
 
     try {
@@ -910,7 +912,7 @@ export class BrowserSSHClient {
   private async endRecording(): Promise<void> {
     if (!this.sessionId || !this.recordingId) return;
 
-    const token = localStorage.getItem("access_token");
+    const token = this.managedToken || await IAMService.getToken();
     if (!token) return;
 
     try {
