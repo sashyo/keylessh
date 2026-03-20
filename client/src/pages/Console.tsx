@@ -84,12 +84,14 @@ export default function Console() {
   const { data: server, isLoading: serverLoading } = useQuery<ServerWithAccess>(
     {
       queryKey: ["/api/servers", params.serverId],
+      staleTime: 30_000,
     }
   );
 
   const { data: sshAccessStatus } = useQuery({
     queryKey: ["/api/ssh/access-status"],
     queryFn: api.ssh.getAccessStatus,
+    staleTime: 60_000,
   });
 
   const isSshBlocked = sshAccessStatus?.blocked === true;

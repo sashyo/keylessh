@@ -184,14 +184,26 @@ export default function AdminUsers() {
   const setEnabledMutation = useMutation({
     mutationFn: ({ userId, enabled }: { userId: string; enabled: boolean }) =>
       api.admin.users.setEnabled(userId, enabled),
+    onMutate: async ({ userId, enabled }) => {
+      await queryClient.cancelQueries({ queryKey: ["/api/admin/users"] });
+      const previous = queryClient.getQueryData<AdminUser[]>(["/api/admin/users"]);
+      queryClient.setQueryData<AdminUser[]>(["/api/admin/users"], (old) =>
+        old?.map((u) => (u.id === userId ? { ...u, enabled } : u))
+      );
+      return { previous };
+    },
     onSuccess: (_, { enabled }) => {
-      queryClient.invalidateQueries({ queryKey: ["/api/admin/users"] });
       queryClient.invalidateQueries({ queryKey: ["/api/admin/license"] });
-      void queryClient.refetchQueries({ queryKey: ["/api/admin/users"] });
       toast({ title: enabled ? "User enabled" : "User disabled" });
     },
-    onError: (error: Error) => {
+    onError: (error: Error, _, context) => {
+      if (context?.previous) {
+        queryClient.setQueryData(["/api/admin/users"], context.previous);
+      }
       toast({ title: "Failed to update user status", description: error.message, variant: "destructive" });
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/users"] });
     },
   });
 
