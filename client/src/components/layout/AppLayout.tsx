@@ -158,9 +158,18 @@ export function AppLayout({ children }: AppLayoutProps) {
     return adminNavGroups;
   }, [pricingInfo?.stripeConfigured]);
 
-  // Refresh data when navigating between sections (React Query cache uses long-lived freshness by default).
+  // Refresh non-TideCloak data when navigating between sections.
+  // TideCloak queries (access-approvals, role-approvals, ssh-policies/pending) are excluded
+  // because they're slow and saturate the server, blocking voucher calls.
   useEffect(() => {
-    void queryClient.invalidateQueries();
+    void queryClient.invalidateQueries({
+      predicate: (query) => {
+        const key = query.queryKey[0] as string;
+        return key !== "/api/admin/access-approvals"
+          && key !== "/api/admin/role-approvals"
+          && key !== "/api/admin/ssh-policies/pending";
+      },
+    });
   }, [location]);
 
   useEffect(() => {
