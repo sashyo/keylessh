@@ -69,7 +69,7 @@ function AccessApprovalsTab() {
   const { data: approvals = [], isFetching, refetch } = useQuery<AccessApproval[]>({
     queryKey: ["/api/admin/access-approvals"],
     queryFn: api.admin.accessApprovals.list,
-    staleTime: 30_000,
+    staleTime: 60_000,
   });
 
   const { secondsRemaining, refreshNow } = useAutoRefresh({
@@ -384,7 +384,7 @@ function RoleApprovalsTab() {
   const { data: approvals = [], isFetching, refetch } = useQuery<RoleApproval[]>({
     queryKey: ["/api/admin/role-approvals"],
     queryFn: api.admin.roleApprovals.list,
-    staleTime: 30_000,
+    staleTime: 60_000,
   });
 
   const { secondsRemaining, refreshNow } = useAutoRefresh({
@@ -680,7 +680,7 @@ function PolicyApprovalsTab() {
   const { data: policiesData, isLoading: policiesLoading, refetch: refetchPolicies } = useQuery({
     queryKey: ["/api/admin/ssh-policies/pending"],
     queryFn: api.admin.sshPolicies.listPending,
-    staleTime: 30_000,
+    staleTime: 60_000,
   });
 
   const isFetchingPolicies = useIsFetching({ queryKey: ["/api/admin/ssh-policies/pending"] }) > 0;
@@ -1229,22 +1229,21 @@ export default function AdminApprovals() {
     });
   };
 
-  const { data: accessApprovals } = useQuery({
+  // Badge counts: read from cache only (sidebar + tabs populate these) — never trigger own fetches
+  const { data: accessApprovals } = useQuery<AccessApproval[]>({
     queryKey: ["/api/admin/access-approvals"],
     queryFn: api.admin.accessApprovals.list,
-    staleTime: 30_000,
+    staleTime: Infinity,
   });
-
-  const { data: roleApprovals } = useQuery({
+  const { data: roleApprovals } = useQuery<RoleApproval[]>({
     queryKey: ["/api/admin/role-approvals"],
     queryFn: api.admin.roleApprovals.list,
-    staleTime: 30_000,
+    staleTime: Infinity,
   });
-
-  const { data: pendingPolicies } = useQuery({
+  const { data: pendingPolicies } = useQuery<{ policies: PendingSshPolicy[] }>({
     queryKey: ["/api/admin/ssh-policies/pending"],
     queryFn: api.admin.sshPolicies.listPending,
-    staleTime: 30_000,
+    staleTime: Infinity,
   });
 
   const accessPendingCount = accessApprovals?.length || 0;
