@@ -72,7 +72,7 @@
             const challenge = () => new Promise((resolve) => {
                 const handler = (event) => {
                     if (event.origin !== openerOrigin) {
-                        // Something's not right... The message has come from an unknown domain...
+                        // Something's not right... The message has come from an unknown domain... 
                         return;
                     }
                     if(event.data.type === "challenge"){
@@ -145,7 +145,7 @@
                 if (!flow) throw Error("Cannot find supported enclave version: " + enclaveVersion)
                 await flow();
             }
-        })();
+        })();            
     </script>
 </body>
 
