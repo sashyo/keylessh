@@ -92,12 +92,10 @@ static const GUID TIDESSP_AUTH_SCHEME = {
 #define SECBUFFER_STREAM 10
 #endif
 
-/* ── JWK Ed25519 public key — loaded from registry at init ────── */
-/* Registry: HKLM\SYSTEM\CurrentControlSet\Control\Lsa\TideSSP\Config (REG_SZ)
- * Contains the tidecloak.json content. At init we parse jwk.keys[0].x
- * and base64url-decode it to get the 32-byte Ed25519 public key. */
-#define TIDESSP_REG_KEY L"SYSTEM\\CurrentControlSet\\Control\\Lsa\\TideSSP"
-#define TIDESSP_REG_CONFIG L"Config"
+/* ── JWK Ed25519 public key — loaded from file at init ─────────── */
+/* Reads tidecloak.json from System32\tidecloak.json (installed alongside DLLs),
+ * extracts jwk.keys[0].x (base64url), and decodes to 32 bytes. */
+#define TIDESSP_CONFIG_FILENAME L"tidecloak.json"
 
 static UCHAR g_PublicKey[32];
 static BOOLEAN g_PublicKeyLoaded = FALSE;
@@ -613,59 +611,49 @@ static void deriveSessionKeyFromSig(
  *  SSP Package Functions
  * ══════════════════════════════════════════════════════════════════ */
 
-/* ── Load Ed25519 public key from registry ───────────────────── */
-/* Reads tidecloak.json from HKLM\...\Lsa\TideSSP\Config,
- * extracts jwk.keys[0].x (base64url), decodes to 32 bytes. */
+/* ── Load Ed25519 public key from tidecloak.json ─────────────── */
+/* Reads %SystemRoot%\System32\tidecloak.json, extracts jwk.keys[0].x,
+ * base64url-decodes to 32 bytes. */
 static BOOLEAN TideLoadPublicKey(void)
 {
-    HKEY hKey = NULL;
-    DWORD cbData = 0;
-    DWORD type = 0;
+    /* Build path: %SystemRoot%\System32\tidecloak.json */
+    WCHAR path[MAX_PATH];
+    UINT sysLen = GetSystemDirectoryW(path, MAX_PATH);
+    if (sysLen == 0 || sysLen >= MAX_PATH - 20) {
+        tide_log("LoadPublicKey: GetSystemDirectory failed");
+        return FALSE;
+    }
+    wcscat_s(path, MAX_PATH, L"\\");
+    wcscat_s(path, MAX_PATH, TIDESSP_CONFIG_FILENAME);
 
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, TIDESSP_REG_KEY, 0,
-                      KEY_READ, &hKey) != ERROR_SUCCESS) {
-        tide_log("LoadPublicKey: cannot open registry key");
+    /* Read file */
+    HANDLE hFile = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ,
+                               NULL, OPEN_EXISTING, 0, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        tide_log("LoadPublicKey: cannot open %ls (err=%lu)", path, GetLastError());
         return FALSE;
     }
 
-    /* Query size first */
-    if (RegQueryValueExW(hKey, TIDESSP_REG_CONFIG, NULL, &type,
-                         NULL, &cbData) != ERROR_SUCCESS || type != REG_SZ || cbData < 4) {
-        tide_log("LoadPublicKey: cannot read Config value");
-        RegCloseKey(hKey);
+    DWORD fileSize = GetFileSize(hFile, NULL);
+    if (fileSize == 0 || fileSize > 65536) {
+        tide_log("LoadPublicKey: bad file size %lu", fileSize);
+        CloseHandle(hFile);
         return FALSE;
     }
 
-    /* Allocate and read the JSON (stored as UTF-16) */
-    WCHAR *jsonW = (WCHAR *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, cbData + sizeof(WCHAR));
-    if (!jsonW) { RegCloseKey(hKey); return FALSE; }
+    char *json = (char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, fileSize + 1);
+    if (!json) { CloseHandle(hFile); return FALSE; }
 
-    if (RegQueryValueExW(hKey, TIDESSP_REG_CONFIG, NULL, NULL,
-                         (BYTE *)jsonW, &cbData) != ERROR_SUCCESS) {
-        tide_log("LoadPublicKey: failed to read Config");
-        HeapFree(GetProcessHeap(), 0, jsonW);
-        RegCloseKey(hKey);
-        return FALSE;
-    }
-    RegCloseKey(hKey);
+    DWORD bytesRead = 0;
+    ReadFile(hFile, json, fileSize, &bytesRead, NULL);
+    CloseHandle(hFile);
+    json[bytesRead] = '\0';
 
-    /* Convert UTF-16 to ASCII for JSON parsing */
-    int wLen = (int)(cbData / sizeof(WCHAR));
-    char *json = (char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, wLen + 1);
-    if (!json) { HeapFree(GetProcessHeap(), 0, jsonW); return FALSE; }
+    tide_log("LoadPublicKey: read %ls (%lu bytes)", path, bytesRead);
 
-    int jLen = 0;
-    for (int i = 0; i < wLen && jsonW[i] != L'\0'; i++) {
-        json[jLen++] = (char)jsonW[i];
-    }
-    json[jLen] = '\0';
-    HeapFree(GetProcessHeap(), 0, jsonW);
-
-    tide_log("LoadPublicKey: JSON loaded (%d bytes)", jLen);
-
-    /* Extract "x" value from jwk.keys[0] — find "x":"<base64url>" */
+    /* Extract "x" value from jwk.keys[0] */
     char xValue[64];
-    int xLen = json_extract_string(json, jLen, "x", xValue, sizeof(xValue));
+    int xLen = json_extract_string(json, (int)bytesRead, "x", xValue, sizeof(xValue));
     if (xLen <= 0) {
         tide_log("LoadPublicKey: 'x' field not found in JSON");
         HeapFree(GetProcessHeap(), 0, json);

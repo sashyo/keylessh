@@ -20,7 +20,6 @@
 #pragma comment(lib, "netapi32.lib")
 
 #define LSA_KEY L"SYSTEM\\CurrentControlSet\\Control\\Lsa"
-#define TIDESSP_KEY L"SYSTEM\\CurrentControlSet\\Control\\Lsa\\TideSSP"
 #define MSV1_0_KEY L"SYSTEM\\CurrentControlSet\\Control\\Lsa\\MSV1_0"
 #define PACKAGE_NAME L"TideSSP"
 #define SUBAUTH_NAME L"TideSubAuth"
@@ -285,73 +284,79 @@ UINT __stdcall ValidateConfig(MSIHANDLE hInstall)
 }
 
 /*
- * WriteConfig — deferred CA.
+ * CopyConfig — deferred CA.
  * CustomActionData format: "FILE=<path>|JSON=<json content>"
- * Prefers pasted JSON; falls back to reading file.
- * Writes to registry: HKLM\...\Lsa\TideSSP\Config (REG_SZ)
+ * Prefers pasted JSON; falls back to copying from file path.
+ * Creates %SystemRoot%\System32\tidecloak.json.
  */
-UINT __stdcall WriteConfig(MSIHANDLE hInstall)
+UINT __stdcall CopyConfig(MSIHANDLE hInstall)
 {
     WCHAR customData[32768];
     DWORD dataLen = sizeof(customData) / sizeof(WCHAR);
-    HKEY hKey = NULL;
-    DWORD disp = 0;
 
     if (MsiGetPropertyW(hInstall, L"CustomActionData", customData, &dataLen) != ERROR_SUCCESS
         || dataLen == 0)
         return ERROR_INSTALL_FAILURE;
 
-    WCHAR jsonBuf[32768];
-    int wLen = 0;
+    /* Build destination path: System32\tidecloak.json */
+    WCHAR destPath[MAX_PATH];
+    UINT sysLen = GetSystemDirectoryW(destPath, MAX_PATH);
+    if (sysLen == 0 || sysLen >= MAX_PATH - 20) return ERROR_INSTALL_FAILURE;
+    wcscat_s(destPath, MAX_PATH, L"\\tidecloak.json");
 
-    /* Try pasted JSON: find "|JSON=" marker */
+    /* Try pasted JSON first */
     WCHAR *jsonMarker = wcsstr(customData, L"|JSON=");
     if (jsonMarker) {
-        WCHAR *jsonStart = jsonMarker + 6; /* skip "|JSON=" */
+        WCHAR *jsonStart = jsonMarker + 6;
         DWORD jsonChars = (DWORD)wcslen(jsonStart);
-        if (jsonChars > 0 && jsonChars < sizeof(jsonBuf)/sizeof(WCHAR)) {
-            wcsncpy_s(jsonBuf, sizeof(jsonBuf)/sizeof(WCHAR), jsonStart, jsonChars);
-            jsonBuf[jsonChars] = L'\0';
-            wLen = (int)jsonChars;
-        }
-    }
-
-    /* Fall back to file: extract path between "FILE=" and "|JSON=" */
-    if (wLen == 0) {
-        WCHAR *fileStart = wcsstr(customData, L"FILE=");
-        if (fileStart) {
-            fileStart += 5; /* skip "FILE=" */
-            WCHAR filePath[MAX_PATH];
-            WCHAR *pipePos = wcschr(fileStart, L'|');
-            DWORD pathChars = pipePos ? (DWORD)(pipePos - fileStart) : (DWORD)wcslen(fileStart);
-            if (pathChars > 0 && pathChars < MAX_PATH) {
-                wcsncpy_s(filePath, MAX_PATH, fileStart, pathChars);
-                filePath[pathChars] = L'\0';
-                wLen = ReadFileToWide(filePath, jsonBuf, sizeof(jsonBuf) / sizeof(WCHAR));
+        if (jsonChars > 10) {
+            /* Convert UTF-16 to UTF-8 and write */
+            int utf8Len = WideCharToMultiByte(CP_UTF8, 0, jsonStart, (int)jsonChars, NULL, 0, NULL, NULL);
+            if (utf8Len > 0) {
+                char *utf8 = (char *)HeapAlloc(GetProcessHeap(), 0, utf8Len);
+                if (utf8) {
+                    WideCharToMultiByte(CP_UTF8, 0, jsonStart, (int)jsonChars, utf8, utf8Len, NULL, NULL);
+                    HANDLE hFile = CreateFileW(destPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+                    if (hFile != INVALID_HANDLE_VALUE) {
+                        DWORD written = 0;
+                        WriteFile(hFile, utf8, (DWORD)utf8Len, &written, NULL);
+                        CloseHandle(hFile);
+                        HeapFree(GetProcessHeap(), 0, utf8);
+                        return ERROR_SUCCESS;
+                    }
+                    HeapFree(GetProcessHeap(), 0, utf8);
+                }
             }
         }
     }
 
-    if (wLen == 0)
-        return ERROR_INSTALL_FAILURE;
+    /* Fall back to copying from file path */
+    WCHAR *fileStart = wcsstr(customData, L"FILE=");
+    if (fileStart) {
+        fileStart += 5;
+        WCHAR srcPath[MAX_PATH];
+        WCHAR *pipePos = wcschr(fileStart, L'|');
+        DWORD pathChars = pipePos ? (DWORD)(pipePos - fileStart) : (DWORD)wcslen(fileStart);
+        if (pathChars > 0 && pathChars < MAX_PATH) {
+            wcsncpy_s(srcPath, MAX_PATH, fileStart, pathChars);
+            srcPath[pathChars] = L'\0';
+            if (CopyFileW(srcPath, destPath, FALSE))
+                return ERROR_SUCCESS;
+        }
+    }
 
-    /* Create registry key and write config */
-    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, TIDESSP_KEY, 0, NULL,
-                        REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL,
-                        &hKey, &disp) != ERROR_SUCCESS)
-        return ERROR_INSTALL_FAILURE;
-
-    DWORD cbData = (DWORD)((wLen + 1) * sizeof(WCHAR));
-    LONG result = RegSetValueExW(hKey, L"Config", 0, REG_SZ, (BYTE *)jsonBuf, cbData);
-    RegCloseKey(hKey);
-
-    return (result == ERROR_SUCCESS) ? ERROR_SUCCESS : ERROR_INSTALL_FAILURE;
+    return ERROR_INSTALL_FAILURE;
 }
 
-/* RemoveConfig — delete the TideSSP registry key on uninstall */
+/* RemoveConfig — delete tidecloak.json from System32 on uninstall */
 UINT __stdcall RemoveConfig(MSIHANDLE hInstall)
 {
     (void)hInstall;
-    RegDeleteKeyW(HKEY_LOCAL_MACHINE, TIDESSP_KEY);
+    WCHAR path[MAX_PATH];
+    UINT sysLen = GetSystemDirectoryW(path, MAX_PATH);
+    if (sysLen > 0 && sysLen < MAX_PATH - 20) {
+        wcscat_s(path, MAX_PATH, L"\\tidecloak.json");
+        DeleteFileW(path);
+    }
     return ERROR_SUCCESS;
 }

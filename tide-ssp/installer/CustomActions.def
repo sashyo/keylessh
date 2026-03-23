@@ -6,5 +6,5 @@ EXPORTS
     UnregisterSubAuth
     ClearMnsFlags
     ValidateConfig
-    WriteConfig
+    CopyConfig
     RemoveConfig

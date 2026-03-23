@@ -33,7 +33,6 @@ $packageName = "TideSSP"
 $system32 = "$env:SystemRoot\System32"
 $regPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa"
 $msv1_0Path = "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\MSV1_0"
-$tideSspRegPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\TideSSP"
 
 if ($Uninstall) {
     Write-Host "Uninstalling TideSSP + TideSubAuth..." -ForegroundColor Yellow
@@ -48,10 +47,11 @@ if ($Uninstall) {
         Remove-ItemProperty $msv1_0Path -Name "Auth0" -ErrorAction SilentlyContinue
     }
 
-    # Remove TideSSP config from registry
-    if (Test-Path $tideSspRegPath) {
-        Remove-Item $tideSspRegPath -Recurse -Force -ErrorAction SilentlyContinue
-        Write-Host "Removed TideSSP registry config"
+    # Remove tidecloak.json from System32
+    $configDest = Join-Path $system32 "tidecloak.json"
+    if (Test-Path $configDest) {
+        Remove-Item $configDest -Force
+        Write-Host "Removed $configDest"
     }
 
     # Clear UF_MNS_LOGON_ACCOUNT from all local users (in case it was left set)
@@ -103,15 +103,12 @@ if (-not $ConfigFile -or -not (Test-Path $ConfigFile)) {
     return
 }
 
-$configJson = Get-Content $ConfigFile -Raw
 Write-Host "Using TideCloak config: $ConfigFile"
 
-# Write config to registry
-if (-not (Test-Path $tideSspRegPath)) {
-    New-Item -Path $tideSspRegPath -Force | Out-Null
-}
-Set-ItemProperty $tideSspRegPath -Name "Config" -Value $configJson -Type String
-Write-Host "Wrote TideCloak config to registry ($($configJson.Length) chars)"
+# Copy tidecloak.json to System32
+$configDest = Join-Path $system32 "tidecloak.json"
+Copy-Item $ConfigFile $configDest -Force
+Write-Host "Copied TideCloak config to $configDest"
 
 # Determine script directory
 $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Get-Location }
