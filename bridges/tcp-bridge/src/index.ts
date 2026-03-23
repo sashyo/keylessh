@@ -93,9 +93,7 @@ async function verifyToken(token: string): Promise<JWTPayload | null> {
   if (!JWKS || !tcConfig) return null;
 
   try {
-    const issuer = tcConfig["auth-server-url"].endsWith("/")
-      ? `${tcConfig["auth-server-url"]}realms/${tcConfig.realm}`
-      : `${tcConfig["auth-server-url"]}/realms/${tcConfig.realm}`;
+    const issuer = `${tcConfig["auth-server-url"].replace(/\/+$/, "")}/realms/${tcConfig.realm}`;
 
     const { payload } = await jwtVerify(token, JWKS, { issuer });
 

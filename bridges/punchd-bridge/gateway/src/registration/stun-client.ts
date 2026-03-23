@@ -30,7 +30,7 @@ export interface StunRegistrationOptions {
   /** Shared secret for STUN server API authentication */
   apiSecret?: string;
   /** Metadata for portal display and realm-based routing */
-  metadata?: { displayName?: string; description?: string; backends?: { name: string; protocol?: string }[]; realm?: string };
+  metadata?: { displayName?: string; description?: string; backends?: { name: string; protocol?: string; auth?: string }[]; realm?: string };
   /** Backend configurations (needed by peer handler for TCP tunnels) */
   backends?: BackendEntry[];
   /** JWT verification function (for RDCleanPath auth) */
