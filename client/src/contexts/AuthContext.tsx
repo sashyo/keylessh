@@ -1,6 +1,7 @@
 import { createContext, useContext, useState, useEffect, useCallback, useRef, type ReactNode } from "react";
 import { TideCloakContextProvider, useTideCloak } from "@tidecloak/react";
 import { IAMService } from "@tidecloak/js";
+import { setDpopEnabled } from "../lib/appFetch";
 import type { OIDCUser, UserRole, AuthState } from "@shared/schema";
 import { prefetchAdminData } from "../lib/tidecloakAdmin";
 
@@ -418,6 +419,8 @@ function AuthProviderWithTimeout({ children, authConfig }: { children: ReactNode
     redirectUri: `${window.location.origin}/auth/redirect`,
     //useDPoP: { mode: 'strict' as const, alg: 'EdDSA' as const },
   };
+
+  setDpopEnabled(!!(tidecloakConfig as Record<string, any>).useDPoP);
 
   return (
     <TideCloakContextProvider config={tidecloakConfig}>

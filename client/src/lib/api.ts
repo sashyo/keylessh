@@ -15,6 +15,7 @@ import type {
 } from "@shared/schema";
 
 import { IAMService } from "@tidecloak/js";
+import { appFetch } from "./appFetch";
 import * as tc from "./tidecloakAdmin";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
@@ -38,7 +39,7 @@ async function apiRequest<T>(
     ...options.headers,
   };
 
-  const response = await IAMService.secureFetch(toAbsoluteUrl(`${API_BASE}${endpoint}`), {
+  const response = await appFetch(toAbsoluteUrl(`${API_BASE}${endpoint}`), {
     ...options,
     headers,
   });

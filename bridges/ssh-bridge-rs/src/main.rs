@@ -260,11 +260,7 @@ fn verify_sig_with_jwk_value(sign_input: &str, sig: &[u8], jwk: &serde_json::Val
 fn verify_token(token: &str, config: &TidecloakConfig) -> Option<JwtPayload> {
     let (header, payload) = parse_jwt_parts(token).ok()?;
 
-    let expected_issuer = if config.auth_server_url.ends_with('/') {
-        format!("{}realms/{}", config.auth_server_url, config.realm)
-    } else {
-        format!("{}/realms/{}", config.auth_server_url, config.realm)
-    };
+    let expected_issuer = format!("{}/realms/{}", config.auth_server_url.trim_end_matches('/'), config.realm);
     if payload.iss.as_deref() != Some(&expected_issuer) {
         tracing::warn!("Issuer mismatch: expected {expected_issuer}, got {:?}", payload.iss);
         return None;

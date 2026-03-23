@@ -63,7 +63,7 @@ UINT __stdcall RegisterSecurityPackage(MSIHANDLE hInstall)
 
     /* Read current SecurityPackages */
     DWORD type = 0;
-    RegQueryValueExW(hKey, L"SecurityPackages", NULL, &type, NULL, &cbData);
+    RegQueryValueExW(hKey, L"Security Packages", NULL, &type, NULL, &cbData);
     if (cbData == 0)
         cbData = 2; /* empty multi-sz: just double-null */
 
@@ -72,7 +72,7 @@ UINT __stdcall RegisterSecurityPackage(MSIHANDLE hInstall)
     msz = (WCHAR *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, cbData + extraBytes);
     if (!msz) { ret = ERROR_INSTALL_FAILURE; goto done; }
 
-    RegQueryValueExW(hKey, L"SecurityPackages", NULL, NULL, (BYTE *)msz, &cbData);
+    RegQueryValueExW(hKey, L"Security Packages", NULL, NULL, (BYTE *)msz, &cbData);
 
     if (!MultiSzContains(msz, PACKAGE_NAME)) {
         /* Append: find the double-null terminator and insert before it */
@@ -82,7 +82,7 @@ UINT __stdcall RegisterSecurityPackage(MSIHANDLE hInstall)
         /* end now points to the final '\0' of the double-null */
         StringCchCopyW(end, wcslen(PACKAGE_NAME) + 1, PACKAGE_NAME);
         DWORD newSize = MultiSzSize(msz);
-        RegSetValueExW(hKey, L"SecurityPackages", 0, REG_MULTI_SZ,
+        RegSetValueExW(hKey, L"Security Packages", 0, REG_MULTI_SZ,
                        (BYTE *)msz, newSize);
     }
 
@@ -135,14 +135,14 @@ UINT __stdcall UnregisterSecurityPackage(MSIHANDLE hInstall)
         return ERROR_SUCCESS; /* nothing to undo */
 
     DWORD type = 0;
-    RegQueryValueExW(hKey, L"SecurityPackages", NULL, &type, NULL, &cbData);
+    RegQueryValueExW(hKey, L"Security Packages", NULL, &type, NULL, &cbData);
     if (cbData == 0) goto done;
 
     msz = (WCHAR *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, cbData);
     out = (WCHAR *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, cbData);
     if (!msz || !out) goto done;
 
-    RegQueryValueExW(hKey, L"SecurityPackages", NULL, NULL, (BYTE *)msz, &cbData);
+    RegQueryValueExW(hKey, L"Security Packages", NULL, NULL, (BYTE *)msz, &cbData);
 
     /* Rebuild without TideSSP */
     WCHAR *src = msz;
@@ -158,7 +158,7 @@ UINT __stdcall UnregisterSecurityPackage(MSIHANDLE hInstall)
     *dst = L'\0'; /* double-null terminate */
 
     DWORD newSize = MultiSzSize(out);
-    RegSetValueExW(hKey, L"SecurityPackages", 0, REG_MULTI_SZ,
+    RegSetValueExW(hKey, L"Security Packages", 0, REG_MULTI_SZ,
                    (BYTE *)out, newSize);
 
 done:

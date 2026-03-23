@@ -116,10 +116,16 @@ async fn main() {
             let mut meta = serde_json::json!({
                 "displayName": config.display_name,
                 "description": config.description,
-                "backends": config.backends.iter().map(|b| serde_json::json!({
-                    "name": b.name,
-                    "protocol": b.protocol,
-                })).collect::<Vec<_>>(),
+                "backends": config.backends.iter().map(|b| {
+                    let mut entry = serde_json::json!({
+                        "name": b.name,
+                        "protocol": b.protocol,
+                    });
+                    if b.auth == crate::config::BackendAuth::EdDSA {
+                        entry["auth"] = serde_json::json!("eddsa");
+                    }
+                    entry
+                }).collect::<Vec<_>>(),
             });
             if hosts_tc_locally {
                 meta["realm"] = serde_json::json!(tc_config.realm);
