@@ -6,10 +6,11 @@ import * as stripeLib from "./lib/stripe";
 import { log, logForseti, logError } from "./logger";
 import type { ServerWithAccess, ActiveSession, ServerStatus, Server as ServerType } from "@shared/schema";
 import { createRequire } from "module";
-import { getHomeOrkUrl, GetConfig } from "./lib/auth/tidecloakConfig";
+import { getHomeOrkUrl, GetConfig, getAuthServerUrl, getRealm, getResource } from "./lib/auth/tidecloakConfig";
 import { createConnection } from "net";
 import { createHash } from "crypto";
 import { terminateSession as terminateBridgeSession } from "./wsBridge";
+import path from "path";
 
 // Use createRequire for heimdall-tide (CJS module with broken ESM exports)
 // In CJS bundle __filename is available; in ESM dev mode use import.meta.url
@@ -137,6 +138,40 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
+
+  // ============================================
+  // DPoP Resource Server — serve tide_dpop_auth.html (unauthenticated)
+  // Validates that the hex-encoded issuer and client match tidecloak.json
+  // ============================================
+  app.get("/tide_dpop/iss/:issuerHex/aud/:clientHex/tide_dpop_auth.html", (req, res) => {
+    const { issuerHex, clientHex } = req.params;
+
+    // Decode hex params back to strings
+    const hexToStr = (hex: string): string | null => {
+      if (!hex || hex.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(hex)) return null;
+      return Buffer.from(hex, "hex").toString("utf-8");
+    };
+
+    const decodedIssuer = hexToStr(issuerHex);
+    const decodedClient = hexToStr(clientHex);
+    if (!decodedIssuer || !decodedClient) {
+      res.status(400).json({ message: "Invalid hex encoding in URL" });
+      return;
+    }
+
+    // Verify against tidecloak.json config
+    const expectedIssuer = `${getAuthServerUrl().replace(/\/+$/, "")}/realms/${getRealm()}`;
+    const expectedClient = getResource();
+
+    if (decodedIssuer !== expectedIssuer || decodedClient !== expectedClient) {
+      res.status(403).json({ message: "Issuer or client mismatch" });
+      return;
+    }
+
+    res.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'unsafe-inline'");
+    res.setHeader("Allow-CSP-From", "*");
+    res.sendFile(path.resolve(process.cwd(), "public", "tide_dpop_auth.html"));
+  });
 
   // ============================================
   // Stripe Webhook (unauthenticated, must come before auth middleware)
