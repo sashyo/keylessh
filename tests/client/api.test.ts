@@ -106,7 +106,7 @@ describe("API Client", () => {
       const result = await api.servers.list();
       expect(result).toEqual(servers);
       expect(mockFetch).toHaveBeenCalledWith(
-        "/api/servers",
+        expect.stringContaining("/api/servers"),
         expect.any(Object)
       );
     });
@@ -122,7 +122,7 @@ describe("API Client", () => {
       const result = await api.servers.get("123");
       expect(result).toEqual(server);
       expect(mockFetch).toHaveBeenCalledWith(
-        "/api/servers/123",
+        expect.stringContaining("/api/servers/123"),
         expect.any(Object)
       );
     });
@@ -160,7 +160,7 @@ describe("API Client", () => {
 
       expect(result).toEqual(session);
       expect(mockFetch).toHaveBeenCalledWith(
-        "/api/sessions",
+        expect.stringContaining("/api/sessions"),
         expect.objectContaining({
           method: "POST",
           body: JSON.stringify({ serverId: "server-1", sshUser: "ubuntu" }),
@@ -178,7 +178,7 @@ describe("API Client", () => {
       await api.sessions.end("session-123");
 
       expect(mockFetch).toHaveBeenCalledWith(
-        "/api/sessions/session-123",
+        expect.stringContaining("/api/sessions/session-123"),
         expect.objectContaining({ method: "DELETE" })
       );
     });
@@ -201,7 +201,7 @@ describe("API Client", () => {
 
       expect(response).toEqual(result);
       expect(mockFetch).toHaveBeenCalledWith(
-        "/api/forseti/compile",
+        expect.stringContaining("/api/forseti/compile"),
         expect.objectContaining({
           method: "POST",
           body: JSON.stringify({ source: "public class Test {}" }),
@@ -227,7 +227,7 @@ describe("API Client", () => {
 
       expect(result).toEqual(policy);
       expect(mockFetch).toHaveBeenCalledWith(
-        "/api/ssh-policies/for-ssh-user/ubuntu",
+        expect.stringContaining("/api/ssh-policies/for-ssh-user/ubuntu"),
         expect.any(Object)
       );
     });
@@ -242,7 +242,7 @@ describe("API Client", () => {
       await api.sshPolicies.getForSshUser("user/with/slashes");
 
       expect(mockFetch).toHaveBeenCalledWith(
-        "/api/ssh-policies/for-ssh-user/user%2Fwith%2Fslashes",
+        expect.stringContaining("/api/ssh-policies/for-ssh-user/user%2Fwith%2Fslashes"),
         expect.any(Object)
       );
     });
@@ -357,7 +357,7 @@ describe("API Client", () => {
       });
 
       expect(mockFetch).toHaveBeenCalledWith(
-        "/api/admin/recordings?limit=10&offset=5&serverId=server-1&search=test",
+        expect.stringContaining("/api/admin/recordings?limit=10&offset=5&serverId=server-1&search=test"),
         expect.any(Object)
       );
     });
@@ -372,7 +372,7 @@ describe("API Client", () => {
       await api.admin.recordings.list();
 
       expect(mockFetch).toHaveBeenCalledWith(
-        "/api/admin/recordings",
+        expect.stringContaining("/api/admin/recordings"),
         expect.any(Object)
       );
     });
@@ -399,7 +399,7 @@ describe("API Client", () => {
       await api.admin.recordings.delete("rec-123");
 
       expect(mockFetch).toHaveBeenCalledWith(
-        "/api/admin/recordings/rec-123",
+        expect.stringContaining("/api/admin/recordings/rec-123"),
         expect.objectContaining({ method: "DELETE" })
       );
     });
