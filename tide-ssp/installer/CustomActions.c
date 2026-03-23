@@ -98,6 +98,7 @@ UINT __stdcall RegisterSubAuth(MSIHANDLE hInstall)
     HKEY hKey = NULL;
     DWORD disp = 0;
 
+    /* Register TideSubAuth as MSV1_0 SubAuth package */
     if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, MSV1_0_KEY, 0, NULL,
                         REG_OPTION_NON_VOLATILE, KEY_WRITE | KEY_WOW64_64KEY, NULL,
                         &hKey, &disp) != ERROR_SUCCESS)
@@ -106,6 +107,16 @@ UINT __stdcall RegisterSubAuth(MSIHANDLE hInstall)
     RegSetValueExW(hKey, L"Auth0", 0, REG_SZ,
                    (BYTE *)SUBAUTH_NAME, (DWORD)((wcslen(SUBAUTH_NAME) + 1) * sizeof(WCHAR)));
     RegCloseKey(hKey);
+
+    /* Enable Restricted Admin mode (required for passwordless RDP via TideSSP) */
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, LSA_KEY, 0,
+                      KEY_WRITE | KEY_WOW64_64KEY, &hKey) == ERROR_SUCCESS) {
+        DWORD val = 0;
+        RegSetValueExW(hKey, L"DisableRestrictedAdmin", 0, REG_DWORD,
+                       (BYTE *)&val, sizeof(val));
+        RegCloseKey(hKey);
+    }
+
     return ERROR_SUCCESS;
 }
 

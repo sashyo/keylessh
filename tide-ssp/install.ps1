@@ -155,6 +155,10 @@ if (-not (Test-Path $msv1_0Path)) {
 Set-ItemProperty $msv1_0Path -Name "Auth0" -Value "TideSubAuth" -Type String
 Write-Host "Registered TideSubAuth as MSV1_0\Auth0"
 
+# Enable Restricted Admin mode (required for passwordless RDP via TideSSP)
+Set-ItemProperty $regPath -Name "DisableRestrictedAdmin" -Value 0 -Type DWord
+Write-Host "Enabled Restricted Admin mode (DisableRestrictedAdmin=0)"
+
 Write-Host ""
 Write-Host "TideSSP + TideSubAuth installed. Reboot to activate." -ForegroundColor Green
 Write-Host "UF_MNS_LOGON_ACCOUNT is toggled dynamically by TideSSP/SubAuth - no manual setup needed."
