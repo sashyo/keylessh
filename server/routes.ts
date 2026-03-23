@@ -180,7 +180,6 @@ export async function registerRoutes(
       ? path.resolve(_currentDir, "public", "tide_dpop_auth.html")
       : path.resolve(_currentDir, "..", "client", "public", "tide_dpop_auth.html");
     res.sendFile(filePath);
-   
   });
     
   // Health Check (unauthenticated, for load balancers and monitoring)
