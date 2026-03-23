@@ -221,42 +221,63 @@ static int ReadFileToWide(const WCHAR *filePath, WCHAR *outBuf, int outCapacity)
     return wLen;
 }
 
+/* Helper: validate JSON content (wide string) contains required fields */
+static BOOL ValidateJsonContent(const WCHAR *json)
+{
+    return wcsstr(json, L"\"jwk\"") != NULL && wcsstr(json, L"\"x\"") != NULL;
+}
+
 /*
  * ValidateConfig — immediate CA, runs during UI sequence.
- * Checks that TIDE_CONFIG_FILE points to a readable file containing "jwk".
+ * Checks TIDE_CONFIG_JSON (pasted) or TIDE_CONFIG_FILE (file path).
  * Shows a message box on failure.
  */
 UINT __stdcall ValidateConfig(MSIHANDLE hInstall)
 {
+    /* Check pasted JSON first */
+    WCHAR jsonBuf[32768];
+    DWORD jsonLen = sizeof(jsonBuf) / sizeof(WCHAR);
+
+    if (MsiGetPropertyW(hInstall, L"TIDE_CONFIG_JSON", jsonBuf, &jsonLen) == ERROR_SUCCESS
+        && jsonLen > 0 && jsonBuf[0] != L'\0') {
+        if (ValidateJsonContent(jsonBuf))
+            return ERROR_SUCCESS;
+
+        MessageBoxW(NULL,
+            L"The pasted JSON does not appear to be a valid TideCloak configuration.\n"
+            L"It must contain a \"jwk\" section with an Ed25519 public key (\"x\" field).",
+            L"TideSSP \x2014 Invalid JSON", MB_OK | MB_ICONERROR);
+        return ERROR_INSTALL_FAILURE;
+    }
+
+    /* Fall back to file path */
     WCHAR filePath[MAX_PATH];
     DWORD pathLen = MAX_PATH;
 
     if (MsiGetPropertyW(hInstall, L"TIDE_CONFIG_FILE", filePath, &pathLen) != ERROR_SUCCESS
         || pathLen == 0 || filePath[0] == L'\0') {
         MessageBoxW(NULL,
-            L"Please select a tidecloak.json file.",
-            L"TideSSP — Configuration Required", MB_OK | MB_ICONWARNING);
+            L"Please provide a tidecloak.json configuration.\n\n"
+            L"Either paste the JSON content or enter a file path.",
+            L"TideSSP \x2014 Configuration Required", MB_OK | MB_ICONWARNING);
         return ERROR_INSTALL_FAILURE;
     }
 
-    /* Try to read the file */
-    WCHAR jsonBuf[32768];
     int wLen = ReadFileToWide(filePath, jsonBuf, sizeof(jsonBuf) / sizeof(WCHAR));
     if (wLen == 0) {
         MessageBoxW(NULL,
-            L"Cannot read the selected file. Please check the path and try again.",
-            L"TideSSP — File Error", MB_OK | MB_ICONERROR);
+            L"Cannot read the specified file. Please check the path and try again.",
+            L"TideSSP \x2014 File Error", MB_OK | MB_ICONERROR);
         return ERROR_INSTALL_FAILURE;
     }
 
-    /* Basic validation: must contain "jwk" and "x" (the public key) */
-    if (!wcsstr(jsonBuf, L"\"jwk\"") || !wcsstr(jsonBuf, L"\"x\"")) {
+    if (!ValidateJsonContent(jsonBuf)) {
         MessageBoxW(NULL,
-            L"The selected file does not appear to be a valid TideCloak configuration.\n"
+            L"The file does not appear to be a valid TideCloak configuration.\n"
             L"It must contain a \"jwk\" section with an Ed25519 public key (\"x\" field).\n\n"
-            L"Export it from TideCloak Admin Console:\n"
+            L"Export from TideCloak Admin Console:\n"
             L"Clients \x2192 your client \x2192 Installation tab.",
-            L"TideSSP — Invalid Configuration", MB_OK | MB_ICONERROR);
+            L"TideSSP \x2014 Invalid Configuration", MB_OK | MB_ICONERROR);
         return ERROR_INSTALL_FAILURE;
     }
 
@@ -265,24 +286,52 @@ UINT __stdcall ValidateConfig(MSIHANDLE hInstall)
 
 /*
  * WriteConfig — deferred CA.
- * CustomActionData = file path to tidecloak.json.
- * Reads the file and writes its content to registry:
- *   HKLM\SYSTEM\CurrentControlSet\Control\Lsa\TideSSP\Config (REG_SZ)
+ * CustomActionData format: "FILE=<path>|JSON=<json content>"
+ * Prefers pasted JSON; falls back to reading file.
+ * Writes to registry: HKLM\...\Lsa\TideSSP\Config (REG_SZ)
  */
 UINT __stdcall WriteConfig(MSIHANDLE hInstall)
 {
-    WCHAR filePath[MAX_PATH];
-    DWORD pathLen = MAX_PATH;
+    WCHAR customData[32768];
+    DWORD dataLen = sizeof(customData) / sizeof(WCHAR);
     HKEY hKey = NULL;
     DWORD disp = 0;
 
-    if (MsiGetPropertyW(hInstall, L"CustomActionData", filePath, &pathLen) != ERROR_SUCCESS
-        || pathLen == 0 || filePath[0] == L'\0')
+    if (MsiGetPropertyW(hInstall, L"CustomActionData", customData, &dataLen) != ERROR_SUCCESS
+        || dataLen == 0)
         return ERROR_INSTALL_FAILURE;
 
-    /* Read the JSON file */
     WCHAR jsonBuf[32768];
-    int wLen = ReadFileToWide(filePath, jsonBuf, sizeof(jsonBuf) / sizeof(WCHAR));
+    int wLen = 0;
+
+    /* Try pasted JSON: find "|JSON=" marker */
+    WCHAR *jsonMarker = wcsstr(customData, L"|JSON=");
+    if (jsonMarker) {
+        WCHAR *jsonStart = jsonMarker + 6; /* skip "|JSON=" */
+        DWORD jsonChars = (DWORD)wcslen(jsonStart);
+        if (jsonChars > 0 && jsonChars < sizeof(jsonBuf)/sizeof(WCHAR)) {
+            wcsncpy_s(jsonBuf, sizeof(jsonBuf)/sizeof(WCHAR), jsonStart, jsonChars);
+            jsonBuf[jsonChars] = L'\0';
+            wLen = (int)jsonChars;
+        }
+    }
+
+    /* Fall back to file: extract path between "FILE=" and "|JSON=" */
+    if (wLen == 0) {
+        WCHAR *fileStart = wcsstr(customData, L"FILE=");
+        if (fileStart) {
+            fileStart += 5; /* skip "FILE=" */
+            WCHAR filePath[MAX_PATH];
+            WCHAR *pipePos = wcschr(fileStart, L'|');
+            DWORD pathChars = pipePos ? (DWORD)(pipePos - fileStart) : (DWORD)wcslen(fileStart);
+            if (pathChars > 0 && pathChars < MAX_PATH) {
+                wcsncpy_s(filePath, MAX_PATH, fileStart, pathChars);
+                filePath[pathChars] = L'\0';
+                wLen = ReadFileToWide(filePath, jsonBuf, sizeof(jsonBuf) / sizeof(WCHAR));
+            }
+        }
+    }
+
     if (wLen == 0)
         return ERROR_INSTALL_FAILURE;
 

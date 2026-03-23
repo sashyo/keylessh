@@ -18,7 +18,7 @@
     <!-- Properties -->
     <Property Id="ARPNOREPAIR" Value="yes" Secure="yes" />
     <Property Id="TIDE_CONFIG_FILE" Secure="yes" />
-    <Property Id="WIXUI_INSTALLDIR" Value="System64Folder" />
+    <Property Id="TIDE_CONFIG_JSON" Secure="yes" />
 
     <!-- Directory layout -->
     <StandardDirectory Id="System64Folder">
@@ -39,19 +39,19 @@
     <!-- Custom actions DLL -->
     <Binary Id="TideCA" SourceFile="!(bindpath.BinDir)\TideCA.dll" />
 
-    <!-- Immediate CA: validate config file exists and is valid JSON with jwk.keys -->
+    <!-- Immediate CA: validate config (file or pasted JSON) -->
     <CustomAction Id="CA_ValidateConfig"
                   DllEntry="ValidateConfig"
                   BinaryRef="TideCA"
                   Execute="immediate"
                   Return="check" />
 
-    <!-- Pass config file path to deferred CA -->
+    <!-- Pass both properties to deferred CA -->
     <CustomAction Id="CA_SetWriteConfigData"
                   Property="CA_WriteConfig"
-                  Value="[TIDE_CONFIG_FILE]" />
+                  Value="FILE=[TIDE_CONFIG_FILE]|JSON=[TIDE_CONFIG_JSON]" />
 
-    <!-- Deferred CA: read file and write JSON to registry -->
+    <!-- Deferred CA: write JSON to registry -->
     <CustomAction Id="CA_WriteConfig"
                   DllEntry="WriteConfig"
                   BinaryRef="TideCA"
@@ -104,15 +104,19 @@
                   Return="ignore" />
 
     <!-- ═══════════════════════════════════════════════════════
-         Installer UI — Config file selection dialog
+         Installer UI
          ═══════════════════════════════════════════════════════ -->
     <UI>
-      <!-- Dialog: Welcome -->
+      <TextStyle Id="TitleFont" FaceName="Tahoma" Size="10" Bold="yes" />
+      <TextStyle Id="BodyFont" FaceName="Tahoma" Size="8" />
+      <TextStyle Id="SmallFont" FaceName="Tahoma" Size="7" />
+
+      <!-- Welcome dialog -->
       <Dialog Id="WelcomeDlg" Width="370" Height="270" Title="TideSSP Setup">
-        <Control Id="Title" Type="Text" X="20" Y="20" Width="330" Height="30"
-                 Text="{\WixUI_Font_Title}Welcome to TideSSP Setup" />
-        <Control Id="Description" Type="Text" X="20" Y="55" Width="330" Height="40"
-                 Text="This will install TideSSP for passwordless Ed25519 RDP authentication. You will need your TideCloak configuration file (tidecloak.json)." />
+        <Control Id="Title" Type="Text" X="20" Y="20" Width="330" Height="20"
+                 Text="{\TitleFont}Welcome to TideSSP Setup" />
+        <Control Id="Desc" Type="Text" X="20" Y="50" Width="330" Height="50"
+                 Text="{\BodyFont}This will install TideSSP for passwordless Ed25519 RDP authentication on this machine. You will need your TideCloak configuration (tidecloak.json)." />
         <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17"
                  Default="yes" Text="Next">
           <Publish Event="NewDialog" Value="ConfigDlg" />
@@ -123,24 +127,28 @@
         </Control>
       </Dialog>
 
-      <!-- Dialog: TideCloak Config File -->
-      <Dialog Id="ConfigDlg" Width="370" Height="270" Title="TideSSP Setup — TideCloak Configuration">
-        <Control Id="Title" Type="Text" X="20" Y="20" Width="330" Height="20"
-                 Text="{\WixUI_Font_Title}TideCloak Configuration" />
-        <Control Id="Description" Type="Text" X="20" Y="45" Width="330" Height="30"
-                 Text="Select your tidecloak.json file. This contains the Ed25519 public key used to verify RDP authentication tokens." />
+      <!-- Config dialog — file path OR paste JSON -->
+      <Dialog Id="ConfigDlg" Width="370" Height="270" Title="TideSSP Setup">
+        <Control Id="Title" Type="Text" X="20" Y="10" Width="330" Height="16"
+                 Text="{\TitleFont}TideCloak Configuration" />
 
-        <Control Id="PathLabel" Type="Text" X="20" Y="85" Width="330" Height="12"
-                 Text="Path to tidecloak.json:" />
-        <Control Id="ConfigPath" Type="PathEdit" X="20" Y="100" Width="270" Height="18"
+        <!-- Option 1: File path -->
+        <Control Id="FileLabel" Type="Text" X="20" Y="32" Width="330" Height="12"
+                 Text="{\BodyFont}Option 1 — Path to tidecloak.json:" />
+        <Control Id="FileInput" Type="Edit" X="20" Y="46" Width="332" Height="16"
                  Property="TIDE_CONFIG_FILE" />
-        <Control Id="BrowseBtn" Type="PushButton" X="296" Y="100" Width="56" Height="18"
-                 Text="Browse...">
-          <Publish Event="SpawnDialog" Value="BrowseDlg" />
-        </Control>
 
-        <Control Id="Hint" Type="Text" X="20" Y="130" Width="330" Height="30"
-                 Text="You can export this file from TideCloak Admin Console (Clients → your client → Installation tab). Or pass it via command line: msiexec /i TideSSP.msi TIDE_CONFIG_FILE=&quot;C:\path\to\tidecloak.json&quot;" />
+        <!-- Separator -->
+        <Control Id="OrLabel" Type="Text" X="20" Y="70" Width="330" Height="12"
+                 Text="{\BodyFont}Option 2 — Paste the JSON content below:" />
+
+        <!-- Option 2: Paste JSON (multiline edit) -->
+        <Control Id="JsonInput" Type="Edit" X="20" Y="84" Width="332" Height="100"
+                 Property="TIDE_CONFIG_JSON"
+                 MultiLine="yes" />
+
+        <Control Id="Hint" Type="Text" X="20" Y="190" Width="330" Height="36"
+                 Text="{\SmallFont}Export from TideCloak Admin Console: Clients > your client > Installation tab. Provide either a file path or paste the JSON content directly." />
 
         <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17"
                  Text="Back">
@@ -148,11 +156,9 @@
         </Control>
         <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17"
                  Default="yes" Text="Install">
-          <!-- Validate before proceeding -->
           <Publish Event="DoAction" Value="CA_ValidateConfig" Order="1" />
-          <Publish Event="EndDialog" Value="Return" Order="2">
-            <![CDATA[TIDE_CONFIG_FILE <> ""]]>
-          </Publish>
+          <Publish Event="EndDialog" Value="Return" Order="2"
+                   Condition="TIDE_CONFIG_FILE OR TIDE_CONFIG_JSON" />
         </Control>
         <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17"
                  Cancel="yes" Text="Cancel">
@@ -160,10 +166,10 @@
         </Control>
       </Dialog>
 
-      <!-- Cancel confirmation dialog -->
+      <!-- Cancel confirmation -->
       <Dialog Id="CancelDlg" Width="260" Height="85" Title="Cancel Setup">
         <Control Id="Text" Type="Text" X="48" Y="15" Width="194" Height="30"
-                 Text="Are you sure you want to cancel TideSSP installation?" />
+                 Text="{\BodyFont}Are you sure you want to cancel TideSSP installation?" />
         <Control Id="Yes" Type="PushButton" X="72" Y="57" Width="56" Height="17"
                  Text="Yes">
           <Publish Event="EndDialog" Value="Exit" />
@@ -176,29 +182,23 @@
 
       <!-- Completion dialog -->
       <Dialog Id="ExitDlg" Width="370" Height="270" Title="TideSSP Setup Complete">
-        <Control Id="Title" Type="Text" X="20" Y="20" Width="330" Height="30"
-                 Text="{\WixUI_Font_Title}TideSSP Installation Complete" />
-        <Control Id="Description" Type="Text" X="20" Y="55" Width="330" Height="40"
-                 Text="TideSSP has been installed. A reboot is required to activate the security provider. After reboot, RDP logons via the gateway will be passwordless." />
+        <Control Id="Title" Type="Text" X="20" Y="20" Width="330" Height="20"
+                 Text="{\TitleFont}Installation Complete" />
+        <Control Id="Desc" Type="Text" X="20" Y="50" Width="330" Height="50"
+                 Text="{\BodyFont}TideSSP has been installed. A reboot is required to activate the security provider. After reboot, RDP logons via the gateway will use passwordless Ed25519 authentication." />
         <Control Id="Finish" Type="PushButton" X="304" Y="243" Width="56" Height="17"
                  Default="yes" Cancel="yes" Text="Finish">
           <Publish Event="EndDialog" Value="Return" />
         </Control>
       </Dialog>
 
-      <!-- Standard file browse dialog -->
-      <Property Id="BROWSE_PROPERTY" Value="TIDE_CONFIG_FILE" />
-
-      <!-- Install dialog sequence -->
+      <!-- Dialog sequence -->
       <InstallUISequence>
         <Show Dialog="WelcomeDlg" Before="ExecuteAction"
               Condition="NOT Installed" />
         <Show Dialog="ExitDlg" After="ExecuteAction"
               Condition="NOT Installed" />
       </InstallUISequence>
-
-      <!-- Text styles -->
-      <TextStyle Id="WixUI_Font_Title" FaceName="Tahoma" Size="10" Bold="yes" />
     </UI>
 
     <InstallExecuteSequence>
