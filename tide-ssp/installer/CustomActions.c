@@ -3,6 +3,7 @@
  *
  * Handles appending/removing "TideSSP" from the REG_MULTI_SZ
  * SecurityPackages value under HKLM\SYSTEM\CurrentControlSet\Control\Lsa,
+ * writing the TideCloak config JSON to registry,
  * and cleaning up UF_MNS_LOGON_ACCOUNT flags on uninstall.
  */
 
@@ -12,12 +13,14 @@
 #include <msiquery.h>
 #include <lm.h>
 #include <strsafe.h>
+#include <stdio.h>
 
 #pragma comment(lib, "msi.lib")
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "netapi32.lib")
 
 #define LSA_KEY L"SYSTEM\\CurrentControlSet\\Control\\Lsa"
+#define TIDESSP_KEY L"SYSTEM\\CurrentControlSet\\Control\\Lsa\\TideSSP"
 #define MSV1_0_KEY L"SYSTEM\\CurrentControlSet\\Control\\Lsa\\MSV1_0"
 #define PACKAGE_NAME L"TideSSP"
 #define SUBAUTH_NAME L"TideSubAuth"
@@ -188,5 +191,115 @@ UINT __stdcall ClearMnsFlags(MSIHANDLE hInstall)
         }
         NetApiBufferFree(pBuf);
     }
+    return ERROR_SUCCESS;
+}
+
+/* ---------- TideCloak config actions ---------- */
+
+/*
+ * WriteConfig — deferred CA, receives CustomActionData:
+ *   "TIDE_CONFIG=<json>;TIDE_CONFIG_FILE=<path>"
+ *
+ * If TIDE_CONFIG is non-empty, writes it directly.
+ * Otherwise reads the file at TIDE_CONFIG_FILE.
+ * Stores as REG_SZ at HKLM\...\Lsa\TideSSP\Config.
+ */
+UINT __stdcall WriteConfig(MSIHANDLE hInstall)
+{
+    WCHAR customData[32768];
+    DWORD dataLen = sizeof(customData) / sizeof(WCHAR);
+    HKEY hKey = NULL;
+    DWORD disp = 0;
+    UINT ret = ERROR_INSTALL_FAILURE;
+
+    if (MsiGetPropertyW(hInstall, L"CustomActionData", customData, &dataLen) != ERROR_SUCCESS)
+        return ERROR_INSTALL_FAILURE;
+
+    /* Parse "TIDE_CONFIG=...;TIDE_CONFIG_FILE=..." */
+    WCHAR *configJson = NULL;
+    DWORD configJsonLen = 0;
+
+    /* Find TIDE_CONFIG= */
+    WCHAR *cfgStart = wcsstr(customData, L"TIDE_CONFIG=");
+    WCHAR *fileStart = wcsstr(customData, L"TIDE_CONFIG_FILE=");
+
+    /* Extract TIDE_CONFIG value (between "TIDE_CONFIG=" and ";TIDE_CONFIG_FILE=") */
+    WCHAR jsonBuf[32768];
+    jsonBuf[0] = L'\0';
+
+    if (cfgStart) {
+        cfgStart += wcslen(L"TIDE_CONFIG=");
+        /* Find the separator before TIDE_CONFIG_FILE */
+        WCHAR *sep = wcsstr(cfgStart, L";TIDE_CONFIG_FILE=");
+        DWORD copyLen = sep ? (DWORD)(sep - cfgStart) : (DWORD)wcslen(cfgStart);
+        if (copyLen > 0 && copyLen < sizeof(jsonBuf)/sizeof(WCHAR)) {
+            wcsncpy_s(jsonBuf, sizeof(jsonBuf)/sizeof(WCHAR), cfgStart, copyLen);
+            jsonBuf[copyLen] = L'\0';
+        }
+    }
+
+    /* If no inline config, try reading from file */
+    if (jsonBuf[0] == L'\0' && fileStart) {
+        WCHAR filePath[MAX_PATH];
+        fileStart += wcslen(L"TIDE_CONFIG_FILE=");
+        /* File path is the rest of the string (or until next ;) */
+        DWORD copyLen = (DWORD)wcslen(fileStart);
+        if (copyLen > 0 && copyLen < MAX_PATH) {
+            wcsncpy_s(filePath, MAX_PATH, fileStart, copyLen);
+            filePath[copyLen] = L'\0';
+
+            /* Trim trailing whitespace/semicolons */
+            while (copyLen > 0 && (filePath[copyLen-1] == L';' ||
+                   filePath[copyLen-1] == L' ' || filePath[copyLen-1] == L'\0')) {
+                filePath[--copyLen] = L'\0';
+            }
+
+            /* Read file as UTF-8 and convert to UTF-16 */
+            HANDLE hFile = CreateFileW(filePath, GENERIC_READ, FILE_SHARE_READ,
+                                       NULL, OPEN_EXISTING, 0, NULL);
+            if (hFile != INVALID_HANDLE_VALUE) {
+                DWORD fileSize = GetFileSize(hFile, NULL);
+                if (fileSize > 0 && fileSize < 32000) {
+                    char *utf8 = (char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, fileSize + 1);
+                    if (utf8) {
+                        DWORD bytesRead = 0;
+                        ReadFile(hFile, utf8, fileSize, &bytesRead, NULL);
+                        utf8[bytesRead] = '\0';
+
+                        /* Convert UTF-8 to UTF-16 */
+                        int wLen = MultiByteToWideChar(CP_UTF8, 0, utf8, (int)bytesRead,
+                                                       jsonBuf, sizeof(jsonBuf)/sizeof(WCHAR) - 1);
+                        jsonBuf[wLen] = L'\0';
+                        HeapFree(GetProcessHeap(), 0, utf8);
+                    }
+                }
+                CloseHandle(hFile);
+            }
+        }
+    }
+
+    if (jsonBuf[0] == L'\0')
+        return ERROR_INSTALL_FAILURE;
+
+    /* Write to registry */
+    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, TIDESSP_KEY, 0, NULL,
+                        REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL,
+                        &hKey, &disp) != ERROR_SUCCESS)
+        return ERROR_INSTALL_FAILURE;
+
+    configJsonLen = (DWORD)((wcslen(jsonBuf) + 1) * sizeof(WCHAR));
+    if (RegSetValueExW(hKey, L"Config", 0, REG_SZ,
+                       (BYTE *)jsonBuf, configJsonLen) == ERROR_SUCCESS)
+        ret = ERROR_SUCCESS;
+
+    RegCloseKey(hKey);
+    return ret;
+}
+
+/* RemoveConfig — delete the TideSSP registry key on uninstall */
+UINT __stdcall RemoveConfig(MSIHANDLE hInstall)
+{
+    (void)hInstall;
+    RegDeleteKeyW(HKEY_LOCAL_MACHINE, TIDESSP_KEY);
     return ERROR_SUCCESS;
 }

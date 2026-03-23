@@ -6,7 +6,8 @@
 .DESCRIPTION
     Copies TideSSP.dll and TideSubAuth.dll to System32, registers TideSSP
     as an LSA Security Package and TideSubAuth as an MSV1_0 subauthentication
-    package.  A reboot is required after installation.
+    package, and writes the TideCloak config to the registry.
+    A reboot is required after installation.
 
 .PARAMETER Uninstall
     Remove TideSSP and TideSubAuth and clean up registry entries.
@@ -14,11 +15,16 @@
 .PARAMETER DllPath
     Path to TideSSP.dll. If not specified, searches build/ subdirectories.
 
+.PARAMETER ConfigFile
+    Path to tidecloak.json. Required on install. The JSON is stored in the
+    registry and TideSSP reads the Ed25519 public key from it at startup.
+
 #>
 
 param(
     [switch]$Uninstall,
-    [string]$DllPath
+    [string]$DllPath,
+    [string]$ConfigFile
 )
 
 $dllName = "TideSSP.dll"
@@ -27,6 +33,7 @@ $packageName = "TideSSP"
 $system32 = "$env:SystemRoot\System32"
 $regPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa"
 $msv1_0Path = "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\MSV1_0"
+$tideSspRegPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\TideSSP"
 
 if ($Uninstall) {
     Write-Host "Uninstalling TideSSP + TideSubAuth..." -ForegroundColor Yellow
@@ -39,6 +46,12 @@ if ($Uninstall) {
     # Remove SubAuth registration
     if (Test-Path $msv1_0Path) {
         Remove-ItemProperty $msv1_0Path -Name "Auth0" -ErrorAction SilentlyContinue
+    }
+
+    # Remove TideSSP config from registry
+    if (Test-Path $tideSspRegPath) {
+        Remove-Item $tideSspRegPath -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Host "Removed TideSSP registry config"
     }
 
     # Clear UF_MNS_LOGON_ACCOUNT from all local users (in case it was left set)
@@ -68,6 +81,37 @@ if ($Uninstall) {
 }
 
 # --- Install ---
+
+# Validate ConfigFile
+if (-not $ConfigFile) {
+    # Try default locations
+    $scriptDir0 = if ($PSScriptRoot) { $PSScriptRoot } else { Get-Location }
+    foreach ($candidate in @(
+        (Join-Path $scriptDir0 "tidecloak.json"),
+        (Join-Path $scriptDir0 "..\data\tidecloak.json"),
+        (Join-Path $scriptDir0 "data\tidecloak.json")
+    )) {
+        if (Test-Path $candidate) {
+            $ConfigFile = $candidate
+            break
+        }
+    }
+}
+
+if (-not $ConfigFile -or -not (Test-Path $ConfigFile)) {
+    Write-Error "tidecloak.json is required. Use -ConfigFile <path> to specify the TideCloak configuration file."
+    return
+}
+
+$configJson = Get-Content $ConfigFile -Raw
+Write-Host "Using TideCloak config: $ConfigFile"
+
+# Write config to registry
+if (-not (Test-Path $tideSspRegPath)) {
+    New-Item -Path $tideSspRegPath -Force | Out-Null
+}
+Set-ItemProperty $tideSspRegPath -Name "Config" -Value $configJson -Type String
+Write-Host "Wrote TideCloak config to registry ($($configJson.Length) chars)"
 
 # Determine script directory
 $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Get-Location }

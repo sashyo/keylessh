@@ -18,12 +18,22 @@
     <!-- Properties -->
     <Property Id="ARPNOREPAIR" Value="yes" Secure="yes" />
 
+    <!-- TideCloak config JSON — pass via command line or custom action.
+         Example: msiexec /i TideSSP.msi TIDE_CONFIG="{...json...}"
+         Or use TIDE_CONFIG_FILE=C:\path\to\tidecloak.json (read by CA) -->
+    <Property Id="TIDE_CONFIG" Secure="yes" />
+    <Property Id="TIDE_CONFIG_FILE" Secure="yes" />
+
+    <!-- Validate that config is provided -->
+    <Launch Condition="Installed OR TIDE_CONFIG OR TIDE_CONFIG_FILE"
+            Message="TideCloak configuration is required. Provide either:&#xA;  TIDE_CONFIG=&quot;{json content}&quot;&#xA;  TIDE_CONFIG_FILE=&quot;C:\path\to\tidecloak.json&quot;&#xA;&#xA;Example: msiexec /i TideSSP.msi TIDE_CONFIG_FILE=&quot;C:\tidecloak.json&quot;" />
+
     <!-- Directory layout -->
     <StandardDirectory Id="System64Folder">
-      <Component Id="TideSSP_DLL" Guid="B1C2D3E4-F5A6-47B8-9C0D-1E2F3A4B5C6D" Win64="yes">
+      <Component Id="TideSSP_DLL" Guid="B1C2D3E4-F5A6-47B8-9C0D-1E2F3A4B5C6D">
         <File Id="TideSSP.dll" Source="!(bindpath.BinDir)\TideSSP.dll" KeyPath="yes" />
       </Component>
-      <Component Id="TideSubAuth_DLL" Guid="C2D3E4F5-A6B7-48C9-0D1E-2F3A4B5C6D7E" Win64="yes">
+      <Component Id="TideSubAuth_DLL" Guid="C2D3E4F5-A6B7-48C9-0D1E-2F3A4B5C6D7E">
         <File Id="TideSubAuth.dll" Source="!(bindpath.BinDir)\TideSubAuth.dll" KeyPath="yes" />
       </Component>
     </StandardDirectory>
@@ -36,6 +46,19 @@
 
     <!-- Custom actions (from our CA DLL) -->
     <Binary Id="TideCA" SourceFile="!(bindpath.BinDir)\TideCA.dll" />
+
+    <!-- Pass properties to deferred custom actions -->
+    <CustomAction Id="CA_SetConfigData"
+                  Property="CA_WriteConfig"
+                  Value="TIDE_CONFIG=[TIDE_CONFIG];TIDE_CONFIG_FILE=[TIDE_CONFIG_FILE]" />
+
+    <!-- Write tidecloak.json to registry (deferred, SYSTEM) -->
+    <CustomAction Id="CA_WriteConfig"
+                  DllEntry="WriteConfig"
+                  BinaryRef="TideCA"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="check" />
 
     <!-- Install custom actions (deferred, run as SYSTEM in elevated context) -->
     <CustomAction Id="CA_RegisterSecurityPackage"
@@ -74,9 +97,22 @@
                   Impersonate="no"
                   Return="ignore" />
 
+    <CustomAction Id="CA_RemoveConfig"
+                  DllEntry="RemoveConfig"
+                  BinaryRef="TideCA"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
     <InstallExecuteSequence>
+      <!-- Write config on install -->
+      <Custom Action="CA_SetConfigData" After="InstallFiles"
+              Condition="NOT Installed" />
+      <Custom Action="CA_WriteConfig" After="CA_SetConfigData"
+              Condition="NOT Installed" />
+
       <!-- Register on install -->
-      <Custom Action="CA_RegisterSecurityPackage" After="InstallFiles"
+      <Custom Action="CA_RegisterSecurityPackage" After="CA_WriteConfig"
               Condition="NOT Installed" />
       <Custom Action="CA_RegisterSubAuth" After="CA_RegisterSecurityPackage"
               Condition="NOT Installed" />
@@ -88,14 +124,13 @@
               Condition="REMOVE=&quot;ALL&quot;" />
       <Custom Action="CA_ClearMnsFlags" After="CA_UnregisterSubAuth"
               Condition="REMOVE=&quot;ALL&quot;" />
+      <Custom Action="CA_RemoveConfig" After="CA_ClearMnsFlags"
+              Condition="REMOVE=&quot;ALL&quot;" />
 
       <!-- Schedule reboot -->
       <ScheduleReboot After="InstallFinalize" />
     </InstallExecuteSequence>
 
-    <!-- WiX UI (minimal) -->
-    <WixVariable Id="WixUILicenseRtf" Value="!(bindpath.InstallerDir)\License.rtf" />
-    <UIRef Id="WixUI_Minimal" />
 
   </Package>
 </Wix>

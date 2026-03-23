@@ -5,41 +5,37 @@ REM ---------------------------------------------------------------
 REM  Build TideSSP MSI installer
 REM
 REM  Prerequisites:
-REM    - Visual Studio Build Tools (cl.exe on PATH)
-REM    - WiX Toolset v4+  (dotnet tool install --global wix)
-REM    - Run from a "Developer Command Prompt" or after vcvarsall.bat
+REM    - Visual Studio Build Tools
+REM    - CMake (included with VS "C++ CMake tools" component)
+REM    - WiX Toolset v6+  (dotnet tool install --global wix)
 REM ---------------------------------------------------------------
 
-set ROOT=%~dp0..
-set BUILD=%ROOT%\build
-set INSTALLER=%~dp0
-set OUTDIR=%INSTALLER%\out
+pushd "%~dp0.."
+set "ROOT=%CD%"
+popd
 
-echo === Step 1: Build TideSSP and TideSubAuth DLLs ===
+set "BUILD=%ROOT%\build"
+set "OUTDIR=%ROOT%\out"
+
+echo === Step 1: Build all DLLs (TideSSP, TideSubAuth, TideCA) ===
 cmake -B "%BUILD%" -S "%ROOT%" -A x64
-if errorlevel 1 goto :fail
+if %errorlevel% neq 0 goto :fail
 cmake --build "%BUILD%" --config Release
-if errorlevel 1 goto :fail
+if %errorlevel% neq 0 goto :fail
 
 echo.
-echo === Step 2: Build custom action DLL ===
-cl /nologo /W4 /O2 /LD /DUNICODE /D_UNICODE ^
-   "%INSTALLER%\CustomActions.c" ^
-   /Fe:"%BUILD%\Release\TideCA.dll" ^
-   /link msi.lib advapi32.lib netapi32.lib /DEF:"%INSTALLER%\CustomActions.def"
-if errorlevel 1 goto :fail
-
-echo.
-echo === Step 3: Build MSI ===
+echo === Step 2: Build MSI ===
 if not exist "%OUTDIR%" mkdir "%OUTDIR%"
 
-REM WiX v4 CLI
-wix build "%INSTALLER%\Product.wxs" ^
-    -ext WixToolset.UI.wixext ^
+wix build "%ROOT%\installer\Product.wxs" ^
     -bindpath BinDir="%BUILD%\Release" ^
-    -bindpath InstallerDir="%INSTALLER%" ^
+    -bindpath InstallerDir="%ROOT%\installer" ^
     -o "%OUTDIR%\TideSSP.msi"
-if errorlevel 1 goto :fail
+if %errorlevel% neq 0 goto :fail
+if not exist "%OUTDIR%\TideSSP.msi" (
+    echo ERROR: MSI was not produced.
+    goto :fail
+)
 
 echo.
 echo === Success ===

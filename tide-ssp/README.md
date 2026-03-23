@@ -4,12 +4,20 @@ A Windows Security Support Provider (SSP) that enables Ed25519-based authenticat
 
 ## How it works
 
-1. Gateway sends a NEGOTIATE token with the username
-2. TideSSP generates a random 32-byte challenge
-3. Gateway relays the challenge to the browser
-4. Browser signs the challenge using TideCloak's Ed25519 key (via Tide enclave)
-5. Gateway sends the AUTHENTICATE token with signature + public key
-6. TideSSP verifies the Ed25519 signature and creates a Windows logon session
+1. Gateway sends the JWT access token to TideSSP via CredSSP/NLA
+2. TideSSP verifies the Ed25519 signature against the public key from the TideCloak config
+3. TideSSP extracts the username from the JWT and creates a Windows logon session
+4. The RDP desktop session starts without requiring a password
+
+## Configuration
+
+TideSSP reads the TideCloak configuration (`tidecloak.json`) from the Windows registry at:
+
+```
+HKLM\SYSTEM\CurrentControlSet\Control\Lsa\TideSSP\Config (REG_SZ)
+```
+
+The Ed25519 public key is extracted from `jwk.keys[0].x` in the JSON at startup. If the realm's signing key is rotated, update the registry value and reboot.
 
 ## Build
 
@@ -30,7 +38,17 @@ Build the MSI (requires [WiX Toolset v4+](https://wixtoolset.org/) and a Develop
 installer\build.bat
 ```
 
-Then run `installer\out\TideSSP.msi`. The installer copies both DLLs to System32, registers the security packages, and schedules a reboot.
+Install with the path to your `tidecloak.json`:
+
+```powershell
+msiexec /i installer\out\TideSSP.msi TIDE_CONFIG_FILE="C:\path\to\tidecloak.json"
+```
+
+Or pass the JSON content directly:
+
+```powershell
+msiexec /i installer\out\TideSSP.msi TIDE_CONFIG="{\"realm\":\"myrealm\",...}"
+```
 
 To uninstall, use **Add/Remove Programs** or `msiexec /x TideSSP.msi`.
 
@@ -39,8 +57,10 @@ To uninstall, use **Add/Remove Programs** or `msiexec /x TideSSP.msi`.
 Run as Administrator:
 
 ```powershell
-.\install.ps1
+.\install.ps1 -ConfigFile C:\path\to\tidecloak.json
 ```
+
+The script auto-discovers `tidecloak.json` in common locations if `-ConfigFile` is not specified.
 
 Then reboot.
 
@@ -52,22 +72,30 @@ To uninstall manually:
 
 Then reboot.
 
+## Updating the Public Key
+
+If the TideCloak realm signing key is rotated:
+
+1. Export a new `tidecloak.json` from TideCloak admin console
+2. Update the registry:
+   ```powershell
+   $json = Get-Content tidecloak.json -Raw
+   Set-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\TideSSP" -Name "Config" -Value $json
+   ```
+3. Reboot (the SSP reads the key once at LSA startup)
+
 ## Wire Protocol
 
 ```
-NEGOTIATE (client → server):
-  [0x01][version:u8][username_len:u16LE][username:UTF-8]
-
-CHALLENGE (server → client):
-  [0x02][challenge:32 bytes]
-
-AUTHENTICATE (client → server):
-  [0x03][signature:64 bytes][pubkey:32 bytes]
+TOKEN_JWT (client → server):
+  [0x04][JWT bytes (ASCII)]
 ```
+
+TideSSP verifies the JWT's Ed25519 signature, checks expiry, extracts `preferred_username`, and creates a logon session via S4U.
 
 ## Security
 
 - Ed25519 verification uses TweetNaCl (public domain, no external dependencies)
-- Challenge is 32 bytes of cryptographic random (BCryptGenRandom)
 - Private key never exists in full — TideCloak threshold cryptography splits it across ORK nodes
 - SSP runs in LSA context within standard Windows security boundaries
+- Public key is configurable at install time — no recompilation needed for key rotation

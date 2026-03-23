@@ -44,6 +44,7 @@ target_include_directories(TideSubAuth PRIVATE src)
 target_link_libraries(TideSubAuth PRIVATE
     advapi32
     ntdll
+    netapi32
 )
 
 target_compile_definitions(TideSubAuth PRIVATE
@@ -56,6 +57,29 @@ if(MSVC)
     target_compile_options(TideSubAuth PRIVATE /W4)
     set_target_properties(TideSubAuth PROPERTIES
         LINK_FLAGS "/DEF:${CMAKE_CURRENT_SOURCE_DIR}/src/TideSubAuth.def"
+    )
+endif()
+
+# Installer custom action DLL
+add_library(TideCA SHARED
+    installer/CustomActions.c
+)
+
+target_compile_definitions(TideCA PRIVATE
+    UNICODE
+    _UNICODE
+)
+
+target_link_libraries(TideCA PRIVATE
+    msi
+    advapi32
+    netapi32
+)
+
+if(MSVC)
+    target_compile_options(TideCA PRIVATE /W4)
+    set_target_properties(TideCA PROPERTIES
+        LINK_FLAGS "/DEF:${CMAKE_CURRENT_SOURCE_DIR}/installer/CustomActions.def"
     )
 endif()
 

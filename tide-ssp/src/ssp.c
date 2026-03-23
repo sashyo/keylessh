@@ -92,15 +92,15 @@ static const GUID TIDESSP_AUTH_SCHEME = {
 #define SECBUFFER_STREAM 10
 #endif
 
-/* ── JWK Ed25519 public key (from tidecloak.json) ────────────── */
-/* kid: TPlidYX-_Jaw8wTsthyDEQIwIxqbJkyoJBW6qN4InTQ               */
-/* x (base64url): 75TGtIj59SC5jCYJFMkuq-bjhdbHFXWniyZ1dc3BV2E     */
-static const UCHAR JWK_PUBLIC_KEY[32] = {
-    0xef, 0x94, 0xc6, 0xb4, 0x88, 0xf9, 0xf5, 0x20,
-    0xb9, 0x8c, 0x26, 0x09, 0x14, 0xc9, 0x2e, 0xab,
-    0xe6, 0xe3, 0x85, 0xd6, 0xc7, 0x15, 0x75, 0xa7,
-    0x8b, 0x26, 0x75, 0x75, 0xcd, 0xc1, 0x57, 0x61,
-};
+/* ── JWK Ed25519 public key — loaded from registry at init ────── */
+/* Registry: HKLM\SYSTEM\CurrentControlSet\Control\Lsa\TideSSP\Config (REG_SZ)
+ * Contains the tidecloak.json content. At init we parse jwk.keys[0].x
+ * and base64url-decode it to get the 32-byte Ed25519 public key. */
+#define TIDESSP_REG_KEY L"SYSTEM\\CurrentControlSet\\Control\\Lsa\\TideSSP"
+#define TIDESSP_REG_CONFIG L"Config"
+
+static UCHAR g_PublicKey[32];
+static BOOLEAN g_PublicKeyLoaded = FALSE;
 
 /* ── LSA dispatch table — set by SpInitialize ─────────────────── */
 
@@ -613,6 +613,79 @@ static void deriveSessionKeyFromSig(
  *  SSP Package Functions
  * ══════════════════════════════════════════════════════════════════ */
 
+/* ── Load Ed25519 public key from registry ───────────────────── */
+/* Reads tidecloak.json from HKLM\...\Lsa\TideSSP\Config,
+ * extracts jwk.keys[0].x (base64url), decodes to 32 bytes. */
+static BOOLEAN TideLoadPublicKey(void)
+{
+    HKEY hKey = NULL;
+    DWORD cbData = 0;
+    DWORD type = 0;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, TIDESSP_REG_KEY, 0,
+                      KEY_READ, &hKey) != ERROR_SUCCESS) {
+        tide_log("LoadPublicKey: cannot open registry key");
+        return FALSE;
+    }
+
+    /* Query size first */
+    if (RegQueryValueExW(hKey, TIDESSP_REG_CONFIG, NULL, &type,
+                         NULL, &cbData) != ERROR_SUCCESS || type != REG_SZ || cbData < 4) {
+        tide_log("LoadPublicKey: cannot read Config value");
+        RegCloseKey(hKey);
+        return FALSE;
+    }
+
+    /* Allocate and read the JSON (stored as UTF-16) */
+    WCHAR *jsonW = (WCHAR *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, cbData + sizeof(WCHAR));
+    if (!jsonW) { RegCloseKey(hKey); return FALSE; }
+
+    if (RegQueryValueExW(hKey, TIDESSP_REG_CONFIG, NULL, NULL,
+                         (BYTE *)jsonW, &cbData) != ERROR_SUCCESS) {
+        tide_log("LoadPublicKey: failed to read Config");
+        HeapFree(GetProcessHeap(), 0, jsonW);
+        RegCloseKey(hKey);
+        return FALSE;
+    }
+    RegCloseKey(hKey);
+
+    /* Convert UTF-16 to ASCII for JSON parsing */
+    int wLen = (int)(cbData / sizeof(WCHAR));
+    char *json = (char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, wLen + 1);
+    if (!json) { HeapFree(GetProcessHeap(), 0, jsonW); return FALSE; }
+
+    int jLen = 0;
+    for (int i = 0; i < wLen && jsonW[i] != L'\0'; i++) {
+        json[jLen++] = (char)jsonW[i];
+    }
+    json[jLen] = '\0';
+    HeapFree(GetProcessHeap(), 0, jsonW);
+
+    tide_log("LoadPublicKey: JSON loaded (%d bytes)", jLen);
+
+    /* Extract "x" value from jwk.keys[0] — find "x":"<base64url>" */
+    char xValue[64];
+    int xLen = json_extract_string(json, jLen, "x", xValue, sizeof(xValue));
+    if (xLen <= 0) {
+        tide_log("LoadPublicKey: 'x' field not found in JSON");
+        HeapFree(GetProcessHeap(), 0, json);
+        return FALSE;
+    }
+    HeapFree(GetProcessHeap(), 0, json);
+
+    tide_log("LoadPublicKey: x=%s (%d chars)", xValue, xLen);
+
+    int decoded = base64url_decode(xValue, xLen, g_PublicKey, 32);
+    if (decoded != 32) {
+        tide_log("LoadPublicKey: base64url decode failed (got %d bytes, expected 32)", decoded);
+        return FALSE;
+    }
+
+    tide_log("LoadPublicKey: OK — %02x%02x%02x%02x...",
+             g_PublicKey[0], g_PublicKey[1], g_PublicKey[2], g_PublicKey[3]);
+    return TRUE;
+}
+
 static NTSTATUS NTAPI TideSsp_Initialize(
     ULONG_PTR PackageId,
     PSECPKG_PARAMETERS Parameters,
@@ -622,7 +695,14 @@ static NTSTATUS NTAPI TideSsp_Initialize(
     (void)Parameters;
     LsaDispatch = FunctionTable;
     TideNlaSessionInit();
-    tide_log("TideSSP Initialize: PackageId=%llu, LsaDispatch=%p", (unsigned long long)PackageId, (void*)FunctionTable);
+
+    g_PublicKeyLoaded = TideLoadPublicKey();
+    if (!g_PublicKeyLoaded) {
+        tide_log("TideSSP Initialize: WARNING — no public key, JWT verification will fail");
+    }
+
+    tide_log("TideSSP Initialize: PackageId=%llu, LsaDispatch=%p, keyLoaded=%d",
+             (unsigned long long)PackageId, (void*)FunctionTable, g_PublicKeyLoaded);
     return STATUS_SUCCESS;
 }
 
@@ -737,10 +817,16 @@ static NTSTATUS NTAPI TideSsp_AcceptLsaModeContext(
         }
 
         tide_log("JWT sig decoded OK (64 bytes), verifying Ed25519...");
-        tide_log("JWK pubkey: %02x%02x%02x%02x...", JWK_PUBLIC_KEY[0], JWK_PUBLIC_KEY[1], JWK_PUBLIC_KEY[2], JWK_PUBLIC_KEY[3]);
 
-        /* Verify Ed25519 signature against JWK public key */
-        int verifyResult = ed25519_verify(sigBytes, (const uint8_t *)jwt, (size_t)signedDataLen, JWK_PUBLIC_KEY);
+        if (!g_PublicKeyLoaded) {
+            tide_log("No public key loaded — cannot verify JWT");
+            return SEC_E_INVALID_TOKEN;
+        }
+
+        tide_log("JWK pubkey: %02x%02x%02x%02x...", g_PublicKey[0], g_PublicKey[1], g_PublicKey[2], g_PublicKey[3]);
+
+        /* Verify Ed25519 signature against public key from registry */
+        int verifyResult = ed25519_verify(sigBytes, (const uint8_t *)jwt, (size_t)signedDataLen, g_PublicKey);
         if (verifyResult != 0) {
             tide_log("Ed25519 VERIFY FAILED (result=%d)", verifyResult);
             return (NTSTATUS)0xC0040002L; /* unique: Ed25519 verify failed */
