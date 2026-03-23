@@ -41,6 +41,8 @@ hostname = "0.4"
 toml = "0.8"
 tokio-stream = { version = "0.1", features = ["sync"] }
 serde_urlencoded = "0.7"
+aes = "0.8"
+aes-gcm = "0.10"
 
 [build-dependencies]
 winresource = "0.1"

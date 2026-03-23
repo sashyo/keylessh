@@ -13,7 +13,7 @@ use tokio::time::timeout;
 use tokio_native_tls::TlsStream;
 
 use crate::auth::tidecloak::{JwtPayload, TidecloakAuth};
-use crate::config::BackendEntry;
+use crate::config::{BackendAuth, BackendEntry};
 
 use super::rdcleanpath::{
     build_error, build_response, parse_request, RDCleanPathError, RDCleanPathResponse,
@@ -97,30 +97,33 @@ async fn run_session(
     );
 
     // ------------------------------------------------------------------
-    // Verify JWT
+    // Verify JWT (skip for noauth backends)
     // ------------------------------------------------------------------
-    let payload = match opts.auth.verify_token(&req.proxy_auth).await {
-        Some(p) => p,
-        None => {
-            tracing::error!("JWT verification failed");
-            send_error(&send_binary, RDCLEANPATH_ERROR_GENERAL, Some(401));
-            (send_close)(4001, "Unauthorized".into());
-            return Err("JWT verification failed".into());
-        }
-    };
+    let backend_peek = opts.backends.iter().find(|b| b.protocol == "rdp" && b.name == req.destination);
+    let is_noauth = backend_peek.map(|b| b.no_auth).unwrap_or(false);
 
-    // ------------------------------------------------------------------
-    // Check dest: roles
-    // ------------------------------------------------------------------
-    if !check_dest_roles(&payload, &req.destination, opts.tc_client_id.as_deref()) {
-        tracing::error!(
-            "Access denied: no dest:{} role for user {:?}",
-            req.destination,
-            payload.sub
-        );
-        send_error(&send_binary, RDCLEANPATH_ERROR_GENERAL, Some(403));
-        (send_close)(4003, "Forbidden".into());
-        return Err("Access denied".into());
+    if !is_noauth {
+        let payload = match opts.auth.verify_token(&req.proxy_auth).await {
+            Some(p) => p,
+            None => {
+                tracing::error!("JWT verification failed");
+                send_error(&send_binary, RDCLEANPATH_ERROR_GENERAL, Some(401));
+                (send_close)(4001, "Unauthorized".into());
+                return Err("JWT verification failed".into());
+            }
+        };
+
+        // Check dest: roles
+        if !check_dest_roles(&payload, &req.destination, opts.tc_client_id.as_deref()) {
+            tracing::error!(
+                "Access denied: no dest:{} role for user {:?}",
+                req.destination,
+                payload.sub
+            );
+            send_error(&send_binary, RDCLEANPATH_ERROR_GENERAL, Some(403));
+            (send_close)(4003, "Forbidden".into());
+            return Err("Access denied".into());
+        }
     }
 
     // ------------------------------------------------------------------
@@ -148,6 +151,13 @@ async fn run_session(
         .map_err(|_| format!("TCP connect to {addr} timed out"))?
         .map_err(|e| format!("TCP connect to {addr} failed: {e}"))?;
 
+    // For eddsa backends, patch X.224 Connection Request with RESTRICTED_ADMIN flag
+    let mut x224_pdu = req.x224_connection_pdu.clone();
+    let is_eddsa = backend.auth == BackendAuth::EdDSA;
+    if is_eddsa {
+        patch_x224_restricted_admin(&mut x224_pdu);
+    }
+
     // Send X.224 Connection Request
     tcp_stream
         .writable()
@@ -156,12 +166,12 @@ async fn run_session(
 
     let mut tcp_stream = tcp_stream;
     tcp_stream
-        .write_all(&req.x224_connection_pdu)
+        .write_all(&x224_pdu)
         .await
         .map_err(|e| format!("Failed to send X.224 request: {e}"))?;
 
     // Read TPKT-framed X.224 response
-    let x224_response = read_tpkt_frame(&mut tcp_stream).await?;
+    let mut x224_response = read_tpkt_frame(&mut tcp_stream).await?;
 
     // ------------------------------------------------------------------
     // TLS upgrade (accept invalid / self-signed certs, typical for RDP)
@@ -185,6 +195,37 @@ async fn run_session(
     let cert_chain = extract_peer_cert_chain(&tls_stream);
 
     // ------------------------------------------------------------------
+    // CredSSP/NLA for eddsa backends
+    // ------------------------------------------------------------------
+    let mut mcs_patch_protocol: u32 = 0;
+    if is_eddsa {
+        tracing::info!("Starting CredSSP with TideSSP/NEGOEX for \"{}\"", req.destination);
+        super::credssp::perform_credssp(&mut tls_stream, &req.proxy_auth).await?;
+        tracing::info!("CredSSP/NLA completed for \"{}\"", req.destination);
+
+        // Read and consume 4-byte Early User Authorization Result PDU
+        let mut auth_result = [0u8; 4];
+        tls_stream.read_exact(&mut auth_result).await
+            .map_err(|e| format!("Failed to read Early User Auth Result: {e}"))?;
+        let auth_value = u32::from_le_bytes(auth_result);
+        tracing::info!("Early User Auth Result: 0x{auth_value:08x}");
+        if auth_value != 0 {
+            return Err(format!("Early User Authorization denied: 0x{auth_value:08x}"));
+        }
+
+        // Patch X.224 response: save original selectedProtocol, set to PROTOCOL_SSL(1)
+        // so IronRDP skips NLA (we already did it). We restore the real value in MCS later.
+        if x224_response.len() >= 19 {
+            mcs_patch_protocol = u32::from_le_bytes(x224_response[15..19].try_into().unwrap());
+            tracing::info!("Original X.224 selectedProtocol={mcs_patch_protocol}");
+            x224_response[15] = 0x01; // PROTOCOL_SSL
+            x224_response[16] = 0x00;
+            x224_response[17] = 0x00;
+            x224_response[18] = 0x00;
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Send RDCleanPath Response PDU
     // ------------------------------------------------------------------
     let response_pdu = build_response(&RDCleanPathResponse {
@@ -204,7 +245,17 @@ async fn run_session(
     // Task: client -> RDP server
     let send_close_c2s = send_close.clone();
     let c2s = tokio::spawn(async move {
-        while let Some(data) = rx.recv().await {
+        let mut first_msg = true;
+        let mut mcs_proto = mcs_patch_protocol;
+        while let Some(mut data) = rx.recv().await {
+            // For eddsa: patch serverSelectedProtocol in first MCS Connect Initial
+            if first_msg && mcs_proto > 0 {
+                first_msg = false;
+                mcs_proto = 0;
+                patch_mcs_selected_protocol(&mut data, mcs_patch_protocol);
+            } else {
+                first_msg = false;
+            }
             if let Err(e) = tls_write.write_all(&data).await {
                 tracing::error!("Relay c2s write error: {e}");
                 break;
@@ -357,7 +408,7 @@ fn parse_rdp_url(url: &str) -> Result<(String, u16), String> {
 }
 
 /// Send an RDCleanPath error PDU to the client.
-fn send_error(send_binary: &SendBinaryFn, error_code: u64, http_status: Option<u64>) {
+fn send_error(send_binary: &SendBinaryFn, error_code: i64, http_status: Option<i64>) {
     let pdu = build_error(&RDCleanPathError {
         error_code,
         http_status_code: http_status,
@@ -365,4 +416,45 @@ fn send_error(send_binary: &SendBinaryFn, error_code: u64, http_status: Option<u
         tls_alert_code: None,
     });
     (send_binary)(pdu);
+}
+
+/// Patch X.224 Connection Request to set RESTRICTED_ADMIN_MODE_REQUIRED flag.
+/// RDP_NEG_REQ is the last 8 bytes: [type=0x01][flags][length=0x08,0x00][requestedProtocols(4)]
+fn patch_x224_restricted_admin(pdu: &mut [u8]) {
+    if pdu.len() < 12 {
+        return;
+    }
+    for i in (4..=pdu.len() - 8).rev() {
+        if pdu[i] == 0x01 && pdu[i + 2] == 0x08 && pdu[i + 3] == 0x00 {
+            let old_flags = pdu[i + 1];
+            pdu[i + 1] = old_flags | 0x01; // RESTRICTED_ADMIN_MODE_REQUIRED
+            tracing::info!("Set RESTRICTED_ADMIN flag in X.224 CR (offset {i}, flags: 0x{old_flags:02x} → 0x{:02x})", pdu[i + 1]);
+            return;
+        }
+    }
+    tracing::warn!("Could not find RDP_NEG_REQ in X.224 Connection Request");
+}
+
+/// Patch serverSelectedProtocol in MCS Connect Initial.
+/// IronRDP wrote PROTOCOL_SSL(1) because we patched X.224; restore original value.
+fn patch_mcs_selected_protocol(data: &mut [u8], target_protocol: u32) {
+    if target_protocol == 0 {
+        return;
+    }
+    // Find CS_CORE block (type 0xC001) and patch serverSelectedProtocol at offset 212
+    for i in 7..data.len().saturating_sub(216) {
+        if data[i] == 0x01 && data[i + 1] == 0xC0 {
+            let block_len = u16::from_le_bytes([data[i + 2], data[i + 3]]) as usize;
+            if block_len >= 216 && block_len < 1024 && i + block_len <= data.len() {
+                let sp_offset = i + 212;
+                let current = u32::from_le_bytes(data[sp_offset..sp_offset + 4].try_into().unwrap());
+                if current != target_protocol {
+                    data[sp_offset..sp_offset + 4].copy_from_slice(&target_protocol.to_le_bytes());
+                    tracing::info!("Patched MCS serverSelectedProtocol: {current} → {target_protocol}");
+                }
+                return;
+            }
+        }
+    }
+    tracing::warn!("Could not find CS_CORE in MCS Connect Initial");
 }

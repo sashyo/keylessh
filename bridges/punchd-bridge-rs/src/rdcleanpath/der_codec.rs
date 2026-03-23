@@ -31,15 +31,15 @@ pub fn encode_tlv(tag: u8, content: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Encode a DER INTEGER from a u64 value.
+/// Encode a DER INTEGER from an i64 value.
 /// Prepends 0x00 if the high bit of the most-significant byte is set (signed encoding).
-pub fn encode_integer(value: u64) -> Vec<u8> {
+pub fn encode_integer(value: i64) -> Vec<u8> {
     if value == 0 {
         return encode_tlv(TAG_INTEGER, &[0x00]);
     }
 
     // Collect significant bytes, big-endian
-    let all_bytes = value.to_be_bytes();
+    let all_bytes = (value as u64).to_be_bytes();
     let first_nonzero = all_bytes.iter().position(|&b| b != 0).unwrap_or(7);
     let mut content: Vec<u8> = all_bytes[first_nonzero..].to_vec();
 
@@ -61,13 +61,19 @@ pub fn encode_utf8_string(s: &str) -> Vec<u8> {
     encode_tlv(TAG_UTF8_STRING, s.as_bytes())
 }
 
-/// Encode a DER SEQUENCE from pre-encoded elements.
-pub fn encode_sequence(elements: &[Vec<u8>]) -> Vec<u8> {
+/// Encode a DER SEQUENCE from pre-encoded element slices.
+pub fn encode_sequence(elements: &[&[u8]]) -> Vec<u8> {
     let mut content = Vec::new();
     for el in elements {
         content.extend_from_slice(el);
     }
     encode_tlv(TAG_SEQUENCE, &content)
+}
+
+/// Encode a DER SEQUENCE from pre-encoded Vec elements.
+pub fn encode_sequence_from_vecs(elements: &[Vec<u8>]) -> Vec<u8> {
+    let refs: Vec<&[u8]> = elements.iter().map(|v| v.as_slice()).collect();
+    encode_sequence(&refs)
 }
 
 /// Encode a context-specific EXPLICIT [tag_num] wrapping inner bytes.
@@ -86,9 +92,9 @@ pub struct DerReader {
 }
 
 impl DerReader {
-    pub fn new(buf: Vec<u8>) -> Self {
+    pub fn new(buf: &[u8]) -> Self {
         let end = buf.len();
-        Self { buf, pos: 0, end }
+        Self { buf: buf.to_vec(), pos: 0, end }
     }
 
     pub fn new_slice(buf: &[u8], offset: usize, length: usize) -> Self {
@@ -195,7 +201,7 @@ impl DerReader {
         Ok(Some(reader))
     }
 
-    pub fn read_integer(&mut self) -> Result<u64, String> {
+    pub fn read_integer(&mut self) -> Result<i64, String> {
         let (tag, value) = self.read_tlv()?;
         if tag != TAG_INTEGER {
             return Err(format!("DER: expected INTEGER (0x02), got 0x{tag:02x}"));
@@ -203,12 +209,10 @@ impl DerReader {
         if value.is_empty() {
             return Err("DER: empty INTEGER".into());
         }
-        let mut result: u64 = 0;
+        // Sign-extend from first byte
+        let mut result: i64 = if value[0] & 0x80 != 0 { -1 } else { 0 };
         for &b in &value {
-            result = result
-                .checked_shl(8)
-                .ok_or("DER: INTEGER too large for u64")?
-                | (b as u64);
+            result = (result << 8) | (b as i64);
         }
         Ok(result)
     }
@@ -252,5 +256,30 @@ impl DerReader {
             result.push(seq.read_octet_string()?);
         }
         Ok(result)
+    }
+
+    /// Read a SEQUENCE and return a sub-reader (alias for convenience).
+    pub fn read_sequence_inner(&mut self) -> Result<DerReader, String> {
+        self.read_sequence()
+    }
+
+    /// Read an INTEGER and return its value as i64.
+    pub fn read_integer_value(&mut self) -> Option<i64> {
+        let (tag, value) = self.read_tlv().ok()?;
+        if tag != TAG_INTEGER || value.is_empty() {
+            return None;
+        }
+        let mut result: i64 = if value[0] & 0x80 != 0 { -1 } else { 0 };
+        for &b in &value {
+            result = (result << 8) | (b as i64);
+        }
+        Some(result)
+    }
+}
+
+impl DerReader {
+    /// Convenience: read EXPLICIT [n] and return sub-reader, or None.
+    pub fn try_read_explicit(&mut self, tag_num: u8) -> Option<DerReader> {
+        self.read_explicit(tag_num).ok().flatten()
     }
 }
