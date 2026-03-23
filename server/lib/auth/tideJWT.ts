@@ -58,8 +58,7 @@ export async function verifyTideCloakToken(
       throw new Error("No token found");
     }
 
-    const issSlash = authServerUrl.endsWith("/") ? "" : "/";
-    const thisIssuer = `${authServerUrl}${issSlash}realms/${realm}`;
+    const thisIssuer = `${authServerUrl.replace(/\/+$/, "")}/realms/${realm}`;
 
     const { payload } = await jwtVerify(token, JWKS, {
       issuer: thisIssuer,

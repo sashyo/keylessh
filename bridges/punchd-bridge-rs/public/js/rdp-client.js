@@ -39,6 +39,7 @@
   var rdpCanvas = document.getElementById("rdp-canvas");
   var usernameInput = document.getElementById("rdp-username");
   var passwordInput = document.getElementById("rdp-password");
+  var autoConnectSpinner = document.getElementById("auto-connect-spinner");
 
   // ── State ─────────────────────────────────────────────────────
 
@@ -483,6 +484,9 @@
       }));
       // Install WebSocket shim now that the DataChannel is open
       installWebSocketShim();
+      // Show spinner while deciding auth flow
+      connectForm.classList.add("hidden");
+      autoConnectSpinner.classList.remove("hidden");
       // For EdDSA backends, auto-connect using username from JWT (no password needed)
       var backendAuth = config && config.backendAuth && config.backendAuth[backendName];
       if (backendAuth === "eddsa" && sessionToken) {
@@ -494,10 +498,12 @@
           startRdpSession(jwtUsername, "");
         } catch (e) {
           console.warn("[RDP] Failed to extract username from JWT, showing form:", e);
+          autoConnectSpinner.classList.add("hidden");
           showConnectForm();
         }
       } else {
         setStatus("connecting", "DataChannel open, ready to connect...");
+        autoConnectSpinner.classList.add("hidden");
         showConnectForm();
       }
     };
@@ -606,6 +612,7 @@
 
   function hideConnectForm() {
     connectForm.classList.add("hidden");
+    autoConnectSpinner.classList.add("hidden");
     rdpCanvas.classList.remove("hidden");
   }
 
