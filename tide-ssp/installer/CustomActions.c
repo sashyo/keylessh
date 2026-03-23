@@ -178,6 +178,13 @@ UINT __stdcall UnregisterSubAuth(MSIHANDLE hInstall)
         RegDeleteValueW(hKey, L"Auth0");
         RegCloseKey(hKey);
     }
+
+    /* Restore DisableRestrictedAdmin to default (disabled) */
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, LSA_KEY, 0,
+                      KEY_WRITE | KEY_WOW64_64KEY, &hKey) == ERROR_SUCCESS) {
+        RegDeleteValueW(hKey, L"DisableRestrictedAdmin");
+        RegCloseKey(hKey);
+    }
     return ERROR_SUCCESS;
 }
 

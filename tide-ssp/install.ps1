@@ -47,6 +47,10 @@ if ($Uninstall) {
         Remove-ItemProperty $msv1_0Path -Name "Auth0" -ErrorAction SilentlyContinue
     }
 
+    # Restore DisableRestrictedAdmin to default
+    Remove-ItemProperty $regPath -Name "DisableRestrictedAdmin" -ErrorAction SilentlyContinue
+    Write-Host "Removed DisableRestrictedAdmin"
+
     # Remove tidecloak.json from System32
     $configDest = Join-Path $system32 "tidecloak.json"
     if (Test-Path $configDest) {
