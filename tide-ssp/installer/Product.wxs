@@ -144,8 +144,7 @@
 
         <!-- Option 2: Paste JSON (multiline edit) -->
         <Control Id="JsonInput" Type="Edit" X="20" Y="84" Width="332" Height="100"
-                 Property="TIDE_CONFIG_JSON"
-                 MultiLine="yes" />
+                 Property="TIDE_CONFIG_JSON" />
 
         <Control Id="Hint" Type="Text" X="20" Y="190" Width="330" Height="36"
                  Text="{\SmallFont}Export from TideCloak Admin Console: Clients > your client > Installation tab. Provide either a file path or paste the JSON content directly." />

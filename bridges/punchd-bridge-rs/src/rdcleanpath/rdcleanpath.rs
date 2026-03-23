@@ -7,7 +7,7 @@ pub const RDCLEANPATH_ERROR_GENERAL: i64 = 1;
 pub const RDCLEANPATH_ERROR_NEGOTIATION: i64 = 2;
 
 pub struct RDCleanPathRequest {
-    pub version: u64,
+    pub version: i64,
     pub destination: String,
     pub proxy_auth: String,
     pub preconnection_blob: Option<String>,
