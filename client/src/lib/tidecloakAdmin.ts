@@ -20,7 +20,7 @@ async function getConfig() {
 
 async function getTcUrl() {
   const cfg = await getConfig();
-  return `${cfg["auth-server-url"]}/admin/realms/${cfg.realm}`;
+  return `${cfg["auth-server-url"].replace(/\/+$/, "")}/admin/realms/${cfg.realm}`;
 }
 
 async function getClientId() {

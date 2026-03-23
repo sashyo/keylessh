@@ -181,6 +181,17 @@ export async function registerRoutes(
       : path.resolve(_currentDir, "..", "client", "public", "tide_dpop_auth.html");
     res.sendFile(filePath);
   });
+    
+  // Health Check (unauthenticated, for load balancers and monitoring)
+  // ============================================
+
+  app.get("/health", (_req, res) => {
+    res.json({ status: "ok", timestamp: new Date().toISOString() });
+  });
+
+  app.get("/api/health", (_req, res) => {
+    res.json({ status: "ok", timestamp: new Date().toISOString() });
+  });
 
   // ============================================
   // Stripe Webhook (unauthenticated, must come before auth middleware)

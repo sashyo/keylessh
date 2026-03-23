@@ -49,6 +49,17 @@
     #connect-form button:hover { background: #3db890; }
     #connect-form button:disabled { background: #555; cursor: not-allowed; }
     .hidden { display: none !important; }
+    #auto-connect-spinner {
+      position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+      display: flex; flex-direction: column; align-items: center; gap: 16px;
+    }
+    #auto-connect-spinner .spinner {
+      width: 40px; height: 40px; border: 3px solid #333;
+      border-top-color: #4ecca3; border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #auto-connect-spinner .label { font-size: 14px; color: #aaa; }
   </style>
 </head>
 <body>
@@ -58,7 +69,7 @@
     <button id="disconnect-btn" class="hidden">Disconnect</button>
   </div>
 
-  <div id="connect-form">
+  <div id="connect-form" class="hidden">
     <h2>Remote Desktop</h2>
     <div class="field">
       <label>Username</label>
@@ -70,6 +81,11 @@
     </div>
     <button id="connect-btn">Connect</button>
     <p id="form-error" style="margin-top: 12px; color: #e74c3c; font-size: 13px;"></p>
+  </div>
+
+  <div id="auto-connect-spinner">
+    <div class="spinner"></div>
+    <div class="label">Connecting...</div>
   </div>
 
   <canvas id="rdp-canvas" class="hidden" tabindex="0"></canvas>
