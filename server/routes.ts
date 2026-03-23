@@ -171,6 +171,8 @@ export async function registerRoutes(
     res.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'unsafe-inline'");
     res.setHeader("Allow-CSP-From", "*");
     res.sendFile(path.resolve(process.cwd(), "public", "tide_dpop_auth.html"));
+  });
+  
   // Health Check (unauthenticated, for load balancers and monitoring)
   // ============================================
 
