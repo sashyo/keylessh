@@ -1,4 +1,5 @@
-import { Policy, PolicySignRequest, TideMemory } from "heimdall-tide";
+import {  PolicySignRequest } from "heimdall-tide";
+import { Models, Tools } from "@tideorg/js"
 import { ApprovalType, ExecutionType } from "asgard-tide";
 import { api } from "./api";
 
@@ -378,7 +379,7 @@ export async function createSshPolicyRequest(
   policyParams.set("execution_type", config.executionType);
 
   // Version 2 includes approvalType and executionType in the serialized format
-  const policy = new Policy({
+  const policy = new Models.Policy({
     version: "2",
     modelId: config.modelId,
     contractId: contractId,
@@ -396,11 +397,11 @@ export async function createSshPolicyRequest(
   const contractTypeBytes = new TextEncoder().encode("forseti");
   const sourceCodeBytes = new TextEncoder().encode(SSH_FORSETI_CONTRACT);
   const entryTypeBytes = new TextEncoder().encode("Contract");
-  const innerPayload = TideMemory.CreateFromArray([sourceCodeBytes, entryTypeBytes]);
-  const forsetiData = TideMemory.CreateFromArray([new Uint8Array(0), innerPayload]);
-  const contractTransport = TideMemory.CreateFromArray([contractTypeBytes, forsetiData]);
+  const innerPayload = Tools.TideMemory.CreateFromArray([sourceCodeBytes, entryTypeBytes]);
+  const forsetiData = Tools.TideMemory.CreateFromArray([new Uint8Array(0), innerPayload]);
+  const contractTransport = Tools.TideMemory.CreateFromArray([contractTypeBytes, forsetiData]);
 
-  const draftWithContract = TideMemory.CreateFromArray([policyBytes, contractTransport]);
+  const draftWithContract = Tools.TideMemory.CreateFromArray([policyBytes, contractTransport]);
   policyRequest.draft = draftWithContract;
   policyRequest.setCustomExpiry(604800);
 
@@ -440,7 +441,7 @@ export async function createSshPolicyRequestWithCode(
   policyParams.set("execution_type", config.executionType);
 
   // Version 2 includes approvalType and executionType in the serialized format
-  const policy = new Policy({
+  const policy = new Models.Policy({
     version: "2",
     modelId: config.modelId,
     contractId: contractId,
@@ -458,11 +459,11 @@ export async function createSshPolicyRequestWithCode(
   const contractTypeBytes = new TextEncoder().encode("forseti");
   const sourceCodeBytes = new TextEncoder().encode(config.contractCode);
   const entryTypeBytes = new TextEncoder().encode(entryType);
-  const innerPayload = TideMemory.CreateFromArray([sourceCodeBytes, entryTypeBytes]);
-  const forsetiData = TideMemory.CreateFromArray([new Uint8Array(0), innerPayload]);
-  const contractTransport = TideMemory.CreateFromArray([contractTypeBytes, forsetiData]);
+  const innerPayload = Tools.TideMemory.CreateFromArray([sourceCodeBytes, entryTypeBytes]);
+  const forsetiData = Tools.TideMemory.CreateFromArray([new Uint8Array(0), innerPayload]);
+  const contractTransport = Tools.TideMemory.CreateFromArray([contractTypeBytes, forsetiData]);
 
-  const draftWithContract = TideMemory.CreateFromArray([policyBytes, contractTransport]);
+  const draftWithContract = Tools.TideMemory.CreateFromArray([policyBytes, contractTransport]);
   policyRequest.draft = draftWithContract;
   policyRequest.setCustomExpiry(604800);
 
