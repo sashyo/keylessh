@@ -38,6 +38,7 @@ jobs:
           # Copy package files for production dependencies
           cp package.json deploy/
           cp package-lock.json deploy/
+          cp -r script deploy/
 
           # Install production dependencies only
           cd deploy
