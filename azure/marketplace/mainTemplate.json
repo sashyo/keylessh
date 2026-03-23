@@ -1,0 +1,417 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.40.2.10011",
+      "templateHash": "5945193720462806245"
+    }
+  },
+  "parameters": {
+    "namePrefix": {
+      "type": "string",
+      "defaultValue": "keylessh",
+      "metadata": {
+        "description": "Name prefix for all resources"
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]",
+      "metadata": {
+        "description": "Azure region for deployment"
+      }
+    },
+    "keylesshImage": {
+      "type": "string",
+      "defaultValue": "tideorg/keylessh:latest",
+      "metadata": {
+        "description": "KeyleSSH container image"
+      }
+    },
+    "bridgeImage": {
+      "type": "string",
+      "defaultValue": "tideorg/keylessh-bridge:latest",
+      "metadata": {
+        "description": "TCP Bridge container image"
+      }
+    },
+    "tidecloakConfigB64": {
+      "type": "securestring",
+      "metadata": {
+        "description": "TideCloak configuration JSON (base64 encoded)"
+      }
+    },
+    "stripeSecretKey": {
+      "type": "securestring",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Stripe Secret Key (optional - for SaaS billing)"
+      }
+    },
+    "stripeWebhookSecret": {
+      "type": "securestring",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Stripe Webhook Secret (optional)"
+      }
+    },
+    "environmentSku": {
+      "type": "string",
+      "defaultValue": "Consumption",
+      "allowedValues": [
+        "Consumption",
+        "Premium"
+      ],
+      "metadata": {
+        "description": "Container Apps Environment SKU"
+      }
+    },
+    "keylesshCpu": {
+      "type": "string",
+      "defaultValue": "0.5",
+      "metadata": {
+        "description": "KeyleSSH CPU allocation"
+      }
+    },
+    "keylesshMemory": {
+      "type": "string",
+      "defaultValue": "1Gi",
+      "metadata": {
+        "description": "KeyleSSH Memory allocation"
+      }
+    },
+    "bridgeCpu": {
+      "type": "string",
+      "defaultValue": "0.25",
+      "metadata": {
+        "description": "TCP Bridge CPU allocation"
+      }
+    },
+    "bridgeMemory": {
+      "type": "string",
+      "defaultValue": "0.5Gi",
+      "metadata": {
+        "description": "TCP Bridge Memory allocation"
+      }
+    },
+    "keylesshMinReplicas": {
+      "type": "int",
+      "defaultValue": 1,
+      "metadata": {
+        "description": "Minimum replicas for KeyleSSH"
+      }
+    },
+    "keylesshMaxReplicas": {
+      "type": "int",
+      "defaultValue": 3,
+      "metadata": {
+        "description": "Maximum replicas for KeyleSSH"
+      }
+    },
+    "bridgeMinReplicas": {
+      "type": "int",
+      "defaultValue": 0,
+      "metadata": {
+        "description": "Minimum replicas for TCP Bridge (0 = scale to zero)"
+      }
+    },
+    "bridgeMaxReplicas": {
+      "type": "int",
+      "defaultValue": 100,
+      "metadata": {
+        "description": "Maximum replicas for TCP Bridge"
+      }
+    }
+  },
+  "variables": {
+    "uniqueSuffix": "[uniqueString(resourceGroup().id)]",
+    "storageAccountName": "[toLower(format('{0}{1}', parameters('namePrefix'), variables('uniqueSuffix')))]",
+    "containerEnvName": "[format('{0}-env', parameters('namePrefix'))]",
+    "keylesshAppName": "[format('{0}-app', parameters('namePrefix'))]",
+    "bridgeAppName": "[format('{0}-bridge', parameters('namePrefix'))]",
+    "fileShareName": "keylessh-data",
+    "logAnalyticsName": "[format('{0}-logs', parameters('namePrefix'))]",
+    "baseSecrets": [
+      {
+        "name": "tidecloak-config",
+        "value": "[parameters('tidecloakConfigB64')]"
+      }
+    ],
+    "stripeSecrets": "[if(empty(parameters('stripeSecretKey')), createArray(), createArray(createObject('name', 'stripe-secret-key', 'value', parameters('stripeSecretKey')), createObject('name', 'stripe-webhook-secret', 'value', parameters('stripeWebhookSecret'))))]",
+    "allSecrets": "[concat(variables('baseSecrets'), variables('stripeSecrets'))]",
+    "stripeEnvVars": "[if(empty(parameters('stripeSecretKey')), createArray(), createArray(createObject('name', 'STRIPE_SECRET_KEY', 'secretRef', 'stripe-secret-key'), createObject('name', 'STRIPE_WEBHOOK_SECRET', 'secretRef', 'stripe-webhook-secret')))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces",
+      "apiVersion": "2025-02-01",
+      "name": "[variables('logAnalyticsName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "sku": {
+          "name": "PerGB2018"
+        },
+        "retentionInDays": 30
+      }
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts",
+      "apiVersion": "2025-01-01",
+      "name": "[variables('storageAccountName')]",
+      "location": "[parameters('location')]",
+      "sku": {
+        "name": "Standard_LRS"
+      },
+      "kind": "StorageV2",
+      "properties": {
+        "accessTier": "Hot",
+        "supportsHttpsTrafficOnly": true,
+        "minimumTlsVersion": "TLS1_2"
+      }
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts/fileServices",
+      "apiVersion": "2025-01-01",
+      "name": "[format('{0}/{1}', variables('storageAccountName'), 'default')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Storage/storageAccounts', variables('storageAccountName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts/fileServices/shares",
+      "apiVersion": "2025-01-01",
+      "name": "[format('{0}/{1}/{2}', variables('storageAccountName'), 'default', variables('fileShareName'))]",
+      "properties": {
+        "shareQuota": 5
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Storage/storageAccounts/fileServices', variables('storageAccountName'), 'default')]"
+      ]
+    },
+    {
+      "type": "Microsoft.App/managedEnvironments",
+      "apiVersion": "2024-03-01",
+      "name": "[variables('containerEnvName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "appLogsConfiguration": {
+          "destination": "log-analytics",
+          "logAnalyticsConfiguration": {
+            "customerId": "[reference(resourceId('Microsoft.OperationalInsights/workspaces', variables('logAnalyticsName')), '2025-02-01').customerId]",
+            "sharedKey": "[listKeys(resourceId('Microsoft.OperationalInsights/workspaces', variables('logAnalyticsName')), '2025-02-01').primarySharedKey]"
+          }
+        },
+        "workloadProfiles": "[if(equals(parameters('environmentSku'), 'Premium'), createArray(createObject('name', 'Consumption', 'workloadProfileType', 'Consumption')), createArray())]"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces', variables('logAnalyticsName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.App/managedEnvironments/storages",
+      "apiVersion": "2024-03-01",
+      "name": "[format('{0}/{1}', variables('containerEnvName'), 'keylessh-storage')]",
+      "properties": {
+        "azureFile": {
+          "accountName": "[variables('storageAccountName')]",
+          "accountKey": "[listKeys(resourceId('Microsoft.Storage/storageAccounts', variables('storageAccountName')), '2025-01-01').keys[0].value]",
+          "shareName": "[variables('fileShareName')]",
+          "accessMode": "ReadWrite"
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.App/managedEnvironments', variables('containerEnvName'))]",
+        "[resourceId('Microsoft.Storage/storageAccounts', variables('storageAccountName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.App/containerApps",
+      "apiVersion": "2024-03-01",
+      "name": "[variables('bridgeAppName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "managedEnvironmentId": "[resourceId('Microsoft.App/managedEnvironments', variables('containerEnvName'))]",
+        "configuration": {
+          "ingress": {
+            "external": true,
+            "targetPort": 8080,
+            "transport": "http",
+            "allowInsecure": false
+          },
+          "secrets": [
+            {
+              "name": "tidecloak-config",
+              "value": "[parameters('tidecloakConfigB64')]"
+            }
+          ]
+        },
+        "template": {
+          "containers": [
+            {
+              "name": "tcp-bridge",
+              "image": "[parameters('bridgeImage')]",
+              "resources": {
+                "cpu": "[json(parameters('bridgeCpu'))]",
+                "memory": "[parameters('bridgeMemory')]"
+              },
+              "env": [
+                {
+                  "name": "TIDECLOAK_CONFIG_B64",
+                  "secretRef": "tidecloak-config"
+                },
+                {
+                  "name": "PORT",
+                  "value": "8080"
+                }
+              ],
+              "probes": [
+                {
+                  "type": "Liveness",
+                  "httpGet": {
+                    "path": "/health",
+                    "port": 8080
+                  },
+                  "initialDelaySeconds": 5,
+                  "periodSeconds": 30
+                },
+                {
+                  "type": "Readiness",
+                  "httpGet": {
+                    "path": "/health",
+                    "port": 8080
+                  },
+                  "initialDelaySeconds": 3,
+                  "periodSeconds": 10
+                }
+              ]
+            }
+          ],
+          "scale": {
+            "minReplicas": "[parameters('bridgeMinReplicas')]",
+            "maxReplicas": "[parameters('bridgeMaxReplicas')]",
+            "rules": [
+              {
+                "name": "http-connections",
+                "http": {
+                  "metadata": {
+                    "concurrentRequests": "10"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.App/managedEnvironments', variables('containerEnvName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.App/containerApps",
+      "apiVersion": "2024-03-01",
+      "name": "[variables('keylesshAppName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "managedEnvironmentId": "[resourceId('Microsoft.App/managedEnvironments', variables('containerEnvName'))]",
+        "configuration": {
+          "ingress": {
+            "external": true,
+            "targetPort": 3000,
+            "transport": "http",
+            "allowInsecure": false
+          },
+          "secrets": "[variables('allSecrets')]"
+        },
+        "template": {
+          "containers": [
+            {
+              "name": "keylessh",
+              "image": "[parameters('keylesshImage')]",
+              "resources": {
+                "cpu": "[json(parameters('keylesshCpu'))]",
+                "memory": "[parameters('keylesshMemory')]"
+              },
+              "env": "[concat(createArray(createObject('name', 'NODE_ENV', 'value', 'production'), createObject('name', 'PORT', 'value', '3000'), createObject('name', 'DATABASE_URL', 'value', '/app/data/keylessh.db'), createObject('name', 'BRIDGE_URL', 'value', format('wss://{0}', reference(resourceId('Microsoft.App/containerApps', variables('bridgeAppName')), '2024-03-01').configuration.ingress.fqdn)), createObject('name', 'TIDECLOAK_CONFIG_B64', 'secretRef', 'tidecloak-config')), variables('stripeEnvVars'))]",
+              "volumeMounts": [
+                {
+                  "volumeName": "data-volume",
+                  "mountPath": "/app/data"
+                }
+              ],
+              "probes": [
+                {
+                  "type": "Liveness",
+                  "httpGet": {
+                    "path": "/health",
+                    "port": 3000
+                  },
+                  "initialDelaySeconds": 10,
+                  "periodSeconds": 30
+                },
+                {
+                  "type": "Readiness",
+                  "httpGet": {
+                    "path": "/health",
+                    "port": 3000
+                  },
+                  "initialDelaySeconds": 5,
+                  "periodSeconds": 10
+                }
+              ]
+            }
+          ],
+          "volumes": [
+            {
+              "name": "data-volume",
+              "storageName": "keylessh-storage",
+              "storageType": "AzureFile"
+            }
+          ],
+          "scale": {
+            "minReplicas": "[parameters('keylesshMinReplicas')]",
+            "maxReplicas": "[parameters('keylesshMaxReplicas')]",
+            "rules": [
+              {
+                "name": "http-requests",
+                "http": {
+                  "metadata": {
+                    "concurrentRequests": "50"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.App/containerApps', variables('bridgeAppName'))]",
+        "[resourceId('Microsoft.App/managedEnvironments', variables('containerEnvName'))]",
+        "[resourceId('Microsoft.App/managedEnvironments/storages', variables('containerEnvName'), 'keylessh-storage')]"
+      ]
+    }
+  ],
+  "outputs": {
+    "keylesshFqdn": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.App/containerApps', variables('keylesshAppName')), '2024-03-01').configuration.ingress.fqdn]"
+    },
+    "bridgeFqdn": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.App/containerApps', variables('bridgeAppName')), '2024-03-01').configuration.ingress.fqdn]"
+    },
+    "storageAccountName": {
+      "type": "string",
+      "value": "[variables('storageAccountName')]"
+    },
+    "fileShareName": {
+      "type": "string",
+      "value": "[variables('fileShareName')]"
+    },
+    "resourceGroupName": {
+      "type": "string",
+      "value": "[resourceGroup().name]"
+    }
+  }
+}
