@@ -170,7 +170,12 @@ export async function registerRoutes(
 
     res.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'unsafe-inline'");
     res.setHeader("Allow-CSP-From", "*");
-    res.sendFile(path.resolve(process.cwd(), "public", "tide_dpop_auth.html"));
+    // Production: __dirname=dist/, file at dist/public/tide_dpop_auth.html
+    // Dev: __dirname=server/, file at client/public/tide_dpop_auth.html
+    const filePath = process.env.NODE_ENV === "production"
+      ? path.resolve(__dirname, "public", "tide_dpop_auth.html")
+      : path.resolve(__dirname, "..", "client", "public", "tide_dpop_auth.html");
+    res.sendFile(filePath);
   });
 
   // ============================================
