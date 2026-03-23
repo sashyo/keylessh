@@ -14,10 +14,14 @@ import path from "path";
 
 // Use createRequire for heimdall-tide (CJS module with broken ESM exports)
 // In CJS bundle __filename is available; in ESM dev mode use import.meta.url
-const require = createRequire(
-  typeof __filename !== "undefined" ? __filename : import.meta.url
-);
+const _currentFile = typeof __filename !== "undefined" ? __filename : import.meta.url;
+const require = createRequire(_currentFile);
 const { PolicySignRequest } = require("heimdall-tide");
+
+// Resolve directory of this file (works in both CJS bundle and ESM dev)
+const _currentDir = typeof __dirname !== "undefined"
+  ? __dirname
+  : path.dirname(new URL(_currentFile).pathname);
 
 // Base64 conversion helpers for Tide request handling
 function base64ToBytes(base64: string): Uint8Array {
@@ -170,25 +174,12 @@ export async function registerRoutes(
 
     res.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'unsafe-inline'");
     res.setHeader("Allow-CSP-From", "*");
-    // Production: __dirname=dist/, file at dist/public/tide_dpop_auth.html
-    // Dev: __dirname=server/, file at client/public/tide_dpop_auth.html
+    // Prod: _currentDir=dist/, file at dist/public/tide_dpop_auth.html
+    // Dev: _currentDir=server/, file at client/public/tide_dpop_auth.html
     const filePath = process.env.NODE_ENV === "production"
-      ? path.resolve(__dirname, "public", "tide_dpop_auth.html")
-      : path.resolve(__dirname, "..", "client", "public", "tide_dpop_auth.html");
+      ? path.resolve(_currentDir, "public", "tide_dpop_auth.html")
+      : path.resolve(_currentDir, "..", "client", "public", "tide_dpop_auth.html");
     res.sendFile(filePath);
-
-    res.sendFile(path.resolve(process.cwd(), "public", "tide_dpop_auth.html"));
-  });
-  
-  // Health Check (unauthenticated, for load balancers and monitoring)
-  // ============================================
-
-  app.get("/health", (_req, res) => {
-    res.json({ status: "ok", timestamp: new Date().toISOString() });
-  });
-
-  app.get("/api/health", (_req, res) => {
-    res.json({ status: "ok", timestamp: new Date().toISOString() });
   });
 
   // ============================================
