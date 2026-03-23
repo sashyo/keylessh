@@ -1,0 +1,105 @@
+name: Build and Push Docker Images
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Image tag (default: latest)'
+        required: false
+        default: 'latest'
+        type: string
+  release:
+    types: [published]
+
+env:
+  KEYLESSH_IMAGE: tideorg/keylessh
+  BRIDGE_IMAGE: tideorg/keylessh-bridge
+
+jobs:
+  build-keylessh:
+    name: Build KeyleSSH
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.KEYLESSH_IMAGE }}
+          tags: |
+            type=raw,value=${{ inputs.tag || 'latest' }}
+            type=ref,event=tag
+            type=sha,prefix=
+
+      - name: Build and push KeyleSSH image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Output image info
+        run: |
+          echo "KeyleSSH image pushed!"
+          echo "Tags: ${{ steps.meta.outputs.tags }}"
+
+  build-bridge:
+    name: Build TCP Bridge
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.BRIDGE_IMAGE }}
+          tags: |
+            type=raw,value=${{ inputs.tag || 'latest' }}
+            type=ref,event=tag
+            type=sha,prefix=
+
+      - name: Build and push TCP Bridge image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./tcp-bridge
+          file: ./tcp-bridge/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Output image info
+        run: |
+          echo "TCP Bridge image pushed!"
+          echo "Tags: ${{ steps.meta.outputs.tags }}"

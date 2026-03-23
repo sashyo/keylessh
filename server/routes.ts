@@ -176,6 +176,19 @@ export async function registerRoutes(
       ? path.resolve(__dirname, "public", "tide_dpop_auth.html")
       : path.resolve(__dirname, "..", "client", "public", "tide_dpop_auth.html");
     res.sendFile(filePath);
+
+    res.sendFile(path.resolve(process.cwd(), "public", "tide_dpop_auth.html"));
+  });
+  
+  // Health Check (unauthenticated, for load balancers and monitoring)
+  // ============================================
+
+  app.get("/health", (_req, res) => {
+    res.json({ status: "ok", timestamp: new Date().toISOString() });
+  });
+
+  app.get("/api/health", (_req, res) => {
+    res.json({ status: "ok", timestamp: new Date().toISOString() });
   });
 
   // ============================================

@@ -1,0 +1,215 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/0.1.2-preview/CreateUIDefinition.MultiVm.json#",
+  "handler": "Microsoft.Azure.CreateUIDef",
+  "version": "0.1.2-preview",
+  "parameters": {
+    "config": {
+      "isWizard": true,
+      "basics": {
+        "description": "Deploy KeyleSSH - Passwordless SSH Access Management powered by Tide Protocol",
+        "subscription": {
+          "constraints": {
+            "validations": [
+              {
+                "permission": "Microsoft.App/containerApps/write",
+                "message": "Must have permission to create Container Apps"
+              }
+            ]
+          }
+        },
+        "resourceGroup": {
+          "allowExisting": true
+        },
+        "location": {
+          "visible": true,
+          "resourceTypes": ["Microsoft.App/containerApps"]
+        }
+      }
+    },
+    "basics": [
+      {
+        "name": "namePrefix",
+        "type": "Microsoft.Common.TextBox",
+        "label": "Resource Name Prefix",
+        "defaultValue": "keylessh",
+        "toolTip": "Prefix for all resource names",
+        "constraints": {
+          "required": true,
+          "regex": "^[a-z0-9]{3,15}$",
+          "validationMessage": "Must be 3-15 lowercase alphanumeric characters"
+        }
+      }
+    ],
+    "steps": [
+      {
+        "name": "authConfig",
+        "label": "Authentication",
+        "elements": [
+          {
+            "name": "authInfo",
+            "type": "Microsoft.Common.InfoBox",
+            "visible": true,
+            "options": {
+              "icon": "Info",
+              "text": "KeyleSSH uses TideCloak for authentication. You need a TideCloak realm configured with the KeyleSSH client."
+            }
+          },
+          {
+            "name": "tidecloakConfig",
+            "type": "Microsoft.Common.TextBox",
+            "label": "TideCloak Configuration (Base64)",
+            "toolTip": "Base64-encoded tidecloak.json configuration file",
+            "multiLine": true,
+            "constraints": {
+              "required": true,
+              "regex": "^[A-Za-z0-9+/=]{10,10000}$",
+              "validationMessage": "Must be a valid Base64 encoded string (10-10000 characters)"
+            }
+          }
+        ]
+      },
+      {
+        "name": "containerConfig",
+        "label": "Container Settings",
+        "elements": [
+          {
+            "name": "keylesshSection",
+            "type": "Microsoft.Common.Section",
+            "label": "KeyleSSH App",
+            "elements": [
+              {
+                "name": "keylesshImage",
+                "type": "Microsoft.Common.TextBox",
+                "label": "Container Image",
+                "defaultValue": "tideorg/keylessh:latest",
+                "toolTip": "Docker image for KeyleSSH",
+                "constraints": {
+                  "required": true,
+                  "regex": "^[a-z0-9][a-z0-9._/-]{1,200}:[a-zA-Z0-9._-]{1,100}$",
+                  "validationMessage": "Must be a valid container image (e.g., registry/image:tag)"
+                }
+              },
+              {
+                "name": "keylesshCpu",
+                "type": "Microsoft.Common.DropDown",
+                "label": "CPU",
+                "defaultValue": "0.5",
+                "toolTip": "CPU allocation for KeyleSSH",
+                "constraints": {
+                  "allowedValues": [
+                    { "label": "0.25 cores", "value": "0.25" },
+                    { "label": "0.5 cores", "value": "0.5" },
+                    { "label": "1 core", "value": "1" },
+                    { "label": "2 cores", "value": "2" }
+                  ]
+                }
+              },
+              {
+                "name": "keylesshMemory",
+                "type": "Microsoft.Common.DropDown",
+                "label": "Memory",
+                "defaultValue": "1Gi",
+                "toolTip": "Memory allocation for KeyleSSH",
+                "constraints": {
+                  "allowedValues": [
+                    { "label": "0.5 GB", "value": "0.5Gi" },
+                    { "label": "1 GB", "value": "1Gi" },
+                    { "label": "2 GB", "value": "2Gi" },
+                    { "label": "4 GB", "value": "4Gi" }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "bridgeSection",
+            "type": "Microsoft.Common.Section",
+            "label": "TCP Bridge",
+            "elements": [
+              {
+                "name": "bridgeImage",
+                "type": "Microsoft.Common.TextBox",
+                "label": "Container Image",
+                "defaultValue": "tideorg/keylessh-bridge:latest",
+                "toolTip": "Docker image for TCP Bridge",
+                "constraints": {
+                  "required": true,
+                  "regex": "^[a-z0-9][a-z0-9._/-]{1,200}:[a-zA-Z0-9._-]{1,100}$",
+                  "validationMessage": "Must be a valid container image (e.g., registry/image:tag)"
+                }
+              },
+              {
+                "name": "bridgeMinReplicas",
+                "type": "Microsoft.Common.Slider",
+                "label": "Minimum Replicas",
+                "defaultValue": 0,
+                "toolTip": "Minimum number of bridge instances (0 = scale to zero)",
+                "min": 0,
+                "max": 10
+              },
+              {
+                "name": "bridgeMaxReplicas",
+                "type": "Microsoft.Common.Slider",
+                "label": "Maximum Replicas",
+                "defaultValue": 100,
+                "toolTip": "Maximum number of bridge instances",
+                "min": 1,
+                "max": 300
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "billingConfig",
+        "label": "Billing (Optional)",
+        "elements": [
+          {
+            "name": "billingInfo",
+            "type": "Microsoft.Common.InfoBox",
+            "visible": true,
+            "options": {
+              "icon": "Info",
+              "text": "Optional: Configure Stripe for SaaS billing. Leave empty for self-hosted mode."
+            }
+          },
+          {
+            "name": "stripeSecretKey",
+            "type": "Microsoft.Common.PasswordBox",
+            "label": {
+              "password": "Stripe Secret Key"
+            },
+            "toolTip": "Stripe API secret key (starts with sk_)",
+            "constraints": {
+              "required": false
+            }
+          },
+          {
+            "name": "stripeWebhookSecret",
+            "type": "Microsoft.Common.PasswordBox",
+            "label": {
+              "password": "Stripe Webhook Secret"
+            },
+            "toolTip": "Stripe webhook signing secret (starts with whsec_)",
+            "constraints": {
+              "required": false
+            }
+          }
+        ]
+      }
+    ],
+    "outputs": {
+      "namePrefix": "[basics('namePrefix')]",
+      "location": "[location()]",
+      "tidecloakConfigB64": "[steps('authConfig').tidecloakConfig]",
+      "keylesshImage": "[steps('containerConfig').keylesshSection.keylesshImage]",
+      "keylesshCpu": "[steps('containerConfig').keylesshSection.keylesshCpu]",
+      "keylesshMemory": "[steps('containerConfig').keylesshSection.keylesshMemory]",
+      "bridgeImage": "[steps('containerConfig').bridgeSection.bridgeImage]",
+      "bridgeMinReplicas": "[steps('containerConfig').bridgeSection.bridgeMinReplicas]",
+      "bridgeMaxReplicas": "[steps('containerConfig').bridgeSection.bridgeMaxReplicas]",
+      "stripeSecretKey": "[steps('billingConfig').stripeSecretKey]",
+      "stripeWebhookSecret": "[steps('billingConfig').stripeWebhookSecret]"
+    }
+  }
+}
