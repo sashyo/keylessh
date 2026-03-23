@@ -28,6 +28,7 @@ echo === Step 2: Build MSI ===
 if not exist "%OUTDIR%" mkdir "%OUTDIR%"
 
 wix build "%ROOT%\installer\Product.wxs" ^
+    -arch x64 ^
     -bindpath BinDir="%BUILD%\Release" ^
     -bindpath InstallerDir="%ROOT%\installer" ^
     -o "%OUTDIR%\TideSSP.msi"
