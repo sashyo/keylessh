@@ -1,5 +1,5 @@
 import { IAMService } from "@tidecloak/js";
-import { TideMemory, BaseTideRequest } from "heimdall-tide";
+import { Tools, Models } from "@tideorg/js";
 import type { SSHSigner, SSHSignatureRequest } from "@/lib/sshClient";
 import { api } from "@/lib/api";
 import { BasicCustomRequest } from "asgard-tide";
@@ -114,7 +114,7 @@ export function createTideSshSigner(): SSHSigner {
       version,                 // Version: BasicCustom<1>
       "Policy:1",              // AuthFlow: Policy authorization with implicit flow (no popup)
       draft,                   // Draft: what you want to sign
-      new TideMemory()         // DynamicData: empty (not needed for basic)
+      new Tools.TideMemory()         // DynamicData: empty (not needed for basic)
     );
 
     // Add doken to Authorizer field (Policy:1 implicit flow reads from here)
@@ -124,7 +124,7 @@ export function createTideSshSigner(): SSHSigner {
     }
 
     const dokenBytes = new TextEncoder().encode(doken);
-    const dokenMemory = TideMemory.CreateFromArray([dokenBytes]);
+    const dokenMemory = Tools.TideMemory.CreateFromArray([dokenBytes]);
     tideRequest.addAuthorizer(dokenMemory);
     console.log(`[TideSsh] Added doken to authorizer`);
 
@@ -192,11 +192,11 @@ export function createDynamicTideSshSigner(): SSHSigner {
       serverId: req.serverId,
     }));
 
-    const draft = TideMemory.CreateFromArray([metadata]);
-    const dynamicData = TideMemory.CreateFromArray([req.data]);
+    const draft = Tools.TideMemory.CreateFromArray([metadata]);
+    const dynamicData = Tools.TideMemory.CreateFromArray([req.data]);
 
     // Use Policy:1 auth flow with contract validation
-    const tideRequest = new BaseTideRequest(
+    const tideRequest = new Models.BaseTideRequest(
       "DynamicCustom<SSH>",    // Name: DynamicCustom<SSH>
       "DynamicCustom<1>",      // Version: DynamicCustom<1>
       "Policy:1",              // AuthFlow: Policy authorization with contract validation
@@ -208,7 +208,7 @@ export function createDynamicTideSshSigner(): SSHSigner {
     const doken = tc.doken;
     if (doken) {
       const dokenBytes = new TextEncoder().encode(doken);
-      const dokenMemory = TideMemory.CreateFromArray([dokenBytes]);
+      const dokenMemory = Tools.TideMemory.CreateFromArray([dokenBytes]);
       tideRequest.addAuthorizer(dokenMemory);
 
       // Extract signature from doken JWT (third part)
@@ -216,7 +216,7 @@ export function createDynamicTideSshSigner(): SSHSigner {
       if (parts.length >= 3) {
         const signatureB64 = parts[2];
         const signatureBytes = base64ToBytes(signatureB64.replace(/-/g, '+').replace(/_/g, '/'));
-        const signatureMemory = TideMemory.CreateFromArray([signatureBytes]);
+        const signatureMemory = Tools.TideMemory.CreateFromArray([signatureBytes]);
         tideRequest.addAuthorization(signatureMemory);
       }
     }

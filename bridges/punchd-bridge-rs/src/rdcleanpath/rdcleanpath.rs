@@ -2,12 +2,12 @@
 
 use super::der_codec::*;
 
-pub const RDCLEANPATH_VERSION: u64 = 3390;
-pub const RDCLEANPATH_ERROR_GENERAL: u64 = 1;
-pub const RDCLEANPATH_ERROR_NEGOTIATION: u64 = 2;
+pub const RDCLEANPATH_VERSION: i64 = 3390;
+pub const RDCLEANPATH_ERROR_GENERAL: i64 = 1;
+pub const RDCLEANPATH_ERROR_NEGOTIATION: i64 = 2;
 
 pub struct RDCleanPathRequest {
-    pub version: u64,
+    pub version: i64,
     pub destination: String,
     pub proxy_auth: String,
     pub preconnection_blob: Option<String>,
@@ -21,10 +21,10 @@ pub struct RDCleanPathResponse {
 }
 
 pub struct RDCleanPathError {
-    pub error_code: u64,
-    pub http_status_code: Option<u64>,
-    pub wsa_last_error: Option<u64>,
-    pub tls_alert_code: Option<u64>,
+    pub error_code: i64,
+    pub http_status_code: Option<i64>,
+    pub wsa_last_error: Option<i64>,
+    pub tls_alert_code: Option<i64>,
 }
 
 /// Parse an RDCleanPath Request PDU from raw DER bytes.
@@ -38,7 +38,7 @@ pub struct RDCleanPathError {
 ///   [5] preconnectionBlob  UTF8String  (optional)
 ///   [6] x224ConnectionPdu  OCTET STRING
 pub fn parse_request(data: &[u8]) -> Result<RDCleanPathRequest, String> {
-    let mut outer = DerReader::new(data.to_vec());
+    let mut outer = DerReader::new(data);
     let mut seq = outer.read_sequence()?;
 
     // [0] version
@@ -114,12 +114,12 @@ pub fn build_response(resp: &RDCleanPathResponse) -> Vec<u8> {
         .iter()
         .map(|c| encode_octet_string(c))
         .collect();
-    let cert_seq = encode_sequence(&cert_elements);
+    let cert_seq = encode_sequence_from_vecs(&cert_elements);
     let cert_el = encode_explicit(7, &cert_seq);
 
     let addr_el = encode_explicit(9, &encode_utf8_string(&resp.server_addr));
 
-    encode_sequence(&[version_el, x224_el, cert_el, addr_el])
+    encode_sequence(&[&version_el, &x224_el, &cert_el, &addr_el])
 }
 
 /// Build an RDCleanPath Error PDU.
@@ -147,8 +147,8 @@ pub fn build_error(err: &RDCleanPathError) -> Vec<u8> {
         error_fields.push(encode_explicit(3, &encode_integer(tls_alert)));
     }
 
-    let error_seq = encode_sequence(&error_fields);
+    let error_seq = encode_sequence_from_vecs(&error_fields);
     let error_el = encode_explicit(1, &error_seq);
 
-    encode_sequence(&[version_el, error_el])
+    encode_sequence(&[&version_el, &error_el])
 }

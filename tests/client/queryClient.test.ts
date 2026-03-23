@@ -17,6 +17,9 @@ import { apiRequest, getQueryFn, queryClient } from "@/lib/queryClient";
 const mockFetch = vi.fn();
 global.fetch = mockFetch;
 
+// toAbsoluteUrl() prepends window.location.origin to relative paths
+const ORIGIN = "http://localhost:3000";
+
 // Mock localStorage for token storage - verifies correct key is used
 const TOKEN_KEY = "access_token";
 let storedToken: string | null = null;
@@ -50,7 +53,7 @@ describe("apiRequest", () => {
 
     const result = await apiRequest("GET", "/api/test");
 
-    expect(mockFetch).toHaveBeenCalledWith("/api/test", {
+    expect(mockFetch).toHaveBeenCalledWith(`${ORIGIN}/api/test`, {
       method: "GET",
       headers: {},
       body: undefined,
@@ -69,7 +72,7 @@ describe("apiRequest", () => {
     const data = { name: "test" };
     const result = await apiRequest("POST", "/api/test", data);
 
-    expect(mockFetch).toHaveBeenCalledWith("/api/test", {
+    expect(mockFetch).toHaveBeenCalledWith(`${ORIGIN}/api/test`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(data),
@@ -90,7 +93,7 @@ describe("apiRequest", () => {
 
     // Verify getItem was called with the correct key
     expect(localStorageMock.getItem).toHaveBeenCalledWith(TOKEN_KEY);
-    expect(mockFetch).toHaveBeenCalledWith("/api/test", {
+    expect(mockFetch).toHaveBeenCalledWith(`${ORIGIN}/api/test`, {
       method: "GET",
       headers: { Authorization: "Bearer test-token" },
       body: undefined,
@@ -131,7 +134,7 @@ describe("apiRequest", () => {
 
     await apiRequest("PUT", "/api/test", { id: 1, value: "new" });
 
-    expect(mockFetch).toHaveBeenCalledWith("/api/test", {
+    expect(mockFetch).toHaveBeenCalledWith(`${ORIGIN}/api/test`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id: 1, value: "new" }),
@@ -148,7 +151,7 @@ describe("apiRequest", () => {
 
     await apiRequest("DELETE", "/api/test/1");
 
-    expect(mockFetch).toHaveBeenCalledWith("/api/test/1", {
+    expect(mockFetch).toHaveBeenCalledWith(`${ORIGIN}/api/test/1`, {
       method: "DELETE",
       headers: {},
       body: undefined,
@@ -207,7 +210,7 @@ describe("getQueryFn", () => {
 
       await queryFn({ queryKey: ["/api", "users", "123"] } as any);
 
-      expect(mockFetch).toHaveBeenCalledWith("/api/users/123", expect.any(Object));
+      expect(mockFetch).toHaveBeenCalledWith(`${ORIGIN}/api/users/123`, expect.any(Object));
     });
   });
 
@@ -268,7 +271,7 @@ describe("getQueryFn", () => {
 
     // Verify getItem was called with the correct key
     expect(localStorageMock.getItem).toHaveBeenCalledWith(TOKEN_KEY);
-    expect(mockFetch).toHaveBeenCalledWith("/api/test", {
+    expect(mockFetch).toHaveBeenCalledWith(`${ORIGIN}/api/test`, {
       credentials: "include",
       headers: { Authorization: "Bearer my-token" },
     });

@@ -44,6 +44,7 @@ import {
 } from "@/components/ui/table";
 import { useToast } from "@/hooks/use-toast";
 import { IAMService } from "@tidecloak/js";
+import { appFetch } from "@/lib/appFetch";
 import { queryClient } from "@/lib/queryClient";
 import { api, type PolicyTemplate, type TemplateParameter, type GatewayEndpoint } from "@/lib/api";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
@@ -359,7 +360,7 @@ export default function AdminRoles() {
         const initializedRequest = await initializeTideRequest(policyRequest);
 
         // Submit to server for pending approval storage
-        const response = await IAMService.secureFetch(`${window.location.origin}/api/admin/ssh-policies/pending`, {
+        const response = await appFetch(`${window.location.origin}/api/admin/ssh-policies/pending`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -460,7 +461,7 @@ export default function AdminRoles() {
         const initializedRequest = await initializeTideRequest(policyRequest);
 
         // Submit to server for pending approval storage
-        const response = await IAMService.secureFetch(`${window.location.origin}/api/admin/ssh-policies/pending`, {
+        const response = await appFetch(`${window.location.origin}/api/admin/ssh-policies/pending`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",

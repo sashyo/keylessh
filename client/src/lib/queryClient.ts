@@ -1,5 +1,5 @@
 import { QueryClient, QueryFunction } from "@tanstack/react-query";
-import { IAMService } from "@tidecloak/js";
+import { appFetch } from "./appFetch";
 
 function toAbsoluteUrl(path: string): string {
   if (path.startsWith("http://") || path.startsWith("https://")) return path;
@@ -24,7 +24,7 @@ export async function apiRequest<T = unknown>(
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
   };
 
-  const res = await IAMService.secureFetch(toAbsoluteUrl(url), {
+  const res = await appFetch(toAbsoluteUrl(url), {
     method,
     headers,
     body: data ? JSON.stringify(data) : undefined,
@@ -44,7 +44,7 @@ export const getQueryFn: <T>(options: {
     const token = localStorage.getItem("access_token");
     const headers: HeadersInit = token ? { Authorization: `Bearer ${token}` } : {};
 
-    const res = await IAMService.secureFetch(toAbsoluteUrl(queryKey.join("/") as string), {
+    const res = await appFetch(toAbsoluteUrl(queryKey.join("/") as string), {
       credentials: "include",
       headers,
     });

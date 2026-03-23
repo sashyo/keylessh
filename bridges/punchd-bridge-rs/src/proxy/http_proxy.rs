@@ -1602,6 +1602,19 @@ async fn handle_webrtc_config(
         "targetGatewayId": state.config.gateway_id,
     });
 
+    // Include backendAuth map for eddsa backends (so RDP client auto-connects)
+    {
+        let mut auth_map = serde_json::Map::new();
+        for b in &state.config.backends {
+            if b.auth == crate::config::BackendAuth::EdDSA {
+                auth_map.insert(b.name.clone(), serde_json::json!("eddsa"));
+            }
+        }
+        if !auth_map.is_empty() {
+            config["backendAuth"] = serde_json::Value::Object(auth_map);
+        }
+    }
+
     // TURN credentials only for authenticated users
     if let (Some(ref turn_server), turn_secret) = (
         &state.config.turn_server,

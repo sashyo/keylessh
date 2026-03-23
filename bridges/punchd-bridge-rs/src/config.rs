@@ -53,6 +53,12 @@ struct GatewayToml {
 
 // ── Public types ────────────────────────────────────────────────
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum BackendAuth {
+    Password,
+    EdDSA,
+}
+
 #[derive(Clone, Debug)]
 pub struct BackendEntry {
     pub name: String,
@@ -60,6 +66,7 @@ pub struct BackendEntry {
     pub protocol: String,
     pub no_auth: bool,
     pub strip_auth: bool,
+    pub auth: BackendAuth,
 }
 
 #[derive(Clone, Debug)]
@@ -341,8 +348,13 @@ fn parse_backends_str(input: &str) -> Vec<BackendEntry> {
             let eq = entry.find('=')?;
             let name = entry[..eq].trim().to_string();
             let mut raw_url = entry[eq + 1..].trim().to_string();
+            // Strip trailing semicolons
+            while raw_url.ends_with(';') {
+                raw_url.pop();
+            }
             let mut no_auth = false;
             let mut strip_auth = false;
+            let mut auth = BackendAuth::Password;
 
             loop {
                 let lower = raw_url.to_lowercase();
@@ -353,6 +365,10 @@ fn parse_backends_str(input: &str) -> Vec<BackendEntry> {
                 } else if lower.ends_with(";stripauth") {
                     strip_auth = true;
                     raw_url.truncate(raw_url.len() - ";stripauth".len());
+                    raw_url = raw_url.trim().to_string();
+                } else if lower.ends_with(";eddsa") {
+                    auth = BackendAuth::EdDSA;
+                    raw_url.truncate(raw_url.len() - ";eddsa".len());
                     raw_url = raw_url.trim().to_string();
                 } else {
                     break;
@@ -375,6 +391,7 @@ fn parse_backends_str(input: &str) -> Vec<BackendEntry> {
                 protocol: protocol.to_string(),
                 no_auth,
                 strip_auth,
+                auth,
             })
         })
         .collect()

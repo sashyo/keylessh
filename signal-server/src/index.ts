@@ -121,9 +121,7 @@ async function verifyToken(token: string): Promise<JWTPayload | null> {
   if (!JWKS || !tcConfig) return null;
 
   try {
-    const issuer = tcConfig["auth-server-url"].endsWith("/")
-      ? `${tcConfig["auth-server-url"]}realms/${tcConfig.realm}`
-      : `${tcConfig["auth-server-url"]}/realms/${tcConfig.realm}`;
+    const issuer = `${tcConfig["auth-server-url"].replace(/\/+$/, "")}/realms/${tcConfig.realm}`;
 
     // Try local JWKS first, fall back to remote if key not found
     let payload: JWTPayload;
@@ -433,7 +431,19 @@ const requestHandler = async (req: import("http").IncomingMessage, res: import("
     // Include selected gateway ID from HttpOnly cookie so JS can target it
     const selectedGatewayRaw = parseCookie(req.headers.cookie, "gateway_relay");
     if (selectedGatewayRaw) {
-      webrtcConfig.targetGatewayId = decodeURIComponent(selectedGatewayRaw);
+      const gatewayId = decodeURIComponent(selectedGatewayRaw);
+      webrtcConfig.targetGatewayId = gatewayId;
+      // Include backendAuth map for eddsa backends (so RDP client auto-connects)
+      const gateway = registry.getGateway(gatewayId);
+      if (gateway) {
+        const authMap: Record<string, string> = {};
+        for (const b of gateway.metadata.backends || []) {
+          if (b.auth === "eddsa") authMap[b.name] = "eddsa";
+        }
+        if (Object.keys(authMap).length > 0) {
+          webrtcConfig.backendAuth = authMap;
+        }
+      }
     }
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(webrtcConfig));

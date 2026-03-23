@@ -31,7 +31,9 @@ app.use(express.urlencoded({ extended: false }));
 // If you see a browser console error like:
 //   "Framing 'http://localhost:XXXX/' violates the Content Security Policy directive: frame-src ..."
 // Add the blocked origin (e.g. http://localhost:XXXX) to the frame-src list below.
-app.use((_req, res, next) => {
+app.use((req, res, next) => {
+  // DPoP auth page sets its own CSP — skip the global one
+  if (req.path.startsWith("/tide_dpop/")) return next();
   res.setHeader(
     "Content-Security-Policy",
     "frame-src 'self' https://*.tideprotocol.com https://*.dauth.me http://localhost:8080 http://localhost:1001"

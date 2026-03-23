@@ -1,0 +1,210 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+
+  <Package Name="TideSSP"
+           Manufacturer="Tide Foundation"
+           Version="1.0.0.0"
+           UpgradeCode="A3F1B7D2-4E6C-4A8F-9B2D-1C5E3F7A9D0B"
+           Scope="perMachine">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of TideSSP is already installed."
+                  Schedule="afterInstallInitialize" />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <Launch Condition="Privileged" Message="This installer requires administrator privileges." />
+
+    <!-- Properties -->
+    <Property Id="ARPNOREPAIR" Value="yes" Secure="yes" />
+    <Property Id="TIDE_CONFIG_FILE" Secure="yes" />
+    <Property Id="TIDE_CONFIG_JSON" Secure="yes" />
+
+    <!-- Directory layout -->
+    <StandardDirectory Id="System64Folder">
+      <Component Id="TideSSP_DLL" Guid="B1C2D3E4-F5A6-47B8-9C0D-1E2F3A4B5C6D">
+        <File Id="TideSSP.dll" Source="!(bindpath.BinDir)\TideSSP.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="TideSubAuth_DLL" Guid="C2D3E4F5-A6B7-48C9-0D1E-2F3A4B5C6D7E">
+        <File Id="TideSubAuth.dll" Source="!(bindpath.BinDir)\TideSubAuth.dll" KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <Feature Id="Complete" Title="TideSSP" Level="1">
+      <ComponentRef Id="TideSSP_DLL" />
+      <ComponentRef Id="TideSubAuth_DLL" />
+    </Feature>
+
+    <!-- Custom actions DLL -->
+    <Binary Id="TideCA" SourceFile="!(bindpath.BinDir)\TideCA.dll" />
+
+    <!-- Immediate: validate config -->
+    <CustomAction Id="CA_ValidateConfig"
+                  DllEntry="ValidateConfig"
+                  BinaryRef="TideCA"
+                  Execute="immediate"
+                  Return="check" />
+
+    <!-- Pass both properties to deferred CA -->
+    <CustomAction Id="CA_SetCopyConfigData"
+                  Property="CA_CopyConfig"
+                  Value="FILE=[TIDE_CONFIG_FILE]|JSON=[TIDE_CONFIG_JSON]" />
+
+    <!-- Deferred: copy/create tidecloak.json in System32 -->
+    <CustomAction Id="CA_CopyConfig"
+                  DllEntry="CopyConfig"
+                  BinaryRef="TideCA"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="check" />
+
+    <CustomAction Id="CA_RegisterSecurityPackage"
+                  DllEntry="RegisterSecurityPackage"
+                  BinaryRef="TideCA"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="check" />
+
+    <CustomAction Id="CA_RegisterSubAuth"
+                  DllEntry="RegisterSubAuth"
+                  BinaryRef="TideCA"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="check" />
+
+    <CustomAction Id="CA_UnregisterSecurityPackage"
+                  DllEntry="UnregisterSecurityPackage"
+                  BinaryRef="TideCA"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <CustomAction Id="CA_UnregisterSubAuth"
+                  DllEntry="UnregisterSubAuth"
+                  BinaryRef="TideCA"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <CustomAction Id="CA_ClearMnsFlags"
+                  DllEntry="ClearMnsFlags"
+                  BinaryRef="TideCA"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <CustomAction Id="CA_RemoveConfig"
+                  DllEntry="RemoveConfig"
+                  BinaryRef="TideCA"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <!-- ═══════════ Installer UI ═══════════ -->
+    <UI>
+      <TextStyle Id="TitleFont" FaceName="Tahoma" Size="10" Bold="yes" />
+      <TextStyle Id="BodyFont" FaceName="Tahoma" Size="8" />
+      <TextStyle Id="SmallFont" FaceName="Tahoma" Size="7" />
+
+      <Dialog Id="WelcomeDlg" Width="370" Height="270" Title="TideSSP Setup">
+        <Control Id="Title" Type="Text" X="20" Y="20" Width="330" Height="20"
+                 Text="{\TitleFont}Welcome to TideSSP Setup" />
+        <Control Id="Desc" Type="Text" X="20" Y="50" Width="330" Height="50"
+                 Text="{\BodyFont}This will install TideSSP for passwordless Ed25519 RDP authentication. You will need your TideCloak configuration (tidecloak.json)." />
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17"
+                 Default="yes" Text="Next">
+          <Publish Event="NewDialog" Value="ConfigDlg" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17"
+                 Cancel="yes" Text="Cancel">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+      </Dialog>
+
+      <Dialog Id="ConfigDlg" Width="370" Height="270" Title="TideSSP Setup">
+        <Control Id="Title" Type="Text" X="20" Y="10" Width="330" Height="16"
+                 Text="{\TitleFont}TideCloak Configuration" />
+        <Control Id="FileLabel" Type="Text" X="20" Y="32" Width="330" Height="12"
+                 Text="{\BodyFont}Option 1 — Path to tidecloak.json:" />
+        <Control Id="FileInput" Type="Edit" X="20" Y="46" Width="332" Height="16"
+                 Property="TIDE_CONFIG_FILE" />
+        <Control Id="OrLabel" Type="Text" X="20" Y="70" Width="330" Height="12"
+                 Text="{\BodyFont}Option 2 — Paste the JSON content below:" />
+        <Control Id="JsonInput" Type="Edit" X="20" Y="84" Width="332" Height="100"
+                 Property="TIDE_CONFIG_JSON" />
+        <Control Id="Hint" Type="Text" X="20" Y="190" Width="330" Height="36"
+                 Text="{\SmallFont}The file will be saved to System32\tidecloak.json. Export from TideCloak Admin Console: Clients > your client > Installation tab." />
+
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17"
+                 Text="Back">
+          <Publish Event="NewDialog" Value="WelcomeDlg" />
+        </Control>
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17"
+                 Default="yes" Text="Install">
+          <Publish Event="DoAction" Value="CA_ValidateConfig" Order="1" />
+          <Publish Event="EndDialog" Value="Return" Order="2"
+                   Condition="TIDE_CONFIG_FILE OR TIDE_CONFIG_JSON" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17"
+                 Cancel="yes" Text="Cancel">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+      </Dialog>
+
+      <Dialog Id="CancelDlg" Width="260" Height="85" Title="Cancel Setup">
+        <Control Id="Text" Type="Text" X="48" Y="15" Width="194" Height="30"
+                 Text="{\BodyFont}Are you sure you want to cancel?" />
+        <Control Id="Yes" Type="PushButton" X="72" Y="57" Width="56" Height="17"
+                 Text="Yes">
+          <Publish Event="EndDialog" Value="Exit" />
+        </Control>
+        <Control Id="No" Type="PushButton" X="132" Y="57" Width="56" Height="17"
+                 Cancel="yes" Default="yes" Text="No">
+          <Publish Event="EndDialog" Value="Return" />
+        </Control>
+      </Dialog>
+
+      <Dialog Id="ExitDlg" Width="370" Height="270" Title="TideSSP Setup Complete">
+        <Control Id="Title" Type="Text" X="20" Y="20" Width="330" Height="20"
+                 Text="{\TitleFont}Installation Complete" />
+        <Control Id="Desc" Type="Text" X="20" Y="50" Width="330" Height="50"
+                 Text="{\BodyFont}TideSSP has been installed. A reboot is required to activate. After reboot, RDP logons via the gateway will use passwordless Ed25519 authentication." />
+        <Control Id="Finish" Type="PushButton" X="304" Y="243" Width="56" Height="17"
+                 Default="yes" Cancel="yes" Text="Finish">
+          <Publish Event="EndDialog" Value="Return" />
+        </Control>
+      </Dialog>
+
+      <InstallUISequence>
+        <Show Dialog="WelcomeDlg" Before="ExecuteAction" Condition="NOT Installed" />
+        <Show Dialog="ExitDlg" After="ExecuteAction" Condition="NOT Installed" />
+      </InstallUISequence>
+    </UI>
+
+    <InstallExecuteSequence>
+      <!-- Install actions: run on first install OR repair/reinstall -->
+      <Custom Action="CA_SetCopyConfigData" After="InstallFiles"
+              Condition="NOT REMOVE=&quot;ALL&quot;" />
+      <Custom Action="CA_CopyConfig" After="CA_SetCopyConfigData"
+              Condition="NOT REMOVE=&quot;ALL&quot;" />
+      <Custom Action="CA_RegisterSecurityPackage" After="CA_CopyConfig"
+              Condition="NOT REMOVE=&quot;ALL&quot;" />
+      <Custom Action="CA_RegisterSubAuth" After="CA_RegisterSecurityPackage"
+              Condition="NOT REMOVE=&quot;ALL&quot;" />
+
+      <!-- Uninstall actions -->
+      <Custom Action="CA_UnregisterSecurityPackage" Before="RemoveFiles"
+              Condition="REMOVE=&quot;ALL&quot;" />
+      <Custom Action="CA_UnregisterSubAuth" After="CA_UnregisterSecurityPackage"
+              Condition="REMOVE=&quot;ALL&quot;" />
+      <Custom Action="CA_ClearMnsFlags" After="CA_UnregisterSubAuth"
+              Condition="REMOVE=&quot;ALL&quot;" />
+      <Custom Action="CA_RemoveConfig" After="CA_ClearMnsFlags"
+              Condition="REMOVE=&quot;ALL&quot;" />
+
+      <!-- Only schedule reboot on install, not uninstall -->
+      <ScheduleReboot After="InstallFinalize"
+                       Condition="NOT REMOVE=&quot;ALL&quot;" />
+    </InstallExecuteSequence>
+
+  </Package>
+</Wix>

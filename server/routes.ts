@@ -6,17 +6,22 @@ import * as stripeLib from "./lib/stripe";
 import { log, logForseti, logError } from "./logger";
 import type { ServerWithAccess, ActiveSession, ServerStatus, Server as ServerType } from "@shared/schema";
 import { createRequire } from "module";
-import { getHomeOrkUrl, GetConfig } from "./lib/auth/tidecloakConfig";
+import { getHomeOrkUrl, GetConfig, getAuthServerUrl, getRealm, getResource } from "./lib/auth/tidecloakConfig";
 import { createConnection } from "net";
 import { createHash } from "crypto";
 import { terminateSession as terminateBridgeSession } from "./wsBridge";
+import path from "path";
 
 // Use createRequire for heimdall-tide (CJS module with broken ESM exports)
 // In CJS bundle __filename is available; in ESM dev mode use import.meta.url
-const require = createRequire(
-  typeof __filename !== "undefined" ? __filename : import.meta.url
-);
+const _currentFile = typeof __filename !== "undefined" ? __filename : import.meta.url;
+const require = createRequire(_currentFile);
 const { PolicySignRequest } = require("heimdall-tide");
+
+// Resolve directory of this file (works in both CJS bundle and ESM dev)
+const _currentDir = typeof __dirname !== "undefined"
+  ? __dirname
+  : path.dirname(new URL(_currentFile).pathname);
 
 // Base64 conversion helpers for Tide request handling
 function base64ToBytes(base64: string): Uint8Array {
@@ -139,6 +144,45 @@ export async function registerRoutes(
 ): Promise<Server> {
 
   // ============================================
+  // DPoP Resource Server — serve tide_dpop_auth.html (unauthenticated)
+  // Validates that the hex-encoded issuer and client match tidecloak.json
+  // ============================================
+  app.get("/tide_dpop/iss/:issuerHex/aud/:clientHex/tide_dpop_auth.html", (req, res) => {
+    const { issuerHex, clientHex } = req.params;
+
+    // Decode hex params back to strings
+    const hexToStr = (hex: string): string | null => {
+      if (!hex || hex.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(hex)) return null;
+      return Buffer.from(hex, "hex").toString("utf-8");
+    };
+
+    const decodedIssuer = hexToStr(issuerHex);
+    const decodedClient = hexToStr(clientHex);
+    if (!decodedIssuer || !decodedClient) {
+      res.status(400).json({ message: "Invalid hex encoding in URL" });
+      return;
+    }
+
+    // Verify against tidecloak.json config
+    const expectedIssuer = `${getAuthServerUrl().replace(/\/+$/, "")}/realms/${getRealm()}`;
+    const expectedClient = getResource();
+
+    if (decodedIssuer !== expectedIssuer || decodedClient !== expectedClient) {
+      res.status(403).json({ message: "Issuer or client mismatch" });
+      return;
+    }
+
+    res.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'unsafe-inline'");
+    res.setHeader("Allow-CSP-From", "*");
+    // Prod: _currentDir=dist/, file at dist/public/tide_dpop_auth.html
+    // Dev: _currentDir=server/, file at client/public/tide_dpop_auth.html
+    const filePath = process.env.NODE_ENV === "production"
+      ? path.resolve(_currentDir, "public", "tide_dpop_auth.html")
+      : path.resolve(_currentDir, "..", "client", "public", "tide_dpop_auth.html");
+    res.sendFile(filePath);
+   
+  });
+    
   // Health Check (unauthenticated, for load balancers and monitoring)
   // ============================================
 

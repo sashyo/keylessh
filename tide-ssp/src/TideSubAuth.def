@@ -1,0 +1,3 @@
+LIBRARY TideSubAuth
+EXPORTS
+    Msv1_0SubAuthenticationRoutine

@@ -3,7 +3,7 @@
  * These call TideCloak directly instead of proxying through the server,
  * so the DPoP proof htu matches the TideCloak URL.
  */
-import { IAMService } from "@tidecloak/js";
+import { appFetch } from "./appFetch";
 import type { AdminUser, AdminRole } from "@shared/schema";
 import type { ChangeSetRequest, AccessApproval, RoleApproval, TidecloakEvent } from "./api";
 
@@ -38,7 +38,7 @@ async function tcFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
     ...options.headers,
   };
 
-  const response = await IAMService.secureFetch(url, {
+  const response = await appFetch(url, {
     ...options,
     headers,
   });
@@ -356,7 +356,7 @@ export async function getTideLinkUrl(userId: string, redirectUri?: string): Prom
   const fullUrl = `${baseUrl}${url}`;
   const token = localStorage.getItem("access_token");
 
-  const response = await IAMService.secureFetch(fullUrl, {
+  const response = await appFetch(fullUrl, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
