@@ -114,7 +114,7 @@ export function createTideSshSigner(): SSHSigner {
       version,                 // Version: BasicCustom<1>
       "Policy:1",              // AuthFlow: Policy authorization with implicit flow (no popup)
       draft,                   // Draft: what you want to sign
-      new Tools.Tools.TideMemory()         // DynamicData: empty (not needed for basic)
+      new Tools.TideMemory()         // DynamicData: empty (not needed for basic)
     );
 
     // Add doken to Authorizer field (Policy:1 implicit flow reads from here)
@@ -124,7 +124,7 @@ export function createTideSshSigner(): SSHSigner {
     }
 
     const dokenBytes = new TextEncoder().encode(doken);
-    const dokenMemory = Tools.Tools.TideMemory.CreateFromArray([dokenBytes]);
+    const dokenMemory = Tools.TideMemory.CreateFromArray([dokenBytes]);
     tideRequest.addAuthorizer(dokenMemory);
     console.log(`[TideSsh] Added doken to authorizer`);
 
