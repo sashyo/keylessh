@@ -345,6 +345,13 @@ UINT __stdcall CopyConfig(MSIHANDLE hInstall)
         }
     }
 
+    /* If no config provided but file already exists (repair), succeed silently */
+    {
+        DWORD attr = GetFileAttributesW(destPath);
+        if (attr != INVALID_FILE_ATTRIBUTES)
+            return ERROR_SUCCESS;
+    }
+
     return ERROR_INSTALL_FAILURE;
 }
 
