@@ -891,7 +891,14 @@ static NTSTATUS NTAPI TideSsp_AcceptLsaModeContext(
             }
         }
 
-        /* Fallback: preferred_username or sub */
+        if (usernameLen <= 0 && endpointHint && endpointHintLen > 0) {
+            /* Endpoint hint was provided but no matching dest: role found -- reject */
+            tide_log("No dest:%.*s:<username> role found in JWT -- access denied",
+                     endpointHintLen, endpointHint);
+            return SEC_E_NO_CREDENTIALS;
+        }
+
+        /* Fallback for tokens without endpoint hint (non-EdDSA path) */
         if (usernameLen <= 0)
             usernameLen = json_extract_string(payloadJson, payloadLen,
                                               "preferred_username",
