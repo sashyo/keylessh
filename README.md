@@ -164,7 +164,7 @@ sudo docker run -d \
    - Host: _localhost_
    - Port: _2222_
    - SSH Users: _user_
-   - Click `Add Server` — status should show `Offline`
+   - Click `Add Server` — status should show `Online`
 
 2. Go to [Roles](http://localhost:3000/admin/roles) > `Add Role`
    - Select `SSH` role type
