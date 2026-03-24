@@ -26,6 +26,7 @@ use tokio::sync::Notify;
 
 mod logstream;
 mod setup;
+mod tls;
 mod tray;
 
 // ── Config types ─────────────────────────────────────────────────
@@ -671,21 +672,80 @@ async fn main() {
         .fallback(get(ws_handler))
         .with_state(state);
 
-    let logs_url = format!("http://localhost:{port}/logs");
+    let use_tls = env::var("HTTPS").map(|v| v != "false" && v != "0").unwrap_or(true);
+    let tls_hostname = env::var("TLS_HOSTNAME").unwrap_or_else(|_| "localhost".to_string());
+
+    let scheme = if use_tls { "https" } else { "http" };
+    let ws_scheme = if use_tls { "wss" } else { "ws" };
+
+    let logs_url = format!("{scheme}://localhost:{port}/logs");
     tray::spawn_tray(logs_url);
 
-    tracing::info!("SSH Bridge listening on port {port}");
-    tracing::info!("Health: http://localhost:{port}/health");
-    tracing::info!("Logs:   http://localhost:{port}/logs");
+    tracing::info!("SSH Bridge listening on port {port} ({scheme})");
+    tracing::info!("Health:    {scheme}://localhost:{port}/health");
+    tracing::info!("Logs:      {scheme}://localhost:{port}/logs");
+    tracing::info!("WebSocket: {ws_scheme}://localhost:{port}");
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
         .await
         .unwrap();
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .unwrap();
+    if use_tls {
+        use tokio_rustls::TlsAcceptor;
+        use rustls::ServerConfig as RustlsConfig;
+
+        let tls_cert = tls::generate_self_signed(&tls_hostname);
+        tracing::info!("TLS: self-signed cert for {tls_hostname}");
+
+        // Install default crypto provider
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let certs = rustls_pemfile::certs(&mut tls_cert.cert_pem.as_bytes())
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let key = rustls_pemfile::private_key(&mut tls_cert.key_pem.as_bytes())
+            .unwrap()
+            .unwrap();
+
+        let rustls_config = RustlsConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .unwrap();
+        let tls_acceptor = TlsAcceptor::from(Arc::new(rustls_config));
+
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(conn) => conn,
+                Err(e) => {
+                    tracing::error!("Accept error: {e}");
+                    continue;
+                }
+            };
+            let acceptor = tls_acceptor.clone();
+            let app = app.clone();
+            tokio::spawn(async move {
+                if let Ok(tls_stream) = acceptor.accept(stream).await {
+                    let io = hyper_util::rt::TokioIo::new(tls_stream);
+                    let service = hyper::service::service_fn(move |req| {
+                        let app = app.clone();
+                        async move {
+                            use tower::ServiceExt;
+                            app.oneshot(req).await
+                        }
+                    });
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(io, service)
+                        .with_upgrades()
+                        .await;
+                }
+            });
+        }
+    } else {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown_signal())
+            .await
+            .unwrap();
+    }
 }
 
 async fn shutdown_signal() {
