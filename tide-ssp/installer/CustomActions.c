@@ -274,16 +274,6 @@ UINT __stdcall BrowseConfig(MSIHANDLE hInstall)
 
     if (GetOpenFileNameW(&ofn)) {
         MsiSetPropertyW(hInstall, L"TIDE_CONFIG_FILE", filePath);
-    } else {
-        /* Log the error for debugging */
-        DWORD err = CommDlgExtendedError();
-        if (err != 0) {
-            WCHAR msg[128];
-            StringCchPrintfW(msg, 128, L"GetOpenFileName failed: 0x%08X", err);
-            PMSIHANDLE hRec = MsiCreateRecord(0);
-            MsiRecordSetStringW(hRec, 0, msg);
-            MsiProcessMessage(hInstall, INSTALLMESSAGE_INFO, hRec);
-        }
     }
 
     return ERROR_SUCCESS;
