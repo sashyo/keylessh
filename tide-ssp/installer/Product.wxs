@@ -133,7 +133,7 @@
         <Control Id="Title" Type="Text" X="20" Y="20" Width="330" Height="20"
                  Text="{\TitleFont}TideCloak Configuration" />
         <Control Id="Desc" Type="Text" X="20" Y="50" Width="330" Height="50"
-                 Text="{\BodyFont}Clicking Install will open a file browser for you to select your tidecloak.json file. You can download it from TideCloak Admin Console: Clients \x2192 your client \x2192 Action dropdown \x2192 Download adapter config." />
+                 Text="{\BodyFont}Clicking Install will open a file browser for you to select your tidecloak.json file. You can download it from TideCloak Admin Console: Clients > your client > Action dropdown > Download adapter config." />
         <Control Id="Hint" Type="Text" X="20" Y="100" Width="330" Height="24"
                  Text="{\SmallFont}The file will be copied to System32\tidecloak.json." />
 
