@@ -1,0 +1,165 @@
+# syntax=docker/dockerfile:1.7
+
+FROM rust:1.94.0-bookworm AS builder
+WORKDIR /app
+COPY . .
+RUN cargo build --release
+
+FROM debian:12-slim AS packager
+WORKDIR /work
+
+ARG PKG_NAME=ssh-bridge-rs
+ARG PKG_VERSION=0.1.0
+ARG PKG_ARCH=amd64
+ARG MAINTAINER="Tide Foundation <info@tide.org>"
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends dpkg-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p \
+    /work/pkg/DEBIAN \
+    /work/pkg/usr/bin \
+    /work/pkg/usr/lib/ssh-bridge-rs \
+    /work/pkg/lib/systemd/system \
+    /work/pkg/etc/default \
+    /work/pkg/var/lib/ssh-bridge-rs
+
+COPY --from=builder /app/target/release/ssh-bridge-rs /work/pkg/usr/bin/ssh-bridge-rs
+
+RUN chmod 755 /work/pkg/usr/bin/ssh-bridge-rs
+
+RUN <<'EOF'
+cat > /work/pkg/usr/lib/ssh-bridge-rs/start.sh <<'SCRIPT'
+#!/bin/sh
+set -eu
+
+PORT="${PORT:-8080}"
+export PORT
+
+# Deliberately do not set client_adapter here.
+# On first run, ssh-bridge-rs will start its setup wizard on port 7893
+# and persist the uploaded configuration into the service user's HOME.
+
+exec /usr/bin/ssh-bridge-rs
+SCRIPT
+chmod 755 /work/pkg/usr/lib/ssh-bridge-rs/start.sh
+EOF
+
+RUN <<'EOF'
+cat > /work/pkg/lib/systemd/system/ssh-bridge-rs.service <<'SERVICE'
+[Unit]
+Description=KeyleSSH SSH Bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ssh-bridge-rs
+Group=ssh-bridge-rs
+EnvironmentFile=-/etc/default/ssh-bridge-rs
+WorkingDirectory=/var/lib/ssh-bridge-rs
+ExecStart=/usr/lib/ssh-bridge-rs/start.sh
+Restart=always
+RestartSec=2
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/ssh-bridge-rs
+StateDirectory=ssh-bridge-rs
+
+[Install]
+WantedBy=multi-user.target
+SERVICE
+EOF
+
+RUN <<'EOF'
+cat > /work/pkg/etc/default/ssh-bridge-rs <<'DEFAULTS'
+PORT=8080
+DEFAULTS
+EOF
+
+RUN <<'EOF'
+cat > /work/pkg/DEBIAN/control <<CONTROL
+Package: ${PKG_NAME}
+Version: ${PKG_VERSION}
+Section: net
+Priority: optional
+Architecture: ${PKG_ARCH}
+Maintainer: ${MAINTAINER}
+Depends: adduser, systemd
+Description: HTTP-to-TCP bridge for the KeyleSSH protocol
+ A native Debian package for ssh-bridge-rs with systemd service support.
+CONTROL
+EOF
+
+RUN <<'EOF'
+cat > /work/pkg/DEBIAN/conffiles <<'CONFFILES'
+/etc/default/ssh-bridge-rs
+CONFFILES
+EOF
+
+RUN <<'EOF'
+cat > /work/pkg/DEBIAN/postinst <<'SCRIPT'
+#!/bin/sh
+set -e
+
+if ! getent group ssh-bridge-rs >/dev/null; then
+  addgroup --system ssh-bridge-rs
+fi
+
+if ! getent passwd ssh-bridge-rs >/dev/null; then
+  adduser \
+    --system \
+    --ingroup ssh-bridge-rs \
+    --home /var/lib/ssh-bridge-rs \
+    --shell /usr/sbin/nologin \
+    ssh-bridge-rs
+fi
+
+mkdir -p /var/lib/ssh-bridge-rs
+chown ssh-bridge-rs:ssh-bridge-rs /var/lib/ssh-bridge-rs
+chmod 750 /var/lib/ssh-bridge-rs
+
+systemctl daemon-reload || true
+systemctl enable ssh-bridge-rs.service || true
+systemctl restart ssh-bridge-rs.service || true
+
+exit 0
+SCRIPT
+chmod 755 /work/pkg/DEBIAN/postinst
+EOF
+
+RUN <<'EOF'
+cat > /work/pkg/DEBIAN/prerm <<'SCRIPT'
+#!/bin/sh
+set -e
+
+if [ "$1" = "remove" ]; then
+  systemctl stop ssh-bridge-rs.service || true
+  systemctl disable ssh-bridge-rs.service || true
+fi
+
+exit 0
+SCRIPT
+chmod 755 /work/pkg/DEBIAN/prerm
+EOF
+
+RUN <<'EOF'
+cat > /work/pkg/DEBIAN/postrm <<'SCRIPT'
+#!/bin/sh
+set -e
+
+systemctl daemon-reload || true
+
+exit 0
+SCRIPT
+chmod 755 /work/pkg/DEBIAN/postrm
+EOF
+
+RUN dpkg-deb --build /work/pkg /work/${PKG_NAME}_${PKG_VERSION}_${PKG_ARCH}.deb
+
+FROM scratch AS artifact
+COPY --from=packager /work/*.deb /

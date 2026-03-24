@@ -21,17 +21,17 @@ The bridge:
 ## Cloud Architecture
 
 ```
-┌───────────────────────────────────────────────────────────────┐
-│                     Azure Container Apps                      │
-│                                                               │
+┌─────────────────────────────────────────────────────────────┐
+│                     Azure Container Apps                    │
+│                                                             │
 │   ┌─────────────┐   ┌─────────────┐   ┌─────────────┐       │
 │   │  Instance 1 │   │  Instance 2 │   │  Instance N │  ...  │
 │   │  y conns    │   │  y conns    │   │  y  conns   │       │
 │   └─────────────┘   └─────────────┘   └─────────────┘       │
-│                                                               │
-│   Auto-scales 0 → N based on max concurrent y connections    │
-│   (by default, y=10 )                                        │
-└───────────────────────────────────────────────────────────────┘
+│                                                             │
+│   Auto-scales 0 → N based on max concurrent y connections   │
+│   (by default, y=10 )                                       │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ## Security
@@ -172,6 +172,35 @@ The Container App is configured with:
 curl http://localhost:8088/health
 # {"status":"ok","tcpConnections":0}
 ```
+
+## Deploy as a Debian Deb repo
+
+Build the deb:
+
+```bash
+sudo docker buildx build -f Dockerfile-build-deb -o out .
+```
+
+Then copy the deb file to the target machine and install it like this:
+
+```bash
+sudo apt install ./ssh-bridge-rs_0.1.0_amd64.deb
+```
+
+Check service status:
+```bash
+systemctl status ssh-bridge-rs
+journalctl -u ssh-bridge-rs -n 100 --no-pager
+```
+
+Configure Place the TideCloak adaptor in the bridge config webpage:
+1. Open the bridge server address in a web browser on port 7893 (i.e. http://localhost:7893)
+2. Set the `TIDECLOAK AUTHENTICATION` toggle to `Paste JSON`
+3. Paste the TideCloak adaptor config to the `TideCloak Config JSON` input field.
+4. Press `Save & Start`
+5. You should see a message "SSH Bridge Starting!"
+
+If you refresh this page, you'll notice that temporary web portal has been shut down - which is intended. If you even need to make changes in that adaptor, you can do it directly on the server under `/var/lib/ssh-bridge-rs/.keylessh/ssh-bridge.toml`.
 
 ## Protocol
 
