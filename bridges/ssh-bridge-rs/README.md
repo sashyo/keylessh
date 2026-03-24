@@ -175,7 +175,7 @@ curl http://localhost:8088/health
 
 ## Deploy as a Debian Deb repo
 
-Build the deb:
+Build the deb package for Debian12:
 
 ```bash
 sudo docker buildx build -f Dockerfile-build-deb -o out .
@@ -201,6 +201,8 @@ Configure Place the TideCloak adaptor in the bridge config webpage:
 5. You should see a message "SSH Bridge Starting!"
 
 If you refresh this page, you'll notice that temporary web portal has been shut down - which is intended. If you even need to make changes in that adaptor, you can do it directly on the server under `/var/lib/ssh-bridge-rs/.keylessh/ssh-bridge.toml`.
+
+For debugging connectivity, you can access the bridge's log console on it's default port (as defined in the config webpage) under `/logs` route (e.g https://localhost:8081/logs).
 
 ## Protocol
 
