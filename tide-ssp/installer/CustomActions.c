@@ -317,7 +317,7 @@ UINT __stdcall ValidateConfig(MSIHANDLE hInstall)
     if (wLen == 0) {
         MessageBoxW(hwnd,
             L"Cannot read the selected file.",
-            L"TideSSP \x2014 File Error", MB_OK | MB_ICONERROR);
+            L"TideSSP - File Error", MB_OK | MB_ICONERROR);
         return ERROR_INSTALL_FAILURE;
     }
 
@@ -326,8 +326,8 @@ UINT __stdcall ValidateConfig(MSIHANDLE hInstall)
             L"The selected file does not appear to be a valid TideCloak configuration.\n"
             L"It must contain a \"jwk\" section with an Ed25519 public key.\n\n"
             L"Export from TideCloak Admin Console:\n"
-            L"Clients \x2192 your client \x2192 Action dropdown \x2192 Download adapter config.",
-            L"TideSSP \x2014 Invalid Configuration", MB_OK | MB_ICONERROR);
+            L"Clients > your client > Action dropdown > Download adapter config.",
+            L"TideSSP - Invalid Configuration", MB_OK | MB_ICONERROR);
         return ERROR_INSTALL_FAILURE;
     }
 
