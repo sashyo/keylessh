@@ -1,10 +1,10 @@
 [package]
 name = "ssh-bridge-rs"
 version = "0.1.0"
-edition = "2021"
+edition = "2026"
 
 [[bin]]
-name = "SSH-Bridge"
+name = "ssh-bridge-rs"
 path = "src/main.rs"
 
 [dependencies]
