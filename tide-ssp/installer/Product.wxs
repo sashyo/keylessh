@@ -129,35 +129,24 @@
         </Control>
       </Dialog>
 
-      <Dialog Id="ConfigDlg" Width="370" Height="270" Title="TideSSP Setup">
-        <Control Id="Title" Type="Text" X="20" Y="10" Width="330" Height="16"
+      <Dialog Id="ConfigDlg" Width="370" Height="220" Title="TideSSP Setup">
+        <Control Id="Title" Type="Text" X="20" Y="20" Width="330" Height="20"
                  Text="{\TitleFont}TideCloak Configuration" />
-        <Control Id="FileLabel" Type="Text" X="20" Y="32" Width="330" Height="24"
-                 Text="{\BodyFont}Path to tidecloak.json (or paste the JSON content):" />
-        <Control Id="FileInput" Type="Edit" X="20" Y="58" Width="276" Height="16"
-                 Property="TIDE_CONFIG_FILE" />
-        <Control Id="BrowseBtn" Type="PushButton" X="300" Y="57" Width="52" Height="18"
-                 Text="Browse...">
-          <Publish Event="DoAction" Value="CA_BrowseConfig" />
-        </Control>
-        <Control Id="JsonLabel" Type="Text" X="20" Y="82" Width="330" Height="12"
-                 Text="{\BodyFont}Or paste tidecloak.json content (single line OK):" />
-        <Control Id="JsonInput" Type="Edit" X="20" Y="96" Width="332" Height="16"
-                 Property="TIDE_CONFIG_JSON" />
-        <Control Id="Hint" Type="Text" X="20" Y="120" Width="330" Height="60"
-                 Text="{\SmallFont}The file will be copied to System32\tidecloak.json. Export from TideCloak Admin Console: Clients > your client > Installation tab. If pasting, the JSON will be saved even if it appears truncated in the text box." />
+        <Control Id="Desc" Type="Text" X="20" Y="50" Width="330" Height="50"
+                 Text="{\BodyFont}Clicking Install will open a file browser for you to select your tidecloak.json file. You can download it from TideCloak Admin Console: Clients \x2192 your client \x2192 Action dropdown \x2192 Download adapter config." />
+        <Control Id="Hint" Type="Text" X="20" Y="100" Width="330" Height="24"
+                 Text="{\SmallFont}The file will be copied to System32\tidecloak.json." />
 
-        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17"
+        <Control Id="Back" Type="PushButton" X="180" Y="190" Width="56" Height="17"
                  Text="Back">
           <Publish Event="NewDialog" Value="WelcomeDlg" />
         </Control>
-        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17"
+        <Control Id="Next" Type="PushButton" X="236" Y="190" Width="56" Height="17"
                  Default="yes" Text="Install">
           <Publish Event="DoAction" Value="CA_ValidateConfig" Order="1" />
-          <Publish Event="EndDialog" Value="Return" Order="2"
-                   Condition="TIDE_CONFIG_FILE OR TIDE_CONFIG_JSON" />
+          <Publish Event="EndDialog" Value="Return" Order="2" />
         </Control>
-        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17"
+        <Control Id="Cancel" Type="PushButton" X="304" Y="190" Width="56" Height="17"
                  Cancel="yes" Text="Cancel">
           <Publish Event="SpawnDialog" Value="CancelDlg" />
         </Control>
