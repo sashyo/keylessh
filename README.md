@@ -39,6 +39,20 @@ The result: enterprise-grade SSH access control without any private keys to mana
 - **Signal server** (`signal-server/`) - coordinates P2P connections between browsers and gateways via WebSocket signaling (SDP/ICE), relays HTTP traffic before DataChannel is ready, and generates ephemeral TURN credentials. Deployed with a coturn sidecar for STUN NAT discovery and TURN relay fallback. See [Architecture](bridges/punchd-bridge/docs/ARCHITECTURE.md#system-overview).
 - **Multi-backend routing** (`bridges/punchd-bridge`) - proxy to multiple HTTP backends and RDP servers from a single gateway. See [Multi-Backend Routing](bridges/punchd-bridge/docs/ARCHITECTURE.md#multi-backend-routing).
 
+## Downloads
+
+Each [release](../../releases) includes pre-built binaries and installers:
+
+| Artifact | Platform | Description |
+|----------|----------|-------------|
+| `ssh-bridge-linux-x64.tar.gz` | Linux | **SSH Bridge** — WebSocket-to-TCP tunnel for browser SSH sessions. Deploy on any server with SSH access to your targets. Verifies JWTs against TideCloak, pipes SSH traffic between browser and server. |
+| `ssh-bridge-windows-x64.tar.gz` | Windows | SSH Bridge for Windows (same as above, runs as a system tray app). First-run setup wizard auto-configures from `tidecloak.json`. |
+| `punchd-gateway-linux-x64.tar.gz` | Linux | **Punch'd Gateway** — NAT-traversing reverse proxy. Runs on your private network, connects outbound to the signal server, and proxies HTTP/RDP traffic to local backends. Handles TideCloak OIDC auth, WebRTC DataChannel, and TURN fallback. |
+| `punchd-gateway-windows-x64.tar.gz` | Windows | Punch'd Gateway for Windows (same as above). |
+| `TideSSP.msi` | Windows | **TideSSP Installer** — Windows Security Support Provider for passwordless RDP. Installs `TideSSP.dll` and `TideSubAuth.dll` to System32, registers them as LSA security packages, and copies your TideCloak config. Reboot required after install. |
+
+All components require a `tidecloak.json` exported from your TideCloak admin console. See the [Deployment Guide](docs/DEPLOYMENT.md) for step-by-step setup.
+
 ## Project Structure
 
 ```
@@ -46,11 +60,13 @@ keylessh/
 ├── client/                  # React UI (xterm.js, SSH client, SFTP browser)
 ├── server/                  # Express API + WebSocket bridge + SQLite
 ├── shared/                  # Shared types + schema
-├── signal-server/           # P2P signaling + HTTP relay for punchd-bridge
+├── signal-server/           # P2P signaling + HTTP relay + STUN/TURN
 ├── bridges/
-│   ├── tcp-bridge/          # Stateless WS↔TCP forwarder (optional)
-│   └── punchd-bridge/       # NAT-traversing HTTP reverse proxy gateway
-│       └── gateway/         # Gateway source code
+│   ├── ssh-bridge-rs/       # Rust SSH bridge (WS↔TCP tunnel, JWT auth)
+│   ├── punchd-bridge/       # NAT-traversing HTTP reverse proxy (Node.js)
+│   ├── punchd-bridge-rs/    # NAT-traversing HTTP reverse proxy (Rust)
+│   └── tcp-bridge/          # Stateless WS↔TCP forwarder (optional)
+├── tide-ssp/                # Windows SSP for passwordless RDP (C + WiX MSI)
 ├── docs/                    # Architecture, deployment, developer guides
 └── script/                  # TideCloak setup scripts
 ```
@@ -88,7 +104,7 @@ During initialization, you'll be prompted to:
 The script will generate an invite link:
 
 ```
-🔗 INVITE LINK (use this one):
+INVITE LINK (use this one):
 http://localhost:8080/realms/keylessh/login-actions/action-token?key=...
 ```
 
@@ -101,7 +117,7 @@ Open this link in your browser and either:
 The script will detect when linking is complete and continue finishing the setup:
 
 ```
-🎉 Tidecloak initialization complete!
+Tidecloak initialization complete!
 ```
 
 ### 5. Start the app
@@ -114,47 +130,17 @@ npm run dev
 
 Access the KeyleSSH app in your browser at: `http://localhost:3000`
 
-> [!IMPORTANT]
-> **CSP iframe error?** The secure enclave (TideCloak/Heimdall) is loaded in a hidden iframe to share the session ID. If you see a console error like `Framing 'http://localhost:XXXX/' violates the Content Security Policy directive: "frame-src ..."`, add the blocked origin to the `frame-src` list in [`server/index.ts`](server/index.ts). See [Troubleshooting](docs/DEVELOPERS.md#troubleshooting) for details.
+Before you can test SSH, you need a target server. Follow the [Example SSH server setup](#example-ssh-server-setup) below to spin one up locally.
 
-## Example server set-up
+## Example SSH server setup
 
-Here's how you set up a locally-hosted SSH server and access it using KeyleSSH:
+This guide spins up a minimal Alpine SSH server on your localhost and walks through configuring KeyleSSH to connect to it. Assumes you've already completed the [Quickstart](#quickstart-local-dev) above and have KeyleSSH running at `http://localhost:3000`.
 
 > [!NOTE]
-> This guide will show you how to spin up a minimal Alpine docker image on your localhost, enable SSH on it on port 2222, set up a new user on it, and enable it for passwordless, key-base authentication.
+> This will create a Docker container listening on port 2222 with a `user` account configured for key-based (passwordless) authentication.
 
-1. Go to [servers](http://localhost:3000/admin/servers) -> `Add Server` -> 
-   - Server Name: _myserver_
-   - Host: _localhost_
-   - Post: _2222_
-   - SSH Users: _user_
-   - Click `Add Server` button
-   - Status should come up as `Online`
-2. Go to [Roles](http://localhost:3000/admin/roles) -> `Add Role`
-   - Role Name (SSH Role: ✅): user (it'll autochange it to `ssh:user`)
-   - Click the `Create Role` button
-3. Go to [Users](http://localhost:3000/admin/users) -> 
-   - Click the `Action` button (✏️) for the default `admin user`
-   - Click the `ssh:user` tag in `Available Roles` to move it to `Assigned Roles`
-   - Click the `Save Changes` button
-4. Go to [Change Requests](http://localhost:3000/admin/approvals) ->
-   - Click the `Review` button (👁️) for the user `admin`
-   - Confirm User Access Change by clicking the `Y` button
-   - Click the `Submit Approvals` button
-   - Click  the `Commit` button (📤) for the user `admin` 
-   - Change over to the `Policies` tab
-   - Click the `Review` button (👁️) for the policy role `ssh:user`
-   - Confirm User Access Change by clicking the `Y` button
-   - Click the `Submit Approvals` button
-   - Click the `Commit` button (📤) for the policy role `ssh:user`
-5. Expand your user profile (a `AD admin` icon at the bottom-left of your KeyleSSH browser windows) ->
-   - Click `Restart session` to quickly log out and in again
-5. Go to [Dashboard](http://localhost:3000/app) -> `myserver` -> SSH USER: `user` -> `Connect` ->
-   - In the `Terminal Workspace`, click the `Connect` button
-   - Copy the "Tide SSH public key" string (click the `Copy` button)
+### Step 1: Spin up the SSH server
 
-Spin up an Alpine server with SSH access allowed for user `root` (password `root` AS AN EXAMPLE ONLY!) by running this on your local machine's command-line:
 ```bash
 sudo docker run -d \
   -p 2222:22 \
@@ -171,13 +157,48 @@ sudo docker run -d \
   "
 ```
 
-Connect to that new server via your command-line SSH:
+### Step 2: Configure KeyleSSH
+
+1. Go to [Servers](http://localhost:3000/admin/servers) > `Add Server`
+   - Server Name: _myserver_
+   - Host: _localhost_
+   - Port: _2222_
+   - SSH Users: _user_
+   - Click `Add Server` — status should show `Online`
+
+2. Go to [Roles](http://localhost:3000/admin/roles) > `Add Role`
+   - Select `SSH` role type
+   - Role Name: user (auto-changes to `ssh:user`)
+   - Click `Create Role`
+
+3. Go to [Users](http://localhost:3000/admin/users)
+   - Click the `Action` button for the default admin user
+   - Click the `ssh:user` tag in `Available Roles` to move it to `Assigned Roles`
+   - Click `Save Changes`
+
+4. Go to [Change Requests](http://localhost:3000/admin/approvals)
+   - Click `Review` for the user admin > confirm with `Y` > `Submit Approvals` > `Commit`
+   - Switch to the `Policies` tab (click `Refresh` if empty)
+   - Click `Review` for `ssh:user` > confirm with `Y` > `Submit Approvals` > `Commit`
+
+5. Expand your user profile (bottom-left icon) > click `Restart session`
+
+### Step 3: Get the public key
+
+6. Go to [Servers](http://localhost:3000/admin/servers) and click on `myserver`
+   - Copy the "Tide SSH public key" shown on the server details page (click the `Copy` button)
+
+### Step 4: Set up the SSH user
+
+Connect to the Alpine container and create the `user` account with the copied public key:
+
 ```bash
 ssh root@localhost -p 2222
+# password: root
 ```
-(use `root` as your password)
 
-In the newly created SSH session, enter the following commands - but use the "Tide SSH public key" you copied earlier instead of the "blahblah" one used in this example:
+In the SSH session, run these commands (replace `blahblahblah` with your actual Tide SSH public key):
+
 ```bash
 adduser -D -s /bin/sh user
 passwd -d user
@@ -189,9 +210,19 @@ chmod 600 /home/user/.ssh/authorized_keys
 chown user:user /home/user/.ssh/authorized_keys
 ```
 
-Now return to the KeyleSSH `Dashboard` page where the "Authorize SSH Session" pop-up is opened, and click the `Authorize & Connect` button.
+### Step 5: Connect
 
-Your SSH session to your server `myserver` will commence.
+1. Go to [Dashboard](http://localhost:3000/app)
+2. Click on `myserver`
+3. Select SSH user `user`
+4. Click `Connect`
+5. In the "Authorize SSH Session" dialog, click `Authorize & Connect`
+
+Your SSH session to `myserver` will start.
+
+> [!IMPORTANT]
+> **CSP iframe error?** The secure enclave (TideCloak/Heimdall) is loaded in a hidden iframe to share the session ID. If you see a console error like `Framing 'http://localhost:XXXX/' violates the Content Security Policy directive: "frame-src ..."`, add the blocked origin to the `frame-src` list in [`server/index.ts`](server/index.ts). See [Troubleshooting](docs/DEVELOPERS.md#troubleshooting) for details.
+
 
 ## Scripts
 

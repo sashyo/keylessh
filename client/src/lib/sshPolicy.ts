@@ -380,7 +380,7 @@ export async function createSshPolicyRequest(
 
   // Version 2 includes approvalType and executionType in the serialized format
   const policy = new Models.Policy({
-    version: "2",
+    version: "3",
     modelId: config.modelId,
     contractId: contractId,
     keyId: config.vendorId,
@@ -442,7 +442,7 @@ export async function createSshPolicyRequestWithCode(
 
   // Version 2 includes approvalType and executionType in the serialized format
   const policy = new Models.Policy({
-    version: "2",
+    version: "3",
     modelId: config.modelId,
     contractId: contractId,
     keyId: config.vendorId,

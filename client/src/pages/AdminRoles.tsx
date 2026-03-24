@@ -100,6 +100,7 @@ export default function AdminRoles() {
   // Endpoint role selection state
   const [selectedGatewayId, setSelectedGatewayId] = useState<string>("");
   const [selectedBackendName, setSelectedBackendName] = useState<string>("");
+  const [selectedRdpUsername, setSelectedRdpUsername] = useState<string>("");
 
   const normalizeSshRoleName = (value: string) => {
     const trimmed = value.trim();
@@ -403,7 +404,18 @@ export default function AdminRoles() {
         toast({ title: "Please select a gateway and backend", variant: "destructive" });
         return;
       }
-      name = `dest:${selectedGatewayId}:${selectedBackendName}`;
+      // Check if selected backend is EdDSA (passwordless RDP)
+      const selectedGw = (gatewayEndpoints || []).find((g) => g.id === selectedGatewayId);
+      const selectedBk = selectedGw?.backends?.find((b) => b.name === selectedBackendName);
+      if (selectedBk?.auth === "eddsa") {
+        if (!selectedRdpUsername.trim()) {
+          toast({ title: "Windows username is required for passwordless RDP endpoints", variant: "destructive" });
+          return;
+        }
+        name = `dest:${selectedGatewayId}:${selectedBackendName}:${selectedRdpUsername.trim()}`;
+      } else {
+        name = `dest:${selectedGatewayId}:${selectedBackendName}`;
+      }
     } else {
       name = formData.name.trim();
     }
@@ -938,7 +950,7 @@ export default function AdminRoles() {
                 <button
                   type="button"
                   className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${roleType === "endpoint" ? "bg-background shadow-sm" : "text-muted-foreground hover:text-foreground"}`}
-                  onClick={() => { setRoleType("endpoint"); setFormData({ ...formData, name: "" }); setSelectedGatewayId(""); setSelectedBackendName(""); }}
+                  onClick={() => { setRoleType("endpoint"); setFormData({ ...formData, name: "" }); setSelectedGatewayId(""); setSelectedBackendName(""); setSelectedRdpUsername(""); }}
                 >
                   <Globe className="h-3.5 w-3.5" />
                   Endpoint
@@ -983,6 +995,7 @@ export default function AdminRoles() {
                     onValueChange={(v) => {
                       setSelectedGatewayId(v);
                       setSelectedBackendName("");
+                      setSelectedRdpUsername("");
                     }}
                   >
                     <SelectTrigger>
@@ -1002,7 +1015,7 @@ export default function AdminRoles() {
                     <Label>Backend</Label>
                     <Select
                       value={selectedBackendName}
-                      onValueChange={setSelectedBackendName}
+                      onValueChange={(v) => { setSelectedBackendName(v); setSelectedRdpUsername(""); }}
                     >
                       <SelectTrigger>
                         <SelectValue placeholder="Select a backend..." />
@@ -1013,7 +1026,7 @@ export default function AdminRoles() {
                           const backends = gw?.backends?.length ? gw.backends : [{ name: "Default", accessible: true }];
                           return backends.map((b) => (
                             <SelectItem key={b.name} value={b.name}>
-                              {b.name}
+                              {b.name}{b.protocol === "rdp" ? " (RDP)" : ""}
                             </SelectItem>
                           ));
                         })()}
@@ -1021,9 +1034,31 @@ export default function AdminRoles() {
                     </Select>
                   </div>
                 )}
+                {/* Windows Username input for EdDSA (passwordless RDP) backends */}
+                {selectedGatewayId && selectedBackendName && (() => {
+                  const gw = (gatewayEndpoints || []).find((g) => g.id === selectedGatewayId);
+                  const bk = gw?.backends?.find((b) => b.name === selectedBackendName);
+                  return bk?.auth === "eddsa";
+                })() && (
+                  <div className="space-y-2">
+                    <Label>Windows Username</Label>
+                    <Input
+                      value={selectedRdpUsername}
+                      onChange={(e) => setSelectedRdpUsername(e.target.value)}
+                      placeholder="e.g., Administrator"
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      The local Windows account to log in as via passwordless RDP.
+                    </p>
+                  </div>
+                )}
                 {selectedGatewayId && selectedBackendName && (
                   <p className="text-xs text-muted-foreground">
-                    Creates role <span className="font-mono">dest:{selectedGatewayId}:{selectedBackendName}</span> — grants access to this endpoint.
+                    Creates role <span className="font-mono">dest:{selectedGatewayId}:{selectedBackendName}{(() => {
+                      const gw = (gatewayEndpoints || []).find((g) => g.id === selectedGatewayId);
+                      const bk = gw?.backends?.find((b) => b.name === selectedBackendName);
+                      return bk?.auth === "eddsa" && selectedRdpUsername.trim() ? `:${selectedRdpUsername.trim()}` : "";
+                    })()}</span> — grants access to this endpoint.
                   </p>
                 )}
                 {(!gatewayEndpoints || gatewayEndpoints.length === 0) && (

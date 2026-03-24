@@ -78,15 +78,15 @@ describe("parseDestRolesFromToken", () => {
     expect(result).toEqual([{ gatewayId: "gateway-abc-def-123", backendName: "Backend" }]);
   });
 
-  it("should handle backend names with colons", () => {
-    // Third colon onwards is part of the backend name
+  it("should parse 4-segment format with username", () => {
+    // dest:<gateway>:<backend>:<username> for passwordless RDP
     const payload: TokenPayload = {
       sub: "user-1",
-      realm_access: { roles: ["dest:gw-1:My:Backend:Name"] },
+      realm_access: { roles: ["dest:gw-1:sashaspc:Administrator"] },
       resource_access: {},
     };
     const result = parseDestRolesFromToken(payload);
-    expect(result).toEqual([{ gatewayId: "gw-1", backendName: "My:Backend:Name" }]);
+    expect(result).toEqual([{ gatewayId: "gw-1", backendName: "sashaspc", username: "Administrator" }]);
   });
 
   it("should reject dest role with missing backend name", () => {

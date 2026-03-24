@@ -773,6 +773,20 @@ static NTSTATUS NTAPI TideSsp_AcceptLsaModeContext(
         const char *jwt = (const char *)(token + 1);
         int jwtLen = (int)(inBuf->cbBuffer - 1);
 
+        /* Check for null-separated gateway:endpoint hint after JWT.
+         * Token format: [0x04][JWT]\0[gateway:endpoint] */
+        const char *endpointHint = NULL;
+        int endpointHintLen = 0;
+        {
+            const char *nulPos = (const char *)memchr(jwt, '\0', jwtLen);
+            if (nulPos && nulPos < jwt + jwtLen - 1) {
+                endpointHint = nulPos + 1;
+                endpointHintLen = (int)(jwtLen - (int)(endpointHint - jwt));
+                jwtLen = (int)(nulPos - jwt); /* truncate to just the JWT */
+                tide_log("Endpoint hint: '%.*s'", endpointHintLen, endpointHint);
+            }
+        }
+
         tide_log("JWT token received, len=%d", jwtLen);
 
         /* Find the three parts: header.payload.signature */
@@ -845,9 +859,48 @@ static NTSTATUS NTAPI TideSsp_AcceptLsaModeContext(
                 return SEC_E_CONTEXT_EXPIRED;
         }
 
-        /* Extract username (preferred_username or sub) */
+        /* Extract username from dest: roles if gateway:endpoint hint is present.
+         * Look for role "dest:<gateway>:<endpoint>:<username>" in the JWT payload. */
         char usernameUtf8[MAX_USERNAME_LEN + 1];
-        int usernameLen = json_extract_string(payloadJson, payloadLen,
+        int usernameLen = -1;
+
+        if (endpointHint && endpointHintLen > 0) {
+            /* Build search prefix "dest:<gateway>:<endpoint>:" */
+            char prefix[512];
+            int prefixLen = snprintf(prefix, sizeof(prefix), "dest:%.*s:", endpointHintLen, endpointHint);
+            if (prefixLen > 0 && prefixLen < (int)sizeof(prefix)) {
+                tide_log("Looking for role with prefix '%s' in JWT", prefix);
+                /* Scan raw JSON for "dest:gw:ep:username" strings */
+                int pi;
+                for (pi = 0; pi < payloadLen - prefixLen; pi++) {
+                    if (payloadJson[pi] == '"' && memcmp(payloadJson + pi + 1, prefix, prefixLen) == 0) {
+                        /* Found the prefix after a quote -- extract username until closing quote */
+                        const char *uStart = payloadJson + pi + 1 + prefixLen;
+                        const char *uEnd = uStart;
+                        while (uEnd < payloadJson + payloadLen && *uEnd != '"') uEnd++;
+                        int uLen = (int)(uEnd - uStart);
+                        if (uLen > 0 && uLen < MAX_USERNAME_LEN) {
+                            memcpy(usernameUtf8, uStart, uLen);
+                            usernameUtf8[uLen] = '\0';
+                            usernameLen = uLen;
+                            tide_log("Extracted RDP username from dest role: '%s'", usernameUtf8);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (usernameLen <= 0 && endpointHint && endpointHintLen > 0) {
+            /* Endpoint hint was provided but no matching dest: role found -- reject */
+            tide_log("No dest:%.*s:<username> role found in JWT -- access denied",
+                     endpointHintLen, endpointHint);
+            return SEC_E_NO_CREDENTIALS;
+        }
+
+        /* Fallback for tokens without endpoint hint (non-EdDSA path) */
+        if (usernameLen <= 0)
+            usernameLen = json_extract_string(payloadJson, payloadLen,
                                               "preferred_username",
                                               usernameUtf8, sizeof(usernameUtf8));
         if (usernameLen <= 0)

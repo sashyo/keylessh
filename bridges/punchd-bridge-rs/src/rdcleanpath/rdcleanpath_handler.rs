@@ -102,6 +102,7 @@ async fn run_session(
     let backend_peek = opts.backends.iter().find(|b| b.protocol == "rdp" && b.name == req.destination);
     let is_noauth = backend_peek.map(|b| b.no_auth).unwrap_or(false);
 
+    let mut _rdp_username = String::new();
     if !is_noauth {
         let payload = match opts.auth.verify_token(&req.proxy_auth).await {
             Some(p) => p,
@@ -113,17 +114,21 @@ async fn run_session(
             }
         };
 
-        // Check dest: roles
-        if !check_dest_roles(&payload, &req.destination, opts.tc_client_id.as_deref()) {
-            tracing::error!(
-                "Access denied: no dest:{} role for user {:?}",
-                req.destination,
-                payload.sub
-            );
-            send_error(&send_binary, RDCLEANPATH_ERROR_GENERAL, Some(403));
-            (send_close)(4003, "Forbidden".into());
-            return Err("Access denied".into());
-        }
+        // Check dest: roles and extract RDP username if present
+        // Role format: dest:<gw>:<endpoint>:<username>
+        _rdp_username = match check_dest_roles(&payload, &req.destination, opts.tc_client_id.as_deref()) {
+            Some(u) => u,
+            None => {
+                tracing::error!(
+                    "Access denied: no dest:{} role for user {:?}",
+                    req.destination,
+                    payload.sub
+                );
+                send_error(&send_binary, RDCLEANPATH_ERROR_GENERAL, Some(403));
+                (send_close)(4003, "Forbidden".into());
+                return Err("Access denied".into());
+            }
+        };
     }
 
     // ------------------------------------------------------------------
@@ -199,8 +204,14 @@ async fn run_session(
     // ------------------------------------------------------------------
     let mut mcs_patch_protocol: u32 = 0;
     if is_eddsa {
-        tracing::info!("Starting CredSSP with TideSSP/NEGOEX for \"{}\"", req.destination);
-        super::credssp::perform_credssp(&mut tls_stream, &req.proxy_auth).await?;
+        // Pass gateway:endpoint as username so TideSSP can extract the
+        // Windows username from dest:<gateway>:<endpoint>:<username> roles
+        let credssp_user = match opts.gateway_id.as_deref() {
+            Some(gw) => format!("{gw}:{}", req.destination),
+            None => req.destination.clone(),
+        };
+        tracing::info!("Starting CredSSP with TideSSP/NEGOEX for \"{}\" (credssp_user=\"{}\")", req.destination, credssp_user);
+        super::credssp::perform_credssp(&mut tls_stream, &req.proxy_auth, &credssp_user).await?;
         tracing::info!("CredSSP/NLA completed for \"{}\"", req.destination);
 
         // Read and consume 4-byte Early User Authorization Result PDU
@@ -344,23 +355,53 @@ fn extract_peer_cert_chain(tls_stream: &TlsStream<TcpStream>) -> Vec<Vec<u8>> {
     }
 }
 
-/// Check whether the JWT payload has a "dest:<destination>" role.
+/// Check whether the JWT payload has a matching "dest:" role for the given destination.
 /// Looks in both realm_access.roles and resource_access[tc_client_id].roles.
-fn check_dest_roles(payload: &JwtPayload, destination: &str, tc_client_id: Option<&str>) -> bool {
-    // Accept both "dest:<name>" and "dest:<gateway>:<name>" role formats
-    let required_simple = format!("dest:{destination}");
-
-    let check_roles = |roles: &[String]| -> bool {
-        roles.iter().any(|r| {
-            r == &required_simple
-                || (r.starts_with("dest:") && r.ends_with(&format!(":{destination}")))
-        })
+///
+/// Accepted role formats:
+///   - "dest:<endpoint>"                          (simple)
+///   - "dest:<gateway>:<endpoint>"                (gateway-scoped)
+///   - "dest:<gateway>:<endpoint>:<username>"     (with RDP username)
+///
+/// Returns Some(username) if a role with an explicit username is found,
+/// or Some("") if access is granted but no username is embedded.
+fn check_dest_roles(payload: &JwtPayload, destination: &str, tc_client_id: Option<&str>) -> Option<String> {
+    let check_roles = |roles: &[String]| -> Option<String> {
+        let mut granted = false;
+        let mut username: Option<String> = None;
+        for r in roles {
+            if !r.starts_with("dest:") {
+                continue;
+            }
+            let parts: Vec<&str> = r[5..].splitn(4, ':').collect();
+            match parts.len() {
+                // dest:<endpoint>
+                1 if parts[0].eq_ignore_ascii_case(destination) => {
+                    granted = true;
+                }
+                // dest:<gateway>:<endpoint>
+                2 if parts[1].eq_ignore_ascii_case(destination) => {
+                    granted = true;
+                }
+                // dest:<gateway>:<endpoint>:<username>
+                3 if parts[1].eq_ignore_ascii_case(destination) => {
+                    username = Some(parts[2].to_string());
+                    granted = true;
+                }
+                _ => {}
+            }
+        }
+        if granted {
+            Some(username.unwrap_or_default())
+        } else {
+            None
+        }
     };
 
     // Check realm_access.roles
     if let Some(ref ra) = payload.realm_access {
-        if check_roles(&ra.roles) {
-            return true;
+        if let Some(u) = check_roles(&ra.roles) {
+            return Some(u);
         }
     }
 
@@ -373,14 +414,14 @@ fn check_dest_roles(payload: &JwtPayload, destination: &str, tc_client_id: Optio
                     .iter()
                     .filter_map(|v| v.as_str().map(|s| s.to_string()))
                     .collect();
-                if check_roles(&role_strs) {
-                    return true;
+                if let Some(u) = check_roles(&role_strs) {
+                    return Some(u);
                 }
             }
         }
     }
 
-    false
+    None
 }
 
 /// Find an RDP backend matching the given destination name.

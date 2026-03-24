@@ -40,6 +40,9 @@
   var usernameInput = document.getElementById("rdp-username");
   var passwordInput = document.getElementById("rdp-password");
   var autoConnectSpinner = document.getElementById("auto-connect-spinner");
+  var reconnectPanel = document.getElementById("reconnect-panel");
+  var reconnectMessage = document.getElementById("reconnect-message");
+  var reconnectBtn = document.getElementById("reconnect-btn");
 
   // ── State ─────────────────────────────────────────────────────
 
@@ -58,6 +61,35 @@
   var backendName = null;
   var bulkEnabled = false;
   var rdpSession = null;
+  var isEddsaSession = false;
+  var eddsaUsername = "";
+
+  // ── Helpers ─────────────────────────────────────────────────────
+
+  // Extract RDP username from dest: roles in JWT payload.
+  // Looks for dest:<gateway>:<endpoint>:<username> format.
+  function extractRdpUsername(jwtPayload, endpoint) {
+    var allRoles = [];
+    if (jwtPayload.realm_access && jwtPayload.realm_access.roles) {
+      allRoles = allRoles.concat(jwtPayload.realm_access.roles);
+    }
+    if (jwtPayload.resource_access) {
+      for (var key in jwtPayload.resource_access) {
+        var res = jwtPayload.resource_access[key];
+        if (res && res.roles) allRoles = allRoles.concat(res.roles);
+      }
+    }
+    for (var i = 0; i < allRoles.length; i++) {
+      var r = allRoles[i];
+      if (typeof r !== "string" || r.indexOf("dest:") !== 0) continue;
+      var parts = r.substring(5).split(":");
+      // dest:<gateway>:<endpoint>:<username>
+      if (parts.length === 3 && parts[1].toLowerCase() === endpoint.toLowerCase()) {
+        return parts[2];
+      }
+    }
+    return null;
+  }
 
   // ── DCWebSocket shim ──────────────────────────────────────────
   //
@@ -493,7 +525,10 @@
         try {
           var jwtParts = sessionToken.split(".");
           var jwtPayload = JSON.parse(atob(jwtParts[1].replace(/-/g, "+").replace(/_/g, "/")));
-          var jwtUsername = jwtPayload.preferred_username || jwtPayload.sub || "user";
+          // Extract RDP username from dest: role (dest:gw:endpoint:username)
+          var jwtUsername = extractRdpUsername(jwtPayload, backendName) || jwtPayload.preferred_username || jwtPayload.sub || "user";
+          isEddsaSession = true;
+          eddsaUsername = jwtUsername;
           console.log("[RDP] EdDSA backend - auto-connecting as:", jwtUsername);
           startRdpSession(jwtUsername, "");
         } catch (e) {
@@ -604,15 +639,28 @@
   }
 
   function showConnectForm() {
+    if (isEddsaSession) {
+      showReconnectPanel("Session ended");
+      return;
+    }
     connectForm.classList.remove("hidden");
     rdpCanvas.classList.add("hidden");
     connectBtn.disabled = false;
     formError.textContent = "";
   }
 
+  function showReconnectPanel(message) {
+    connectForm.classList.add("hidden");
+    rdpCanvas.classList.add("hidden");
+    autoConnectSpinner.classList.add("hidden");
+    reconnectPanel.classList.remove("hidden");
+    reconnectMessage.textContent = message || "Session ended";
+  }
+
   function hideConnectForm() {
     connectForm.classList.add("hidden");
     autoConnectSpinner.classList.add("hidden");
+    reconnectPanel.classList.add("hidden");
     rdpCanvas.classList.remove("hidden");
   }
 
@@ -896,6 +944,12 @@
 
   passwordInput.addEventListener("keydown", function (e) {
     if (e.key === "Enter") connectBtn.click();
+  });
+
+  reconnectBtn.addEventListener("click", function () {
+    reconnectPanel.classList.add("hidden");
+    autoConnectSpinner.classList.remove("hidden");
+    startRdpSession(eddsaUsername, "");
   });
 
   disconnectBtn.addEventListener("click", function () {

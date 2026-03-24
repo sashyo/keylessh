@@ -1261,21 +1261,19 @@ async fn handle_request(
                 .copied()
                 .collect();
 
-            let gw_id_lower = gw_id.to_lowercase();
-            let backend_lower = backend.to_lowercase();
-
             let has_access = all_roles.iter().any(|r| {
-                let r_lower = r.to_lowercase();
-                if !r_lower.starts_with("dest:") {
+                if !r.to_lowercase().starts_with("dest:") {
                     return false;
                 }
-                let after_dest = &r[5..]; // skip "dest:"
-                if let Some(second_colon) = after_dest.find(':') {
-                    let gw = &after_dest[..second_colon];
-                    let bk = &after_dest[second_colon + 1..];
-                    gw.to_lowercase() == gw_id_lower && bk.to_lowercase() == backend_lower
-                } else {
-                    false
+                let parts: Vec<&str> = r[5..].splitn(4, ':').collect();
+                match parts.len() {
+                    // dest:<endpoint>
+                    1 => parts[0].eq_ignore_ascii_case(backend),
+                    // dest:<gateway>:<endpoint>
+                    2 => parts[0].eq_ignore_ascii_case(gw_id) && parts[1].eq_ignore_ascii_case(backend),
+                    // dest:<gateway>:<endpoint>:<username>
+                    3 => parts[0].eq_ignore_ascii_case(gw_id) && parts[1].eq_ignore_ascii_case(backend),
+                    _ => false,
                 }
             });
 

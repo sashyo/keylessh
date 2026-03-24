@@ -19,8 +19,8 @@ import { api, type GatewayEndpoint } from "@/lib/api";
 
 type ServiceItem =
   | { kind: "ssh"; server: ServerWithAccess }
-  | { kind: "web"; endpoint: GatewayEndpoint; backend: { name: string; protocol?: string; accessible?: boolean } }
-  | { kind: "rdp"; endpoint: GatewayEndpoint; backend: { name: string; protocol?: string; accessible?: boolean } };
+  | { kind: "web"; endpoint: GatewayEndpoint; backend: { name: string; protocol?: string; auth?: string; rdpUsernames?: string[]; accessible?: boolean } }
+  | { kind: "rdp"; endpoint: GatewayEndpoint; backend: { name: string; protocol?: string; auth?: string; rdpUsernames?: string[]; accessible?: boolean } };
 
 function ServerCard({ server, sshBlocked }: { server: ServerWithAccess; sshBlocked?: boolean }) {
   const [selectedUser, setSelectedUser] = useState<string>(server.allowedSshUsers[0] || "");
@@ -232,14 +232,15 @@ function GatewayEndpointCard({ endpoint, backend }: { endpoint: GatewayEndpoint;
   );
 }
 
-function RdpEndpointCard({ endpoint, backend }: { endpoint: GatewayEndpoint; backend: { name: string; accessible?: boolean } }) {
+function RdpEndpointCard({ endpoint, backend }: { endpoint: GatewayEndpoint; backend: { name: string; auth?: string; rdpUsernames?: string[]; accessible?: boolean } }) {
   const accessible = backend.accessible !== false;
   const isDisabled = !accessible || !endpoint.online;
+  const isEddsa = backend.auth === "eddsa";
+  const usernames = backend.rdpUsernames || [];
+  const [selectedUser, setSelectedUser] = useState<string>(usernames[0] || "");
   const handleConnect = () => {
-    // Navigate to the gateway's RDP page via signal server redirect
     const url = endpoint.signalServerUrl.replace(/\/$/, "");
     const token = localStorage.getItem("access_token") || "";
-    // Select gateway first, then redirect to /rdp page
     const params = new URLSearchParams({
       gateway: endpoint.id,
       backend: backend.name,
@@ -265,6 +266,7 @@ function RdpEndpointCard({ endpoint, backend }: { endpoint: GatewayEndpoint; bac
           </div>
           <div className="flex items-center gap-2">
             <Badge variant="outline" className="text-xs">RDP</Badge>
+            {isEddsa && <Badge variant="outline" className="text-xs label-success">Passwordless</Badge>}
             {endpoint.online ? (
               <Badge variant="outline" className="gap-1.5 label-success">
                 <span className="h-2 w-2 rounded-full bg-[hsl(var(--neon-green))] animate-pulse" />
@@ -287,8 +289,21 @@ function RdpEndpointCard({ endpoint, backend }: { endpoint: GatewayEndpoint; bac
         {!accessible && (
           <p className="text-xs text-muted-foreground">
             No access to this endpoint. Ask an admin to grant a role like{" "}
-            <span className="font-mono">dest:{endpoint.id}:{backend.name}</span>.
+            <span className="font-mono">dest:{endpoint.id}:{backend.name}:{isEddsa ? "username" : ""}</span>.
           </p>
+        )}
+
+        {isEddsa && usernames.length > 0 && (
+          <Select value={selectedUser} onValueChange={setSelectedUser}>
+            <SelectTrigger className="h-8 text-sm">
+              <SelectValue placeholder="Select user..." />
+            </SelectTrigger>
+            <SelectContent>
+              {usernames.map((u) => (
+                <SelectItem key={u} value={u}>{u}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         )}
 
         {isDisabled ? (
@@ -417,6 +432,7 @@ function ServiceListItem({ item, sshBlocked }: { item: ServiceItem; sshBlocked?:
       </div>
       <div className="flex items-center gap-3 pl-13 sm:pl-0">
         {isRdp && <Badge variant="outline" className="text-xs shrink-0">RDP</Badge>}
+        {isRdp && backend.auth === "eddsa" && <Badge variant="outline" className="text-xs shrink-0 label-success">Passwordless</Badge>}
         {endpoint.online ? (
           <Badge variant="outline" className="gap-1.5 label-success shrink-0">
             <span className="h-2 w-2 rounded-full bg-[hsl(var(--neon-green))] animate-pulse" />

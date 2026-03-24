@@ -11,6 +11,8 @@ import type { TokenPayload } from "./tideJWT";
 export interface DestPermission {
   gatewayId: string;
   backendName: string;
+  /** Windows username for RDP/EdDSA passwordless logon (from dest:gw:ep:user roles) */
+  username?: string;
 }
 
 function getAllRoleNames(payload: TokenPayload): string[] {
@@ -23,14 +25,14 @@ function getAllRoleNames(payload: TokenPayload): string[] {
 
 function parseDestRole(role: string): DestPermission | null {
   if (!/^dest:/i.test(role)) return null;
-  // "dest:<gatewayId>:<backendName>" — split on first two colons
-  const firstColon = role.indexOf(":");
-  const secondColon = role.indexOf(":", firstColon + 1);
-  if (secondColon < 0) return null;
-  const gatewayId = role.slice(firstColon + 1, secondColon).trim();
-  const backendName = role.slice(secondColon + 1).trim();
+  // "dest:<gatewayId>:<backendName>" or "dest:<gatewayId>:<backendName>:<username>"
+  const parts = role.slice(5).split(":");
+  if (parts.length < 2) return null;
+  const gatewayId = parts[0].trim();
+  const backendName = parts[1].trim();
   if (!gatewayId || !backendName) return null;
-  return { gatewayId, backendName };
+  const username = parts.length >= 3 ? parts.slice(2).join(":").trim() : undefined;
+  return { gatewayId, backendName, ...(username ? { username } : {}) };
 }
 
 export function parseDestRolesFromToken(

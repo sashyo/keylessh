@@ -175,17 +175,17 @@ export const api = {
     },
     users: {
       list: async (): Promise<AdminUser[]> => {
-        const users = await tc.getUsers();
-        return users.map((u: any) => ({
+        const usersWithRoles = await tc.getUsersWithRoles();
+        return usersWithRoles.map((u: any) => ({
           id: u.id ?? "",
           firstName: u.firstName ?? "",
           lastName: u.lastName ?? "",
           email: u.email ?? "",
           username: u.username,
-          role: [],
+          role: u.clientRoles || [],
           linked: !!(u.attributes as any)?.vuid?.[0],
           enabled: u.enabled !== false,
-          isAdmin: false,
+          isAdmin: (u.clientRoles || []).includes("tide-realm-admin"),
         } as AdminUser));
       },
       add: async (data: { username: string; firstName: string; lastName: string; email: string }) => {
@@ -534,7 +534,7 @@ export interface GatewayEndpoint {
   id: string;
   displayName: string;
   description: string;
-  backends: { name: string; protocol?: string; accessible: boolean }[];
+  backends: { name: string; protocol?: string; auth?: string; rdpUsernames?: string[]; accessible: boolean }[];
   online: boolean;
   clientCount: number;
   signalServerId: string;

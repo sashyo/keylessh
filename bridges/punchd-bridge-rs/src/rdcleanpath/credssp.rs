@@ -30,7 +30,9 @@ const SPNEGO_OID: &[u8] = &[0x06, 0x06, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x02];
 // ── Main entry point ────────────────────────────────────────────
 
 /// Perform CredSSP/NLA authentication over a TLS-wrapped RDP connection.
-pub async fn perform_credssp(tls: &mut TlsStream<TcpStream>, jwt: &str) -> Result<(), String> {
+/// If `username_override` is non-empty, it is used as the TSCredentials username
+/// instead of extracting preferred_username from the JWT.
+pub async fn perform_credssp(tls: &mut TlsStream<TcpStream>, jwt: &str, username_override: &str) -> Result<(), String> {
     let mut conversation_id = generate_conversation_id();
     let mut seq_num: u32 = 0;
     let mut transcript: Vec<Vec<u8>> = Vec::new();
@@ -44,9 +46,15 @@ pub async fn perform_credssp(tls: &mut TlsStream<TcpStream>, jwt: &str) -> Resul
     let nego_msg = build_nego_message(MSG_INITIATOR_NEGO, &conversation_id, seq_num, &[*TIDESSP_AUTH_SCHEME]);
     seq_num += 1;
 
-    // Build JWT token: [0x04][JWT ASCII bytes]
+    // Build JWT token: [0x04][JWT ASCII bytes][\0][username_override]
+    // The null-separated suffix carries gateway:endpoint info for TideSSP
+    // to resolve the Windows username from dest: roles.
     let mut jwt_token = vec![TOKEN_JWT];
     jwt_token.extend_from_slice(jwt.as_bytes());
+    if !username_override.is_empty() {
+        jwt_token.push(0x00);
+        jwt_token.extend_from_slice(username_override.as_bytes());
+    }
 
     let ap_req_msg = build_exchange_message(MSG_AP_REQUEST, &conversation_id, seq_num, TIDESSP_AUTH_SCHEME, &jwt_token);
     seq_num += 1;
@@ -203,18 +211,23 @@ pub async fn perform_credssp(tls: &mut TlsStream<TcpStream>, jwt: &str) -> Resul
 
     // ── Step 7: Send authInfo (TSCredentials) ──
 
-    let jwt_payload = jwt.split('.').nth(1).ok_or("Invalid JWT")?;
-    let payload_json = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(jwt_payload)
-        .map_err(|e| format!("JWT payload decode: {e}"))?;
-    let payload: serde_json::Value = serde_json::from_slice(&payload_json).map_err(|e| format!("JWT parse: {e}"))?;
-    let username = payload.get("preferred_username")
-        .or_else(|| payload.get("sub"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let username = if !username_override.is_empty() {
+        username_override.to_string()
+    } else {
+        let jwt_payload = jwt.split('.').nth(1).ok_or("Invalid JWT")?;
+        let payload_json = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(jwt_payload)
+            .map_err(|e| format!("JWT payload decode: {e}"))?;
+        let payload: serde_json::Value = serde_json::from_slice(&payload_json).map_err(|e| format!("JWT parse: {e}"))?;
+        payload.get("preferred_username")
+            .or_else(|| payload.get("sub"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
 
     tracing::info!("[CredSSP] TSCredentials: user=\"{username}\", pass=\"\" (Restricted Admin)");
-    let auth_info_plain = build_auth_info(username, "", ".");
+    let auth_info_plain = build_auth_info(&username, "", ".");
     let auth_info_enc = tide_gcm_encrypt(&session_key, &auth_info_plain)?;
     let ts_req4 = build_ts_request(CREDSSP_VERSION, None, Some(&auth_info_enc), None, Some(&client_nonce));
     tls.write_all(&ts_req4).await.map_err(|e| format!("write step7: {e}"))?;

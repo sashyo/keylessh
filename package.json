@@ -118,7 +118,9 @@
   "overrides": {
     "drizzle-kit": {
       "@esbuild-kit/esm-loader": "npm:tsx@^4.20.4"
-    }
+    },
+    "dompurify": "3.3.3",
+    "elliptic": "6.6.1"
   },
   "optionalDependencies": {
     "bufferutil": "^4.0.8"

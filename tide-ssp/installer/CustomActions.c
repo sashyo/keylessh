@@ -12,12 +12,14 @@
 #include <msi.h>
 #include <msiquery.h>
 #include <lm.h>
+#include <commdlg.h>
 #include <strsafe.h>
 #include <stdio.h>
 
 #pragma comment(lib, "msi.lib")
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "netapi32.lib")
+#pragma comment(lib, "comdlg32.lib")
 
 #define LSA_KEY L"SYSTEM\\CurrentControlSet\\Control\\Lsa"
 #define MSV1_0_KEY L"SYSTEM\\CurrentControlSet\\Control\\Lsa\\MSV1_0"
@@ -245,56 +247,87 @@ static BOOL ValidateJsonContent(const WCHAR *json)
 }
 
 /*
+ * BrowseConfig — immediate CA, opens a file dialog to select tidecloak.json.
+ * Sets TIDE_CONFIG_FILE property with the selected path.
+ */
+UINT __stdcall BrowseConfig(MSIHANDLE hInstall)
+{
+    WCHAR filePath[MAX_PATH] = {0};
+
+    /* Find the MSI dialog window to use as owner */
+    HWND hwndOwner = FindWindowW(L"MsiDialogCloseClass", NULL);
+    if (!hwndOwner)
+        hwndOwner = FindWindowW(L"MsiDialogNoCloseClass", NULL);
+    if (!hwndOwner)
+        hwndOwner = GetForegroundWindow();
+
+    OPENFILENAMEW ofn;
+    ZeroMemory(&ofn, sizeof(ofn));
+    ofn.lStructSize = sizeof(OPENFILENAMEW);
+    ofn.hwndOwner = hwndOwner;
+    ofn.lpstrFilter = L"JSON Files\0*.json\0All Files\0*.*\0";
+    ofn.lpstrFile = filePath;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrTitle = L"Select tidecloak.json";
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    ofn.lpstrDefExt = L"json";
+
+    if (GetOpenFileNameW(&ofn)) {
+        MsiSetPropertyW(hInstall, L"TIDE_CONFIG_FILE", filePath);
+    }
+
+    return ERROR_SUCCESS;
+}
+
+/*
  * ValidateConfig — immediate CA, runs during UI sequence.
- * Checks TIDE_CONFIG_JSON (pasted) or TIDE_CONFIG_FILE (file path).
- * Shows a message box on failure.
+ * Opens a file browser dialog to select tidecloak.json, then validates it.
  */
 UINT __stdcall ValidateConfig(MSIHANDLE hInstall)
 {
-    /* Check pasted JSON first */
+    WCHAR filePath[MAX_PATH] = {0};
     WCHAR jsonBuf[32768];
-    DWORD jsonLen = sizeof(jsonBuf) / sizeof(WCHAR);
 
-    if (MsiGetPropertyW(hInstall, L"TIDE_CONFIG_JSON", jsonBuf, &jsonLen) == ERROR_SUCCESS
-        && jsonLen > 0 && jsonBuf[0] != L'\0') {
-        if (ValidateJsonContent(jsonBuf))
-            return ERROR_SUCCESS;
+    /* Open file browser dialog */
+    HWND hwnd = FindWindowW(L"MsiDialogCloseClass", NULL);
+    if (!hwnd) hwnd = FindWindowW(L"MsiDialogNoCloseClass", NULL);
+    if (!hwnd) hwnd = GetForegroundWindow();
 
-        MessageBoxW(NULL,
-            L"The pasted JSON does not appear to be a valid TideCloak configuration.\n"
-            L"It must contain a \"jwk\" section with an Ed25519 public key (\"x\" field).",
-            L"TideSSP \x2014 Invalid JSON", MB_OK | MB_ICONERROR);
+    OPENFILENAMEW ofn;
+    ZeroMemory(&ofn, sizeof(ofn));
+    ofn.lStructSize = sizeof(OPENFILENAMEW);
+    ofn.hwndOwner = hwnd;
+    ofn.lpstrFilter = L"JSON Files\0*.json\0All Files\0*.*\0";
+    ofn.lpstrFile = filePath;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrTitle = L"Select tidecloak.json";
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    ofn.lpstrDefExt = L"json";
+
+    if (!GetOpenFileNameW(&ofn)) {
+        /* User cancelled */
         return ERROR_INSTALL_FAILURE;
     }
 
-    /* Fall back to file path */
-    WCHAR filePath[MAX_PATH];
-    DWORD pathLen = MAX_PATH;
+    /* Store the selected path */
+    MsiSetPropertyW(hInstall, L"TIDE_CONFIG_FILE", filePath);
 
-    if (MsiGetPropertyW(hInstall, L"TIDE_CONFIG_FILE", filePath, &pathLen) != ERROR_SUCCESS
-        || pathLen == 0 || filePath[0] == L'\0') {
-        MessageBoxW(NULL,
-            L"Please provide a tidecloak.json configuration.\n\n"
-            L"Either paste the JSON content or enter a file path.",
-            L"TideSSP \x2014 Configuration Required", MB_OK | MB_ICONWARNING);
-        return ERROR_INSTALL_FAILURE;
-    }
-
+    /* Read and validate the file */
     int wLen = ReadFileToWide(filePath, jsonBuf, sizeof(jsonBuf) / sizeof(WCHAR));
     if (wLen == 0) {
-        MessageBoxW(NULL,
-            L"Cannot read the specified file. Please check the path and try again.",
-            L"TideSSP \x2014 File Error", MB_OK | MB_ICONERROR);
+        MessageBoxW(hwnd,
+            L"Cannot read the selected file.",
+            L"TideSSP - File Error", MB_OK | MB_ICONERROR);
         return ERROR_INSTALL_FAILURE;
     }
 
     if (!ValidateJsonContent(jsonBuf)) {
-        MessageBoxW(NULL,
-            L"The file does not appear to be a valid TideCloak configuration.\n"
-            L"It must contain a \"jwk\" section with an Ed25519 public key (\"x\" field).\n\n"
+        MessageBoxW(hwnd,
+            L"The selected file does not appear to be a valid TideCloak configuration.\n"
+            L"It must contain a \"jwk\" section with an Ed25519 public key.\n\n"
             L"Export from TideCloak Admin Console:\n"
-            L"Clients \x2192 your client \x2192 Installation tab.",
-            L"TideSSP \x2014 Invalid Configuration", MB_OK | MB_ICONERROR);
+            L"Clients > your client > Action dropdown > Download adapter config.",
+            L"TideSSP - Invalid Configuration", MB_OK | MB_ICONERROR);
         return ERROR_INSTALL_FAILURE;
     }
 
