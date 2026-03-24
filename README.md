@@ -39,6 +39,20 @@ The result: enterprise-grade SSH access control without any private keys to mana
 - **Signal server** (`signal-server/`) - coordinates P2P connections between browsers and gateways via WebSocket signaling (SDP/ICE), relays HTTP traffic before DataChannel is ready, and generates ephemeral TURN credentials. Deployed with a coturn sidecar for STUN NAT discovery and TURN relay fallback. See [Architecture](bridges/punchd-bridge/docs/ARCHITECTURE.md#system-overview).
 - **Multi-backend routing** (`bridges/punchd-bridge`) - proxy to multiple HTTP backends and RDP servers from a single gateway. See [Multi-Backend Routing](bridges/punchd-bridge/docs/ARCHITECTURE.md#multi-backend-routing).
 
+## Downloads
+
+Each [release](../../releases) includes pre-built binaries and installers:
+
+| Artifact | Platform | Description |
+|----------|----------|-------------|
+| `ssh-bridge-linux-x64.tar.gz` | Linux | **SSH Bridge** — WebSocket-to-TCP tunnel for browser SSH sessions. Deploy on any server with SSH access to your targets. Verifies JWTs against TideCloak, pipes SSH traffic between browser and server. |
+| `ssh-bridge-windows-x64.tar.gz` | Windows | SSH Bridge for Windows (same as above, runs as a system tray app). First-run setup wizard auto-configures from `tidecloak.json`. |
+| `punchd-gateway-linux-x64.tar.gz` | Linux | **Punch'd Gateway** — NAT-traversing reverse proxy. Runs on your private network, connects outbound to the signal server, and proxies HTTP/RDP traffic to local backends. Handles TideCloak OIDC auth, WebRTC DataChannel, and TURN fallback. |
+| `punchd-gateway-windows-x64.tar.gz` | Windows | Punch'd Gateway for Windows (same as above). |
+| `TideSSP.msi` | Windows | **TideSSP Installer** — Windows Security Support Provider for passwordless RDP. Installs `TideSSP.dll` and `TideSubAuth.dll` to System32, registers them as LSA security packages, and copies your TideCloak config. Reboot required after install. |
+
+All components require a `tidecloak.json` exported from your TideCloak admin console. See the [Deployment Guide](docs/DEPLOYMENT.md) for step-by-step setup.
+
 ## Project Structure
 
 ```
@@ -46,11 +60,13 @@ keylessh/
 ├── client/                  # React UI (xterm.js, SSH client, SFTP browser)
 ├── server/                  # Express API + WebSocket bridge + SQLite
 ├── shared/                  # Shared types + schema
-├── signal-server/           # P2P signaling + HTTP relay for punchd-bridge
+├── signal-server/           # P2P signaling + HTTP relay + STUN/TURN
 ├── bridges/
-│   ├── tcp-bridge/          # Stateless WS↔TCP forwarder (optional)
-│   └── punchd-bridge/       # NAT-traversing HTTP reverse proxy gateway
-│       └── gateway/         # Gateway source code
+│   ├── ssh-bridge-rs/       # Rust SSH bridge (WS↔TCP tunnel, JWT auth)
+│   ├── punchd-bridge/       # NAT-traversing HTTP reverse proxy (Node.js)
+│   ├── punchd-bridge-rs/    # NAT-traversing HTTP reverse proxy (Rust)
+│   └── tcp-bridge/          # Stateless WS↔TCP forwarder (optional)
+├── tide-ssp/                # Windows SSP for passwordless RDP (C + WiX MSI)
 ├── docs/                    # Architecture, deployment, developer guides
 └── script/                  # TideCloak setup scripts
 ```

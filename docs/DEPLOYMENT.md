@@ -1,17 +1,426 @@
-# Deployment (Production)
+# Deployment Guide
 
-This app has two deployable services and requires a TideCloak docker instance and connectivity to the Tide Decentralized Network (Tide Cybersecurity Fabric):
+KeyleSSH has several deployable components. This guide walks through deploying each one in order, since later components depend on configuration from earlier ones.
 
-1. **Main server** (required): serves the React app + REST API + default local `/ws/tcp` WebSocket bridge.
-2. **TideCloak server** (required): serves the authentication and authorization services.
-3. **Signal server** (optional): P2P signaling + HTTP relay for punchd-bridge gateways.
-4. **Blind bridge** (optional): `bridges/tcp-bridge` as a separate, auto-scaling WS↔TCP forwarder (recommended for high concurrency).
-5. **Punchd bridge** (optional): `bridges/punchd-bridge` NAT-traversing HTTP reverse proxy gateway.
-6. **Tide Fabric** (provided by Tide): Tide's Decentralized Network for Policy authorization and SSH signing.
+## Overview
 
-For most deployments you run **one main server** with a persistent `data/` volume, connectivity to the Tide Fabric, and optionally an external `bridges/tcp-bridge`.
+| Component | What it does | Runs on | Required? |
+|-----------|-------------|---------|-----------|
+| **Main Server** | React UI + REST API + built-in SSH bridge | Linux VM / container | Yes |
+| **TideCloak** | Authentication & authorization (OIDC) | Docker | Yes |
+| **Signal Server** | WebRTC signaling + HTTP relay + STUN/TURN | Public-facing Linux VM | For Punch'd Bridge |
+| **Punch'd Bridge** | NAT-traversing reverse proxy gateway | Private network | For RDP / web app access |
+| **SSH Bridge** | WebSocket-to-TCP tunnel for SSH sessions | Any server with SSH access | For standalone SSH bridging |
+| **TideSSP** | Passwordless RDP via Ed25519 SSP | Windows RDP target | For passwordless RDP |
 
-## Main Server (Required)
+**Deployment order:**
+
+1. TideCloak (provides `tidecloak.json` used by everything else)
+2. Signal Server (provides URL + secrets used by gateways)
+3. Punch'd Bridge (connects to signal server)
+4. SSH Bridge (standalone, just needs `tidecloak.json`)
+5. TideSSP (on each Windows RDP target machine)
+
+---
+
+## 1. TideCloak
+
+TideCloak provides OIDC authentication. After setup, export the adapter config — every other component needs it.
+
+### Export tidecloak.json
+
+1. Open **TideCloak Admin Console**
+2. Go to **Clients > your client > Action dropdown > Download adapter config**
+3. Save as `tidecloak.json`
+
+Keep this file — you'll need it for every component below.
+
+---
+
+## 2. Signal Server
+
+The signal server is the public entry point. It coordinates WebRTC connections between browsers and gateways, and relays HTTP traffic as a fallback.
+
+### Deploy with Docker
+
+```bash
+cd signal-server
+./deploy.sh
+```
+
+The script will:
+- Auto-generate `API_SECRET` and `TURN_SECRET` (saved to `.env`)
+- Detect your public IP
+- Build the Docker image
+- Start the signal server (port 9090) and coturn (port 3478)
+- Print connection details
+
+### Save these values
+
+After deployment, the script outputs:
+
+```
+Signal:     https://YOUR_IP:9090
+Signaling:  wss://YOUR_IP:9090
+STUN/TURN:  YOUR_IP:3478
+API_SECRET: <generated>
+TURN_SECRET: <generated>
+```
+
+**Save `API_SECRET` and `TURN_SECRET`** — you'll pass them to each Punch'd Bridge gateway.
+
+### Environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | 9090 | Listen port |
+| `API_SECRET` | — | Shared secret for gateway registration |
+| `TURN_SECRET` | — | Shared secret for TURN credentials |
+| `TIDECLOAK_CONFIG_B64` | — | Base64-encoded `tidecloak.json` |
+| `TLS_CERT_PATH` | — | TLS certificate (enables HTTPS/WSS) |
+| `TLS_KEY_PATH` | — | TLS private key |
+| `ICE_SERVERS` | — | STUN servers, e.g. `stun:YOUR_IP:3478` |
+| `TURN_SERVER` | — | TURN server, e.g. `turn:YOUR_IP:3478` |
+| `ALLOWED_ORIGINS` | same-origin | Comma-separated CORS origins |
+
+### Firewall rules
+
+Open these ports on the signal server VM:
+
+| Port | Protocol | Purpose |
+|------|----------|---------|
+| 9090 | TCP | Signal server (HTTP + WebSocket) |
+| 3478 | UDP + TCP | STUN/TURN |
+| 49152–65535 | UDP | TURN relay range |
+
+### Health check
+
+```bash
+curl https://YOUR_IP:9090/health
+# {"status":"ok","gateways":0,"clients":0}
+```
+
+---
+
+## 3. Punch'd Bridge (Gateway)
+
+The gateway runs on your private network and connects outbound to the signal server. It proxies HTTP requests to local backends (web apps, RDP servers) and handles TideCloak authentication.
+
+Available in two implementations:
+- **Node.js** (`bridges/punchd-bridge/gateway`) — full-featured
+- **Rust** (`bridges/punchd-bridge-rs`) — smaller footprint, same protocol
+
+### Deploy (Docker)
+
+```bash
+docker build -t keylessh-gateway bridges/punchd-bridge/gateway
+
+docker run -d --restart unless-stopped \
+  --name keylessh-gateway \
+  -p 7891:7891 -p 7892:7892 \
+  -e STUN_SERVER_URL=wss://SIGNAL_SERVER_IP:9090 \
+  -e API_SECRET=<from signal server deploy> \
+  -e ICE_SERVERS=stun:SIGNAL_SERVER_IP:3478 \
+  -e TURN_SERVER=turn:SIGNAL_SERVER_IP:3478 \
+  -e TURN_SECRET=<from signal server deploy> \
+  -e TIDECLOAK_CONFIG_B64=$(base64 -w0 data/tidecloak.json) \
+  -e BACKENDS="MyApp=http://localhost:3000,RDP=rdp://rdp-host:3389" \
+  keylessh-gateway
+```
+
+### Deploy (Rust, native binary)
+
+```bash
+cd bridges/punchd-bridge-rs
+cargo build --release
+
+STUN_SERVER_URL=wss://SIGNAL_SERVER_IP:9090 \
+API_SECRET=<from signal server deploy> \
+ICE_SERVERS=stun:SIGNAL_SERVER_IP:3478 \
+TURN_SERVER=turn:SIGNAL_SERVER_IP:3478 \
+TURN_SECRET=<from signal server deploy> \
+TIDECLOAK_CONFIG_B64=$(base64 -w0 data/tidecloak.json) \
+BACKENDS="MyApp=http://localhost:3000" \
+./target/release/punchd-bridge-rs
+```
+
+### Environment variables
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `STUN_SERVER_URL` | Yes | — | Signal server WebSocket URL (`wss://host:9090`) |
+| `API_SECRET` | Yes | — | Must match signal server's `API_SECRET` |
+| `BACKENDS` | Yes | — | Backend mapping: `Name=http://host:port,RDP=rdp://host:3389` |
+| `TIDECLOAK_CONFIG_B64` | — | — | Base64-encoded `tidecloak.json` |
+| `TIDECLOAK_CONFIG_PATH` | — | `data/tidecloak.json` | Path to config file (fallback) |
+| `ICE_SERVERS` | — | — | STUN servers: `stun:host:3478` |
+| `TURN_SERVER` | — | — | TURN fallback: `turn:host:3478` |
+| `TURN_SECRET` | — | — | Must match signal server's `TURN_SECRET` |
+| `LISTEN_PORT` | — | 7891 | Gateway proxy port |
+| `HEALTH_PORT` | — | 7892 | Health check port |
+| `GATEWAY_DISPLAY_NAME` | — | auto | Name shown in portal |
+| `GATEWAY_DESCRIPTION` | — | — | Description shown in portal |
+| `HTTPS` | — | true | Generate self-signed TLS |
+
+### Backend format
+
+```
+BACKENDS="Name=<scheme>://<host>:<port>[;flag1][;flag2]"
+```
+
+Multiple backends are comma-separated. Each backend has a name, a URL, and optional suffix flags.
+
+**Protocol schemes:**
+
+| Scheme | Description |
+|--------|-------------|
+| `http://` or `https://` | HTTP reverse proxy (default) |
+| `rdp://` | RDP via RDCleanPath protocol |
+
+**Suffix flags** (append to the URL, order-independent, stackable):
+
+| Flag | Applies to | Description |
+|------|-----------|-------------|
+| `;noauth` | HTTP + RDP | Skip JWT validation — the backend handles its own auth |
+| `;stripauth` | HTTP | Gateway still validates the JWT, but strips the `Authorization` header before proxying. Prevents token leakage to backends that don't need it. |
+| `;eddsa` | RDP | Use Ed25519 passwordless auth via TideSSP instead of NTLM. Patches the RDP connection to use Restricted Admin mode and sends the JWT through CredSSP/NLA. Requires TideSSP installed on the target. |
+
+**Examples:**
+
+```bash
+# Single web app
+BACKENDS="App=http://localhost:3000"
+
+# Multiple backends
+BACKENDS="App=http://localhost:3000,Admin=http://localhost:8080"
+
+# Public backend — no JWT required
+BACKENDS="Public=http://localhost:4000;noauth"
+
+# Strip auth header before proxying
+BACKENDS="Legacy=http://localhost:5000;stripauth"
+
+# RDP with traditional NTLM password
+BACKENDS="Desktop=rdp://win-server:3389"
+
+# RDP with TideSSP passwordless auth
+BACKENDS="Desktop=rdp://win-server:3389;eddsa"
+
+# Mixed — web app + passwordless RDP
+BACKENDS="App=http://localhost:3000,RDP=rdp://win-server:3389;eddsa"
+```
+
+### Health check
+
+```bash
+curl http://localhost:7892/health
+```
+
+### Verify connection
+
+After starting the gateway, check the signal server health endpoint — the gateway count should increase:
+
+```bash
+curl https://SIGNAL_SERVER_IP:9090/health
+# {"status":"ok","gateways":1,"clients":0}
+```
+
+---
+
+## 4. SSH Bridge
+
+A standalone WebSocket-to-TCP bridge for SSH sessions. Browsers connect via WebSocket, the bridge pipes traffic to the SSH server over TCP.
+
+### Deploy with script (Docker — recommended)
+
+```bash
+cd bridges/ssh-bridge-rs
+./deploy.sh
+```
+
+The script will:
+- Auto-detect `tidecloak.json` from `data/` directory
+- Build the Docker image (~15 MB)
+- Start the container on port 8088
+- Print the bridge URL and health endpoint
+
+After deployment:
+
+```
+SSH Bridge:  http://YOUR_IP:8088
+Health:      http://YOUR_IP:8088/health
+Logs:        http://YOUR_IP:8088/logs
+
+Add to main server: BRIDGE_URL=wss://YOUR_IP:8088
+```
+
+### Deploy (native binary)
+
+```bash
+cd bridges/ssh-bridge-rs
+cargo build --release
+```
+
+#### First run (setup wizard)
+
+If no config exists, the bridge opens a setup UI at `http://localhost:7893`:
+- Select your `tidecloak.json` file
+- Set the listen port
+- Config is saved to `~/.keylessh/ssh-bridge.toml`
+
+#### Run with environment variables
+
+```bash
+PORT=8088 \
+TIDECLOAK_CONFIG_B64=$(base64 -w0 data/tidecloak.json) \
+./target/release/ssh-bridge-rs
+```
+
+### Deploy (Docker — manual)
+
+```bash
+cd bridges/ssh-bridge-rs
+docker build -t keylessh-bridge-rs .
+
+docker run -d --restart unless-stopped \
+  --name keylessh-bridge \
+  -p 8088:8080 \
+  -e TIDECLOAK_CONFIG_B64=$(base64 -w0 data/tidecloak.json) \
+  keylessh-bridge-rs
+```
+
+### Deploy (Azure Container Apps)
+
+```bash
+cd bridges/ssh-bridge-rs/azure
+./deploy.sh
+```
+
+Outputs the bridge URL (`wss://...`). Set it on the main server:
+
+```env
+BRIDGE_URL=wss://<bridge-fqdn>
+```
+
+### Environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | 8081 | Listen port |
+| `TIDECLOAK_CONFIG_B64` | — | Base64-encoded `tidecloak.json` |
+| `client_adapter` | — | `tidecloak.json` as a JSON string (highest priority) |
+
+Falls back to `data/tidecloak.json` if no env var is set.
+
+### Windows
+
+The SSH bridge runs as a system tray application on Windows. Right-click the tray icon for **Open Logs** or **Quit**.
+
+### Health check
+
+```bash
+curl http://localhost:8088/health
+# {"status":"ok","tcpConnections":0}
+```
+
+---
+
+## 5. TideSSP (Windows — Passwordless RDP)
+
+TideSSP is a Windows Security Support Provider that enables passwordless RDP. It verifies Ed25519 JWT signatures from TideCloak and creates Windows logon sessions without passwords.
+
+Install this on each **Windows machine that will be an RDP target**.
+
+### Prerequisites
+
+- Windows Server 2016+ or Windows 10/11 Pro
+- Administrator access
+- `tidecloak.json` from TideCloak (see step 1)
+
+### Build the MSI installer
+
+On a Windows machine with Visual Studio Build Tools:
+
+1. Install build tools:
+   ```powershell
+   # WiX Toolset
+   dotnet tool install --global wix
+   wix extension add -g WixToolset.UI.wixext/6.0.2
+
+   # Ensure CMake is available (VS component: "C++ CMake tools for Windows")
+   ```
+
+2. Open a **Developer Command Prompt for VS** and build:
+   ```cmd
+   cd tide-ssp
+   installer\build.bat
+   ```
+
+3. The MSI is output to `tide-ssp\out\TideSSP.msi`
+
+### Install
+
+#### Option A: MSI installer (recommended)
+
+Double-click `TideSSP.msi` or run:
+
+```powershell
+msiexec /i TideSSP.msi TIDE_CONFIG_FILE="C:\path\to\tidecloak.json"
+```
+
+The installer:
+- Copies `TideSSP.dll` and `TideSubAuth.dll` to `System32`
+- Copies `tidecloak.json` to `System32`
+- Registers TideSSP as an LSA Security Package
+- Registers TideSubAuth as an MSV1_0 subauthentication package
+- Enables Restricted Admin mode (required for passwordless RDP)
+
+**Reboot required** to activate.
+
+#### Option B: PowerShell (manual)
+
+```powershell
+.\install.ps1 -ConfigFile C:\path\to\tidecloak.json
+```
+
+Then reboot.
+
+### Uninstall
+
+Via **Add/Remove Programs** > TideSSP > Uninstall, or:
+
+```powershell
+msiexec /x TideSSP.msi
+```
+
+This removes the DLLs, cleans up registry entries, and clears `UF_MNS_LOGON_ACCOUNT` flags from local users. **Reboot required.**
+
+### Updating the public key
+
+If the TideCloak realm signing key is rotated:
+
+1. Export a new `tidecloak.json` from TideCloak admin console
+2. Update the registry:
+   ```powershell
+   $json = Get-Content tidecloak.json -Raw
+   Set-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\TideSSP" -Name "Config" -Value $json
+   ```
+3. Reboot (the SSP reads the key once at LSA startup)
+
+### What the MSI installs
+
+| What | Where |
+|------|-------|
+| `TideSSP.dll` | `%SystemRoot%\System32\` |
+| `TideSubAuth.dll` | `%SystemRoot%\System32\` |
+| `tidecloak.json` | `%SystemRoot%\System32\` |
+| Security Package registration | `HKLM\...\Lsa\SecurityPackages` (appends `TideSSP`) |
+| SubAuth registration | `HKLM\...\Lsa\MSV1_0\Auth0 = TideSubAuth` |
+| Restricted Admin mode | `HKLM\...\Lsa\DisableRestrictedAdmin = 0` |
+
+---
+
+## Main Server
 
 ### Build and run
 
@@ -21,90 +430,87 @@ npm run build
 NODE_ENV=production PORT=3000 npm start
 ```
 
-The production server serves static assets from `dist/public` and the API/WS from the same origin.
-
 ### Persistent data
 
-The server stores:
-
+Mount `./data` as a persistent volume. It contains:
 - SQLite DB: `DATABASE_URL` (defaults to `./data/keylessh.db`)
-- TideCloak JWKS adaptor: `./data/tidecloak.json` (required for JWT verification)
-
-In production you should mount `./data` as a persistent volume.
+- TideCloak config: `./data/tidecloak.json`
 
 ### Environment variables
 
-Copy `.env.example` to `.env` and customize:
-
-```bash
-cp .env.example .env
-```
-
-Available variables:
-
 ```env
 PORT=3000
-NODE_ENV=development
-
-# SQLite path (file path, not a DSN)
+NODE_ENV=production
 DATABASE_URL=./data/keylessh.db
 
-# Optional external TCP bridge (uses same tidecloak.json for JWT verification)
-BRIDGE_URL=wss://<your-bridge-fqdn>
+# Optional: external SSH bridge
+BRIDGE_URL=wss://<bridge-fqdn>
 
-# Debug logging
-DEBUG=true
+# Optional: Stripe SaaS billing
+STRIPE_SECRET_KEY=sk_live_...
+STRIPE_WEBHOOK_SECRET=whsec_...
+STRIPE_PRICE_ID_PRO=price_...
+STRIPE_PRICE_ID_ENTERPRISE=price_...
+APP_URL=https://your-domain.com
 ```
 
 ### Reverse proxy / TLS
 
 Put the main server behind TLS (nginx, Caddy, or a cloud load balancer). WebSockets must be enabled for `/ws/*`.
 
-## TCP Bridge on Azure Container Apps (Optional, Recommended)
+---
 
-The external bridge is stateless and can scale independently. Both the main server and the bridge independently verify JWTs against the same TideCloak JWKS - no shared secrets required.
+## End-to-End Example
 
-### Prerequisites
+Here's a typical deployment for passwordless RDP through a browser:
 
-- Azure CLI installed (`az`)
-- Logged in (`az login`)
-- `data/tidecloak.json` with your TideCloak client adapter config
-
-### Deploy
-
-```bash
-cd bridges/tcp-bridge
-
-# Deploy (creates RG + ACR + Container Apps env + app)
-# The script reads tidecloak.json and passes it to the container
-./azure/deploy.sh
+```
+Browser
+  │
+  ├─ HTTPS ──→ Signal Server (public VM, port 9090)
+  │               │
+  │               ├─ WebRTC P2P (or HTTP relay fallback)
+  │               │
+  │               └─ coturn (same VM, port 3478) ─── STUN/TURN
+  │
+  └─ WebRTC ──→ Punch'd Bridge (private network, port 7891)
+                    │
+                    ├─ RDP ──→ Windows Server (TideSSP installed)
+                    │             └─ Verifies JWT, creates logon session
+                    │
+                    └─ HTTP ──→ Web App (localhost:3000)
 ```
 
-The script prints the Bridge URL: `wss://...`
+### Quick start
 
-### Configure the main server
+1. **Deploy signal server** on a public VM → save `API_SECRET`, `TURN_SECRET`
+2. **Deploy punch'd bridge** on private network → point at signal server, configure backends
+3. **Install TideSSP MSI** on each Windows RDP target → provide `tidecloak.json`, reboot
+4. **Open the portal** at `https://SIGNAL_SERVER:9090` → select gateway → authenticate → connect
 
-Set this env var on the main server:
+---
 
-```env
-BRIDGE_URL=wss://<bridge-fqdn>
-```
+## Ports Reference
 
-### Scaling
+| Component | Port | Protocol | Purpose |
+|-----------|------|----------|---------|
+| Signal Server | 9090 | TCP | HTTP + WebSocket signaling |
+| coturn | 3478 | UDP + TCP | STUN/TURN |
+| coturn | 49152–65535 | UDP | TURN relay range |
+| Punch'd Bridge | 7891 | TCP | Proxy (HTTP/HTTPS) |
+| Punch'd Bridge | 7892 | TCP | Health check |
+| SSH Bridge | 8081 | TCP | WebSocket SSH tunnel |
+| Main Server | 3000 | TCP | UI + API |
 
-The provided Azure Container Apps config (`bridges/tcp-bridge/azure/container-app.yaml`) scales based on concurrent requests (WebSocket upgrades are HTTP):
+---
 
-- `minReplicas: 0` (scales to zero)
-- `maxReplicas: 100`
-- `concurrentRequests: 10` (≈ 10 SSH sessions per instance)
+## Troubleshooting
 
-Tune these for your workload.
-
-## Production Notes / Caveats
-
-- The current storage is SQLite. If you run multiple main server instances, you'll need shared storage and coordination (not currently supported out of the box).
-- Both the main server and external bridge independently validate JWTs against the same TideCloak JWKS.
-- Ensure `/ws/tcp` is reachable from browsers; if you change ports/origins, update your proxy rules accordingly.
+- **"No policy found"**: Create and commit a policy for the SSH role (`ssh:<username>`) in the admin UI
+- **Gateway not appearing**: Check `API_SECRET` matches between signal server and gateway
+- **WebRTC failing**: Ensure STUN/TURN ports (3478, 49152–65535/udp) are open on the signal server
+- **TideSSP not active after install**: Reboot is required — LSA loads security packages at startup
+- **"Breaking changes made to Policies"**: Update policy version to `"3"` in `sshPolicy.ts`
 
 ## Tide Fabric / Policy Requirements
 
