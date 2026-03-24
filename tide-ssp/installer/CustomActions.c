@@ -12,12 +12,14 @@
 #include <msi.h>
 #include <msiquery.h>
 #include <lm.h>
+#include <commdlg.h>
 #include <strsafe.h>
 #include <stdio.h>
 
 #pragma comment(lib, "msi.lib")
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "netapi32.lib")
+#pragma comment(lib, "comdlg32.lib")
 
 #define LSA_KEY L"SYSTEM\\CurrentControlSet\\Control\\Lsa"
 #define MSV1_0_KEY L"SYSTEM\\CurrentControlSet\\Control\\Lsa\\MSV1_0"
@@ -242,6 +244,32 @@ static int ReadFileToWide(const WCHAR *filePath, WCHAR *outBuf, int outCapacity)
 static BOOL ValidateJsonContent(const WCHAR *json)
 {
     return wcsstr(json, L"\"jwk\"") != NULL && wcsstr(json, L"\"x\"") != NULL;
+}
+
+/*
+ * BrowseConfig — immediate CA, opens a file dialog to select tidecloak.json.
+ * Sets TIDE_CONFIG_FILE property with the selected path.
+ */
+UINT __stdcall BrowseConfig(MSIHANDLE hInstall)
+{
+    OPENFILENAMEW ofn;
+    WCHAR filePath[MAX_PATH] = {0};
+
+    ZeroMemory(&ofn, sizeof(ofn));
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = NULL;
+    ofn.lpstrFilter = L"JSON Files (*.json)\0*.json\0All Files (*.*)\0*.*\0";
+    ofn.lpstrFile = filePath;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrTitle = L"Select tidecloak.json";
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    ofn.lpstrDefExt = L"json";
+
+    if (GetOpenFileNameW(&ofn)) {
+        MsiSetPropertyW(hInstall, L"TIDE_CONFIG_FILE", filePath);
+    }
+
+    return ERROR_SUCCESS;
 }
 
 /*
