@@ -1289,12 +1289,27 @@ export async function registerRoutes(
         log(`[dest-roles] user=${req.user?.username} realmRoles=${JSON.stringify(rawRealmRoles)} clientRoles=${JSON.stringify(rawClientRoles)} destPerms=${JSON.stringify(destPerms)} gateways=${results.map(g => `${g.id}:[${g.backends.map(b => b.name).join(",")}]`).join("; ")}`);
 
         const annotated = results.map((gw) => {
-          const backends = (gw.backends.length > 0 ? gw.backends : [{ name: "Default" }]).map((b) => ({
-            name: b.name,
-            protocol: ("protocol" in b ? b.protocol : "http") || "http",
-            ...("auth" in b && b.auth ? { auth: b.auth } : {}),
-            accessible: hasDestAccess(destPerms, gw.id, b.name),
-          }));
+          const backends = (gw.backends.length > 0 ? gw.backends : [{ name: "Default" }]).map((b) => {
+            const matchingPerms = destPerms.filter(
+              (p) => p.gatewayId.toLowerCase() === gw.id.toLowerCase() && p.backendName.toLowerCase() === b.name.toLowerCase()
+            );
+            const isEddsa = "auth" in b && b.auth === "eddsa";
+            // For EdDSA backends, require a 4-segment role with username
+            const accessible = isEddsa
+              ? matchingPerms.some((p) => p.username)
+              : matchingPerms.length > 0;
+            // Collect all usernames from matching 4-segment roles
+            const rdpUsernames = matchingPerms
+              .map((p) => p.username)
+              .filter((u): u is string => !!u);
+            return {
+              name: b.name,
+              protocol: ("protocol" in b ? b.protocol : "http") || "http",
+              ...("auth" in b && b.auth ? { auth: b.auth } : {}),
+              accessible,
+              ...(rdpUsernames.length > 0 ? { rdpUsernames } : {}),
+            };
+          });
           return { ...gw, backends };
         });
 

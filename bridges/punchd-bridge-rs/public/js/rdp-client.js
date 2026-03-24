@@ -40,6 +40,9 @@
   var usernameInput = document.getElementById("rdp-username");
   var passwordInput = document.getElementById("rdp-password");
   var autoConnectSpinner = document.getElementById("auto-connect-spinner");
+  var reconnectPanel = document.getElementById("reconnect-panel");
+  var reconnectMessage = document.getElementById("reconnect-message");
+  var reconnectBtn = document.getElementById("reconnect-btn");
 
   // ── State ─────────────────────────────────────────────────────
 
@@ -58,6 +61,8 @@
   var backendName = null;
   var bulkEnabled = false;
   var rdpSession = null;
+  var isEddsaSession = false;
+  var eddsaUsername = "";
 
   // ── Helpers ─────────────────────────────────────────────────────
 
@@ -522,6 +527,8 @@
           var jwtPayload = JSON.parse(atob(jwtParts[1].replace(/-/g, "+").replace(/_/g, "/")));
           // Extract RDP username from dest: role (dest:gw:endpoint:username)
           var jwtUsername = extractRdpUsername(jwtPayload, backendName) || jwtPayload.preferred_username || jwtPayload.sub || "user";
+          isEddsaSession = true;
+          eddsaUsername = jwtUsername;
           console.log("[RDP] EdDSA backend - auto-connecting as:", jwtUsername);
           startRdpSession(jwtUsername, "");
         } catch (e) {
@@ -632,15 +639,28 @@
   }
 
   function showConnectForm() {
+    if (isEddsaSession) {
+      showReconnectPanel("Session ended");
+      return;
+    }
     connectForm.classList.remove("hidden");
     rdpCanvas.classList.add("hidden");
     connectBtn.disabled = false;
     formError.textContent = "";
   }
 
+  function showReconnectPanel(message) {
+    connectForm.classList.add("hidden");
+    rdpCanvas.classList.add("hidden");
+    autoConnectSpinner.classList.add("hidden");
+    reconnectPanel.classList.remove("hidden");
+    reconnectMessage.textContent = message || "Session ended";
+  }
+
   function hideConnectForm() {
     connectForm.classList.add("hidden");
     autoConnectSpinner.classList.add("hidden");
+    reconnectPanel.classList.add("hidden");
     rdpCanvas.classList.remove("hidden");
   }
 
@@ -924,6 +944,12 @@
 
   passwordInput.addEventListener("keydown", function (e) {
     if (e.key === "Enter") connectBtn.click();
+  });
+
+  reconnectBtn.addEventListener("click", function () {
+    reconnectPanel.classList.add("hidden");
+    autoConnectSpinner.classList.remove("hidden");
+    startRdpSession(eddsaUsername, "");
   });
 
   disconnectBtn.addEventListener("click", function () {

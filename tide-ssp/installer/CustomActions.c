@@ -255,14 +255,19 @@ UINT __stdcall BrowseConfig(MSIHANDLE hInstall)
     OPENFILENAMEW ofn;
     WCHAR filePath[MAX_PATH] = {0};
 
+    /* Find the MSI dialog window to use as owner */
+    HWND hwndOwner = FindWindowW(L"MsiDialogCloseClass", NULL);
+    if (!hwndOwner)
+        hwndOwner = GetForegroundWindow();
+
     ZeroMemory(&ofn, sizeof(ofn));
     ofn.lStructSize = sizeof(ofn);
-    ofn.hwndOwner = NULL;
+    ofn.hwndOwner = hwndOwner;
     ofn.lpstrFilter = L"JSON Files (*.json)\0*.json\0All Files (*.*)\0*.*\0";
     ofn.lpstrFile = filePath;
     ofn.nMaxFile = MAX_PATH;
     ofn.lpstrTitle = L"Select tidecloak.json";
-    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_EXPLORER;
     ofn.lpstrDefExt = L"json";
 
     if (GetOpenFileNameW(&ofn)) {
