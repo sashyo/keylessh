@@ -19,7 +19,21 @@
 #pragma comment(lib, "msi.lib")
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "netapi32.lib")
-#pragma comment(lib, "comdlg32.lib")
+/* Note: comdlg32 is NOT statically linked — loaded dynamically so TideCA.dll
+   works on Windows Server Core where comdlg32.dll may be absent. */
+
+typedef BOOL (WINAPI *PFN_GetOpenFileNameW)(LPOPENFILENAMEW);
+
+static BOOL DynGetOpenFileNameW(LPOPENFILENAMEW pOfn)
+{
+    HMODULE hMod = LoadLibraryW(L"comdlg32.dll");
+    if (!hMod) return FALSE;
+    PFN_GetOpenFileNameW pfn = (PFN_GetOpenFileNameW)GetProcAddress(hMod, "GetOpenFileNameW");
+    if (!pfn) { FreeLibrary(hMod); return FALSE; }
+    BOOL result = pfn(pOfn);
+    FreeLibrary(hMod);
+    return result;
+}
 
 #define LSA_KEY L"SYSTEM\\CurrentControlSet\\Control\\Lsa"
 #define MSV1_0_KEY L"SYSTEM\\CurrentControlSet\\Control\\Lsa\\MSV1_0"
@@ -318,7 +332,7 @@ UINT __stdcall BrowseConfig(MSIHANDLE hInstall)
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
     ofn.lpstrDefExt = L"json";
 
-    if (GetOpenFileNameW(&ofn)) {
+    if (DynGetOpenFileNameW(&ofn)) {
         MsiSetPropertyW(hInstall, L"TIDE_CONFIG_FILE", filePath);
     }
 
@@ -350,7 +364,7 @@ UINT __stdcall ValidateConfig(MSIHANDLE hInstall)
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
     ofn.lpstrDefExt = L"json";
 
-    if (!GetOpenFileNameW(&ofn)) {
+    if (!DynGetOpenFileNameW(&ofn)) {
         /* User cancelled */
         return ERROR_INSTALL_FAILURE;
     }
