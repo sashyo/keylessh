@@ -417,7 +417,7 @@ function AuthProviderWithTimeout({ children, authConfig }: { children: ReactNode
   const tidecloakConfig = {
     ...authConfig,
     redirectUri: `${window.location.origin}/auth/redirect`,
-    //useDPoP: { mode: 'strict' as const, alg: 'EdDSA' as const },
+    useDPoP: { mode: 'strict' as const, alg: 'EdDSA' as const },
   };
 
   setDpopEnabled(!!(tidecloakConfig as Record<string, any>).useDPoP);
