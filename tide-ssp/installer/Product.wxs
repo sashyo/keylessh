@@ -237,9 +237,8 @@
       <Custom Action="CA_RemoveConfig" After="CA_ClearMnsFlags"
               Condition="REMOVE=&quot;ALL&quot;" />
 
-      <!-- Only schedule reboot on install, not uninstall -->
-      <ScheduleReboot After="InstallFinalize"
-                       Condition="NOT REMOVE=&quot;ALL&quot;" />
+      <!-- Schedule reboot for both install and uninstall (LSA requires reboot to fully activate/deactivate) -->
+      <ScheduleReboot After="InstallFinalize" />
     </InstallExecuteSequence>
 
   </Package>
