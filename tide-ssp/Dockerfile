@@ -15,6 +15,7 @@ WORKDIR C:/TEMP
 
 RUN echo shell-ok && where cmd && dotnet --info
 
+RUN echo Install Visual Studio Build Tools - this is the command shape that worked
 RUN curl -SL --output C:\TEMP\vs_buildtools.exe %VS_BUILDTOOLS_URI% `
  && start /w C:\TEMP\vs_buildtools.exe --quiet --wait --norestart --nocache `
       --installPath "%ProgramFiles(x86)%\Microsoft Visual Studio\2022\BuildTools" `
@@ -25,12 +26,14 @@ RUN curl -SL --output C:\TEMP\vs_buildtools.exe %VS_BUILDTOOLS_URI% `
  && if not "%ERRORLEVEL%"=="0" exit /b %ERRORLEVEL% `
  && del /q C:\TEMP\vs_buildtools.exe
 
+RUN echo Install CMake
 RUN if not exist C:\tools mkdir C:\tools `
  && curl -SL --output C:\TEMP\cmake.zip https://github.com/Kitware/CMake/releases/download/v%CMAKE_VERSION%/cmake-%CMAKE_VERSION%-windows-x86_64.zip `
  && tar -xf C:\TEMP\cmake.zip -C C:\tools `
  && ren C:\tools\cmake-%CMAKE_VERSION%-windows-x86_64 cmake `
  && del /q C:\TEMP\cmake.zip
 
+RUN echo Install Ninja
 RUN if not exist C:\tools\ninja mkdir C:\tools\ninja `
  && curl -SL --output C:\TEMP\ninja.zip https://github.com/ninja-build/ninja/releases/download/v%NINJA_VERSION%/ninja-win.zip `
  && tar -xf C:\TEMP\ninja.zip -C C:\tools\ninja `
@@ -38,26 +41,18 @@ RUN if not exist C:\tools\ninja mkdir C:\tools\ninja `
 
 RUN where cmake && cmake --version && where ninja && ninja --version
 
+RUN echo Install WiX
 RUN dotnet tool install --global wix --version %WIX_VERSION% `
  && wix extension add --global WixToolset.UI.wixext/%WIX_VERSION% `
  && wix extension add --global WixToolset.Util.wixext/%WIX_VERSION%
 
+RUN echo Prove the MSVC toolchain exists
 RUN dir "%ProgramFiles(x86)%\Microsoft Visual Studio\2022\BuildTools\Common7\Tools" `
  && dir "%ProgramFiles(x86)%\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC" `
  && call "%ProgramFiles(x86)%\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" -arch=amd64 `
  && where cl `
  && cl
 
-WORKDIR C:/src
-COPY . .
+WORKDIR C:/work
 
-RUN if exist build rmdir /s /q build `
- && call "%ProgramFiles(x86)%\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" -arch=amd64 `
- && call installer\build.bat
-
-RUN if not exist C:\out mkdir C:\out `
- && if exist out xcopy /E /I /Y out C:\out `
- && if exist build\Release xcopy /E /I /Y build\Release C:\out
-
-WORKDIR C:/out
-CMD ["cmd", "/S", "/C", "dir C:\\out /s"]
+CMD ["cmd", "/S", "/C", "echo tidessp-builder ready && cmd"]
