@@ -23,6 +23,7 @@
 
 #define LSA_KEY L"SYSTEM\\CurrentControlSet\\Control\\Lsa"
 #define MSV1_0_KEY L"SYSTEM\\CurrentControlSet\\Control\\Lsa\\MSV1_0"
+#define TIDE_CONFIG_KEY L"SOFTWARE\\TideFoundation\\TideSSP"
 #define PACKAGE_NAME L"TideSSP"
 #define SUBAUTH_NAME L"TideSubAuth"
 
@@ -97,7 +98,7 @@ done:
 UINT __stdcall RegisterSubAuth(MSIHANDLE hInstall)
 {
     (void)hInstall;
-    HKEY hKey = NULL;
+    HKEY hKey = NULL, hConfigKey = NULL;
     DWORD disp = 0;
 
     /* Register TideSubAuth as MSV1_0 SubAuth package */
@@ -110,9 +111,28 @@ UINT __stdcall RegisterSubAuth(MSIHANDLE hInstall)
                    (BYTE *)SUBAUTH_NAME, (DWORD)((wcslen(SUBAUTH_NAME) + 1) * sizeof(WCHAR)));
     RegCloseKey(hKey);
 
-    /* Enable Restricted Admin mode (required for passwordless RDP via TideSSP) */
+    /* Save original DisableRestrictedAdmin value and enable Restricted Admin mode */
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, LSA_KEY, 0,
-                      KEY_WRITE | KEY_WOW64_64KEY, &hKey) == ERROR_SUCCESS) {
+                      KEY_READ | KEY_WRITE | KEY_WOW64_64KEY, &hKey) == ERROR_SUCCESS) {
+        /* Read original value if it exists */
+        DWORD originalValue = 0xFFFFFFFF; /* sentinel: value didn't exist */
+        DWORD cbData = sizeof(DWORD);
+        DWORD type = 0;
+        if (RegQueryValueExW(hKey, L"DisableRestrictedAdmin", NULL, &type,
+                            (BYTE *)&originalValue, &cbData) != ERROR_SUCCESS) {
+            originalValue = 0xFFFFFFFF; /* value didn't exist */
+        }
+
+        /* Save original value to our config key */
+        if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, TIDE_CONFIG_KEY, 0, NULL,
+                           REG_OPTION_NON_VOLATILE, KEY_WRITE | KEY_WOW64_64KEY, NULL,
+                           &hConfigKey, &disp) == ERROR_SUCCESS) {
+            RegSetValueExW(hConfigKey, L"OriginalDisableRestrictedAdmin", 0, REG_DWORD,
+                          (BYTE *)&originalValue, sizeof(originalValue));
+            RegCloseKey(hConfigKey);
+        }
+
+        /* Enable Restricted Admin mode (set to 0) */
         DWORD val = 0;
         RegSetValueExW(hKey, L"DisableRestrictedAdmin", 0, REG_DWORD,
                        (BYTE *)&val, sizeof(val));
@@ -173,7 +193,7 @@ done:
 UINT __stdcall UnregisterSubAuth(MSIHANDLE hInstall)
 {
     (void)hInstall;
-    HKEY hKey = NULL;
+    HKEY hKey = NULL, hConfigKey = NULL;
 
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, MSV1_0_KEY, 0,
                       KEY_WRITE | KEY_WOW64_64KEY, &hKey) == ERROR_SUCCESS) {
@@ -181,11 +201,37 @@ UINT __stdcall UnregisterSubAuth(MSIHANDLE hInstall)
         RegCloseKey(hKey);
     }
 
-    /* Restore DisableRestrictedAdmin to default (disabled) */
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, LSA_KEY, 0,
-                      KEY_WRITE | KEY_WOW64_64KEY, &hKey) == ERROR_SUCCESS) {
-        RegDeleteValueW(hKey, L"DisableRestrictedAdmin");
-        RegCloseKey(hKey);
+    /* Restore DisableRestrictedAdmin to original value */
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, TIDE_CONFIG_KEY, 0,
+                      KEY_READ | KEY_WOW64_64KEY, &hConfigKey) == ERROR_SUCCESS) {
+        DWORD originalValue = 0xFFFFFFFF;
+        DWORD cbData = sizeof(DWORD);
+        if (RegQueryValueExW(hConfigKey, L"OriginalDisableRestrictedAdmin", NULL, NULL,
+                            (BYTE *)&originalValue, &cbData) == ERROR_SUCCESS) {
+            if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, LSA_KEY, 0,
+                             KEY_WRITE | KEY_WOW64_64KEY, &hKey) == ERROR_SUCCESS) {
+                if (originalValue == 0xFFFFFFFF) {
+                    /* Value didn't exist before, so delete it */
+                    RegDeleteValueW(hKey, L"DisableRestrictedAdmin");
+                } else {
+                    /* Restore original value */
+                    RegSetValueExW(hKey, L"DisableRestrictedAdmin", 0, REG_DWORD,
+                                  (BYTE *)&originalValue, sizeof(originalValue));
+                }
+                RegCloseKey(hKey);
+            }
+        }
+        RegCloseKey(hConfigKey);
+
+        /* Clean up our config key */
+        RegDeleteKeyW(HKEY_LOCAL_MACHINE, TIDE_CONFIG_KEY);
+    } else {
+        /* Fallback: if we can't read saved value, just delete (old behavior) */
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, LSA_KEY, 0,
+                         KEY_WRITE | KEY_WOW64_64KEY, &hKey) == ERROR_SUCCESS) {
+            RegDeleteValueW(hKey, L"DisableRestrictedAdmin");
+            RegCloseKey(hKey);
+        }
     }
     return ERROR_SUCCESS;
 }
