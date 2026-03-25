@@ -172,7 +172,7 @@ export async function registerRoutes(
       return;
     }
 
-    res.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'unsafe-inline'");
+    res.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'self' 'sha256-utc6UrebuHOyLd/2aiMXS/p1EDy9UZBDe/XEMKDw9Mc='; style-src 'self' 'sha256-1tYy8m3c1KLuGI2eID9TfLkc50Y+iSPJMpI7n/apN/w=' 'sha256-F7OJTdJYct4J+cQfuJUoDauitndqt8pAc8EbA8gwDPU='");    
     res.setHeader("Allow-CSP-From", "*");
     // Prod: _currentDir=dist/, file at dist/public/tide_dpop_auth.html
     // Dev: _currentDir=server/, file at client/public/tide_dpop_auth.html
