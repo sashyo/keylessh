@@ -1,25 +1,112 @@
-# TideSSP — Ed25519 Security Support Provider for Windows
+# TideSSP — KeyleSSH JWT Security Support Provider for Windows
 
-A Windows Security Support Provider (SSP) that enables Ed25519-based authentication for RDP sessions, replacing traditional NTLM password-based auth.
+A Windows Security Support Provider (SSP) that enables KeyleSSH Ed25519-based JWT authentication for RDP sessions, replacing traditional NTLM password-based auth.
+
+This Windows driver will disable your Windows machine's RDP password authentication and will replace it with an exclusive KeyleSSH webRDP access. Unlike any other solution, this provides a firewall/nat traversal method to RDP to your machine, using a web interface and a zero-knowledge authentication mechanism. 
 
 ## How it works
 
-1. Gateway sends the JWT access token to TideSSP via CredSSP/NLA
-2. TideSSP verifies the Ed25519 signature against the public key from the TideCloak config
-3. TideSSP extracts the username from the JWT and creates a Windows logon session
-4. The RDP desktop session starts without requiring a password
+
+```
+Browser -(RDP-over-WebRTC)-> Punchd Gateway -(RDP-over-TCP)-> Windows Machine
+```
+
+
+1. User initate a request to RDP from KeyleSSH to an internal RDP endpoint (desktop)
+2. User's browser (KeyleSSH client) establishes a WebRTP connection with that desktop's gateway
+3. Gateway verifies KeyleSSH JWT access token and sends it to the desktop (via CredSSP/NLA)
+4. The TideSSP driver on that desktops verifies the JWT's Ed25519 signature against the public key from the TideCloak config
+5. TideSSP extracts the username from the JWT and creates a Windows logon session
+6. The RDP desktop session starts without requiring a password
 
 ## Configuration
 
-TideSSP reads the TideCloak configuration (`tidecloak.json`) from the Windows registry at:
+TideSSP reads the TideCloak configuration (`tidecloak.json`) from the Windows System32 folder (at `%SystemRoot%\System32`).
 
+The permanent Ed25519 public key is extracted from `jwk.keys[0].x` in the JSON at startup. If the realm's signing key is ever changed, update the file and reboot.
+
+## Build (using specialized builder docker image)
+
+This describes the process of building the TideSSP windows driver from source by first creating a specialized docker image with all the prerequisits, and then using that docker image to build the driver.
+
+### Prerequisits
+
+- Windows machine (Windows 10 or above, Windows server 2022 or above)
+- Docker Desktop
+- Windows-native docker build set on a Windows Container Engine (a setting on Docker Desktop)
+- Git
+
+### Get source code
+
+Download this repo and set yourself in the tide-ssp folder:
+
+```bash
+git clone https://github.com/sashyo/keylessh.git
+cd keylessh\tide-ssp
 ```
-HKLM\SYSTEM\CurrentControlSet\Control\Lsa\TideSSP\Config (REG_SZ)
+
+### Builder image preparation
+
+```bash
+docker build -m 4GB -t tidessp-builder .
 ```
 
-The Ed25519 public key is extracted from `jwk.keys[0].x` in the JSON at startup. If the realm's signing key is rotated, update the registry value and reboot.
+This can take a very long time (5~50 minutes) so be patient. Once you have created the tidessp-builder image, you can run the next step (building the driver) as many times as you'd like.
 
-## Build
+### Build the driver in the docker
+
+While still in the `keylessh\tide-ssp` directory, run the following:
+
+```bash
+docker run --rm -v "${PWD}:C:\src" tidessp-builder
+```
+
+You now have the driver in `./out/TideSSP.msi`
+
+## Installation / Deployment
+
+To use this driver on any win10+/Server2022+ machine, you need to copy 2 files:
+1. The `TideSSP.msi` driver
+2. The `tidecloak.json` adapter
+
+For this example, we'll assume you copied those to `c:\tide`. After copying those 2 files you have 2 options on how to install it: GUI-assisted or CLI. Choose the most appropriate one for you.
+
+### Option 1: Guided installation
+
+Double click (or run `start c:\tide\TideSSP.msi`) the driver installer and follow prompt.
+
+### Option 2: CLI installation
+
+For quick, no-UI installation (especially on servers without UI), follow these steps using elevated `Powershell` console:
+
+> [!CAUTION]
+> This is a quiet installation that will immediately restart your machine upon successful installation.
+
+```powershell
+cd c:\tide
+msiexec /i "C:\tide\TideSSP.msi" /qn TIDE_CONFIG_FILE="C:\tide\tidecloak.json" /L*V "C:\tide\tidessp.log"
+```
+
+A succeful installation will copy `TideSSP.dll` and `tidecloak.json` (+few others) to your `System32` folder.
+
+### Changing the TideCloak adapter
+
+If you need to change the adaptor settings, simple update the `%SystemRoot%\System32\tidecloak.json` file and restart your Windows machine.
+
+### Uninstalling TideSSP
+
+To uninstall the driver from the Windows machine, you can use the standard add/remove option in your desktop, or use this direct CLI method:
+
+```powershell
+$app=Get-ItemProperty "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*","HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*" | Where-Object { $_.DisplayName -eq "TideSSP" } | Select-Object -First 1; if(-not $app){throw "TideSSP is not installed."}; $productCode=if($app.PSChildName -match '^\{[0-9A-Fa-f-]+\}$'){$app.PSChildName}else{([regex]::Match($app.UninstallString,'\{[0-9A-Fa-f-]+\}')).Value}; if(-not $productCode){throw "Could not determine TideSSP product code."}; $p=Start-Process msiexec.exe -ArgumentList "/x $productCode /qn /norestart" -Wait -PassThru; if($p.ExitCode -eq 3010){Write-Host "TideSSP was uninstalled. A reboot is required."}elseif($p.ExitCode -eq 0){Write-Host "TideSSP was uninstalled successfully."}else{throw "Uninstall failed with exit code $($p.ExitCode)."}
+```
+
+
+---
+
+# Misc
+
+## Build from source locally
 
 Requires Windows with MSVC (Visual Studio Build Tools).
 

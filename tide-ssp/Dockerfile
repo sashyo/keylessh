@@ -53,6 +53,18 @@ RUN dir "%ProgramFiles(x86)%\Microsoft Visual Studio\2022\BuildTools\Common7\Too
  && where cl `
  && cl
 
+RUN echo Generate runtime build script inside the image
+RUN > C:\build.cmd echo @echo off `
+ && >> C:\build.cmd echo setlocal `
+ && >> C:\build.cmd echo call "%%ProgramFiles(x86)%%\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" -arch=amd64 `
+ && >> C:\build.cmd echo if errorlevel 1 exit /b %%errorlevel%% `
+ && >> C:\build.cmd echo cd /d C:\src `
+ && >> C:\build.cmd echo if errorlevel 1 exit /b %%errorlevel%% `
+ && >> C:\build.cmd echo if exist build rmdir /s /q build `
+ && >> C:\build.cmd echo call installer\build.bat `
+ && >> C:\build.cmd echo if errorlevel 1 exit /b %%errorlevel%% `
+ && >> C:\build.cmd echo endlocal
+
 WORKDIR C:/work
 
-CMD ["cmd", "/S", "/C", "echo tidessp-builder ready && cmd"]
+ENTRYPOINT ["cmd", "/S", "/C", "C:\\build.cmd"]
