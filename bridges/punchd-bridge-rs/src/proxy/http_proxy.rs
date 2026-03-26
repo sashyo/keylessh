@@ -1076,8 +1076,13 @@ async fn handle_request(
     );
 
     // Check if this backend skips JWT validation
+    let effective_backend = if active_backend.is_empty() {
+        &state.default_backend_name
+    } else {
+        &active_backend
+    };
     let is_no_auth = is_public_resource(&effective_path)
-        || (!active_backend.is_empty() && state.no_auth_backends.contains(&active_backend));
+        || state.no_auth_backends.contains(effective_backend);
 
     let mut payload: Option<JwtPayload> = None;
     let mut access_token: Option<String> = None;
@@ -1666,13 +1671,17 @@ fn handle_auth_login(
         .into_owned()
         .collect();
     let original_url = sanitize_redirect(params.get("redirect").map(|s| s.as_str()).unwrap_or("/"));
+    let force_login = params.contains_key("prompt");
     let callback_url = get_callback_url(host, state.use_tls);
 
     // Use browser endpoints for the redirect URL.
     // The STUN server routes /realms/<realm>/... to the gateway that registered
     // that realm, so relative paths work for cross-gateway auth.
     let endpoints = state.get_browser_endpoints();
-    let (auth_url, state_param) = build_auth_url(&endpoints, &state.client_id, &callback_url, &original_url);
+    let (mut auth_url, state_param) = build_auth_url(&endpoints, &state.client_id, &callback_url, &original_url);
+    if force_login {
+        auth_url.push_str("&prompt=login");
+    }
     let (nonce, _redirect) = parse_state(&state_param);
 
     let secure = if state.use_tls { "; Secure" } else { "" };
@@ -1793,10 +1802,33 @@ async fn handle_auth_callback(
         Err(e) => {
             tracing::error!("Token exchange failed: {e}");
             resp_headers.insert(
-                header::LOCATION,
-                HeaderValue::from_static("/auth/login?error=token_exchange"),
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/html; charset=utf-8"),
             );
-            make_response(StatusCode::FOUND, resp_headers, "")
+            let login_url = format!("/auth/login?prompt=login&redirect={}",
+                percent_encoding::utf8_percent_encode(
+                    &redirect_url,
+                    percent_encoding::NON_ALPHANUMERIC,
+                ));
+            make_response(
+                StatusCode::OK,
+                resp_headers,
+                &format!(
+                    concat!(
+                        "<!DOCTYPE html><html><head><title>Login Required</title></head>",
+                        "<body style=\"font-family:system-ui;display:flex;justify-content:center;",
+                        "align-items:center;height:100vh;margin:0;background:#f5f5f5\">",
+                        "<div style=\"text-align:center;max-width:400px;padding:2rem;",
+                        "background:#fff;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,.1)\">",
+                        "<h2 style=\"margin-top:0\">Login Required</h2>",
+                        "<p>Your session could not be established. Please log in to continue.</p>",
+                        "<a href=\"{}\" style=\"display:inline-block;margin-top:1rem;padding:.6rem 1.5rem;",
+                        "background:#4f46e5;color:#fff;text-decoration:none;border-radius:6px\">Log in</a>",
+                        "</div></body></html>",
+                    ),
+                    login_url,
+                ),
+            )
         }
     }
 }
