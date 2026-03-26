@@ -10,6 +10,7 @@ use crate::config::TidecloakConfig;
 
 /// JWT payload fields we care about
 #[derive(Deserialize, Clone, Debug)]
+#[allow(dead_code)]
 pub struct JwtPayload {
     #[serde(default)]
     pub sub: Option<String>,
@@ -38,6 +39,7 @@ pub struct RealmAccess {
 }
 
 #[derive(Deserialize, Clone, Debug)]
+#[allow(dead_code)]
 pub struct CnfClaim {
     #[serde(default)]
     pub jkt: Option<String>,

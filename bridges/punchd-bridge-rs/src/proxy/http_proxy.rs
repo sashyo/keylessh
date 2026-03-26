@@ -25,10 +25,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{ConnectInfo, State};
+use axum::extract::State;
 use axum::http::header::{self, HeaderMap, HeaderName, HeaderValue};
-use axum::http::{Method, Request, StatusCode, Uri};
-use axum::response::{IntoResponse, Response};
+use axum::http::{Method, Request, StatusCode};
+use axum::response::Response;
 use axum::routing::{any, get};
 use axum::Router;
 use dashmap::DashMap;
@@ -66,6 +66,7 @@ pub struct RefreshResult {
 
 // ── Rate limiter state ───────────────────────────────────────────
 
+#[allow(dead_code)]
 struct RateLimitEntry {
     timestamps: Vec<u64>,
 }
@@ -223,7 +224,7 @@ fn rewrite_location(
     port_map: &HashMap<String, String>,
     replacement: &str,
 ) -> String {
-    let mut result;
+    let result;
 
     // Rewrite TideCloak origin first (at start of Location)
     if !tc_origin.is_empty() && location.starts_with(tc_origin) {
@@ -349,6 +350,7 @@ fn generate_session_id() -> String {
 // ── ProxyState constructor ───────────────────────────────────────
 
 impl ProxyState {
+    #[allow(dead_code)]
     pub fn new(
         config: ServerConfig,
         tc_config: TidecloakConfig,
@@ -835,7 +837,7 @@ async fn handle_rdcleanpath_socket(socket: WebSocket, state: Arc<ProxyState>) {
                 WsOut::Binary(data) => ws_sink.send(Message::Binary(data.into())).await,
                 WsOut::Close(code, reason) => {
                     tracing::info!("[RDCleanPath-WS] Session sending close: {} {}", code, reason);
-                    let r = ws_sink
+                    let _r = ws_sink
                         .send(Message::Close(Some(axum::extract::ws::CloseFrame {
                             code,
                             reason: reason.into(),
@@ -901,7 +903,7 @@ async fn handle_request(
 
     let method = req.method().clone();
     let original_uri = req.uri().clone();
-    let mut url_path = original_uri.path().to_string();
+    let url_path = original_uri.path().to_string();
     let query_string = original_uri.query().unwrap_or("").to_string();
     let full_url = if query_string.is_empty() {
         url_path.clone()
@@ -1229,12 +1231,13 @@ async fn handle_request(
         }
 
         // If access_token was not set by refresh flow, use original token
+        #[allow(unused_assignments)]
         if access_token.is_none() {
             access_token = token;
         }
 
         // ── dest: role enforcement ─────────────────────────
-        if let (Some(ref gw_id), Some(ref jwt)) = (&state.gateway_id, &payload) {
+        if let (Some(gw_id), Some(jwt)) = (&state.gateway_id, &payload) {
             let backend = if active_backend.is_empty() {
                 &state.default_backend_name
             } else {
@@ -1619,7 +1622,7 @@ async fn handle_webrtc_config(
     }
 
     // TURN credentials only for authenticated users
-    if let (Some(ref turn_server), turn_secret) = (
+    if let (Some(turn_server), turn_secret) = (
         &state.config.turn_server,
         &state.config.turn_secret,
     ) {
