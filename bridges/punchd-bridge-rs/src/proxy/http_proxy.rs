@@ -35,7 +35,7 @@ use dashmap::DashMap;
 use regex::Regex;
 use tokio::sync::Notify;
 
-use crate::auth::dpop::{extract_cnf_jkt, DPoPVerifier};
+use crate::auth::dpop::{extract_cnf_jkt, DPoPSigner, DPoPVerifier};
 use crate::auth::oidc::{
     build_auth_url, build_logout_url, exchange_code, get_oidc_endpoints, parse_state,
     refresh_access_token, OidcEndpoints,
@@ -77,6 +77,7 @@ pub struct ProxyState {
     pub tc_config: TidecloakConfig,
     pub auth: Arc<TidecloakAuth>,
     pub dpop_verifier: Arc<DPoPVerifier>,
+    pub dpop_signer: Arc<DPoPSigner>,
     pub backend_map: HashMap<String, url::Url>,
     pub no_auth_backends: HashSet<String>,
     pub strip_auth_backends: HashSet<String>,
@@ -431,6 +432,7 @@ impl ProxyState {
             tc_config,
             auth,
             dpop_verifier,
+            dpop_signer: Arc::new(DPoPSigner::new().expect("failed to create DPoP signer")),
             backend_map,
             no_auth_backends,
             strip_auth_backends,
@@ -487,6 +489,7 @@ impl ProxyState {
             &self.server_endpoints,
             &self.client_id,
             refresh_token,
+            Some(&self.dpop_signer),
         )
         .await
         {
@@ -737,6 +740,7 @@ pub fn build_proxy_state(
         tc_config: tc_config.clone(),
         auth,
         dpop_verifier: Arc::new(DPoPVerifier::new()),
+        dpop_signer: Arc::new(DPoPSigner::new().expect("failed to create DPoP signer")),
         backend_map,
         no_auth_backends,
         strip_auth_backends,
@@ -1750,7 +1754,7 @@ async fn handle_auth_callback(
     tracing::info!("  redirect_uri: {callback_url}");
     tracing::info!("  code: {}...", &code[..8.min(code.len())]);
 
-    match exchange_code(&state.server_endpoints, &state.client_id, code, &callback_url).await {
+    match exchange_code(&state.server_endpoints, &state.client_id, code, &callback_url, Some(&state.dpop_signer)).await {
         Ok(tokens) => {
             tracing::info!("Token exchange succeeded (expires_in={})", tokens.expires_in);
 

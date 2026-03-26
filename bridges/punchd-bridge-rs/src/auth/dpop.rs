@@ -1,11 +1,68 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
+use ring::rand::SystemRandom;
+use ring::signature::{Ed25519KeyPair, KeyPair};
 use sha2::{Digest, Sha256};
 
 use super::tidecloak::{b64url_decode, b64url_encode};
 
 static JTI_TTL_MS: u64 = 120_000;
+
+// ── DPoP Proof Signer (for gateway → TideCloak token requests) ──
+
+pub struct DPoPSigner {
+    key_pair: Ed25519KeyPair,
+    jwk: serde_json::Value,
+}
+
+impl DPoPSigner {
+    pub fn new() -> Result<Self, String> {
+        let rng = SystemRandom::new();
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng)
+            .map_err(|e| format!("keygen failed: {e}"))?;
+        let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())
+            .map_err(|e| format!("parse keypair: {e}"))?;
+
+        let pub_bytes = key_pair.public_key().as_ref();
+        let x = b64url_encode(pub_bytes);
+        let jwk = serde_json::json!({
+            "kty": "OKP",
+            "crv": "Ed25519",
+            "x": x,
+        });
+
+        Ok(Self { key_pair, jwk })
+    }
+
+    pub fn create_proof(&self, htm: &str, htu: &str) -> Result<String, String> {
+        let iat = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let jti = uuid::Uuid::new_v4().to_string();
+
+        let header = serde_json::json!({
+            "typ": "dpop+jwt",
+            "alg": "EdDSA",
+            "jwk": self.jwk,
+        });
+        let payload = serde_json::json!({
+            "htm": htm,
+            "htu": htu.split('?').next().unwrap_or(htu),
+            "iat": iat,
+            "jti": jti,
+        });
+
+        let h = b64url_encode(header.to_string().as_bytes());
+        let p = b64url_encode(payload.to_string().as_bytes());
+        let sign_input = format!("{h}.{p}");
+        let sig = self.key_pair.sign(sign_input.as_bytes());
+        let s = b64url_encode(sig.as_ref());
+
+        Ok(format!("{h}.{p}.{s}"))
+    }
+}
 
 pub struct DPoPVerifier {
     seen_jtis: DashMap<String, u64>,

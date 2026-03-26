@@ -2,6 +2,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use serde::Deserialize;
 
+use super::dpop::DPoPSigner;
 use crate::config::TidecloakConfig;
 
 #[derive(Clone, Debug)]
@@ -62,6 +63,7 @@ pub async fn exchange_code(
     client_id: &str,
     code: &str,
     redirect_uri: &str,
+    dpop_signer: Option<&DPoPSigner>,
 ) -> Result<TokenResponse, String> {
     let body = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("grant_type", "authorization_code")
@@ -70,13 +72,14 @@ pub async fn exchange_code(
         .append_pair("redirect_uri", redirect_uri)
         .finish();
 
-    post_token_request(&endpoints.token, &body, "Token exchange").await
+    post_token_request(&endpoints.token, &body, "Token exchange", dpop_signer).await
 }
 
 pub async fn refresh_access_token(
     endpoints: &OidcEndpoints,
     client_id: &str,
     refresh_token: &str,
+    dpop_signer: Option<&DPoPSigner>,
 ) -> Result<TokenResponse, String> {
     let body = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("grant_type", "refresh_token")
@@ -84,22 +87,30 @@ pub async fn refresh_access_token(
         .append_pair("refresh_token", refresh_token)
         .finish();
 
-    post_token_request(&endpoints.token, &body, "Token refresh").await
+    post_token_request(&endpoints.token, &body, "Token refresh", dpop_signer).await
 }
 
 async fn post_token_request(
     token_url: &str,
     body: &str,
     label: &str,
+    dpop_signer: Option<&DPoPSigner>,
 ) -> Result<TokenResponse, String> {
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
         .build()
         .map_err(|e| format!("{label} client error: {e}"))?;
 
-    let resp = client
+    let mut req = client
         .post(token_url)
-        .header("Content-Type", "application/x-www-form-urlencoded")
+        .header("Content-Type", "application/x-www-form-urlencoded");
+
+    if let Some(signer) = dpop_signer {
+        let proof = signer.create_proof("POST", token_url)?;
+        req = req.header("DPoP", proof);
+    }
+
+    let resp = req
         .body(body.to_string())
         .send()
         .await
