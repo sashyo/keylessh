@@ -2,7 +2,7 @@
 
 A Windows Security Support Provider (SSP) that enables KeyleSSH Ed25519-based JWT authentication for RDP sessions, replacing traditional NTLM password-based auth.
 
-This Windows driver will disable your Windows machine's RDP password authentication and will replace it with an exclusive KeyleSSH webRDP access. Unlike any other solution, this provides a firewall/nat traversal method to RDP to your machine, using a web interface and a zero-knowledge authentication mechanism. 
+This Windows driver will disable your Windows machine's RDP password authentication and will replace it with an exclusive KeyleSSH webRDP access. Unlike any other solution, this provides a firewall/NAT traversal method to RDP to your machine, using a web interface and a zero-knowledge authentication mechanism. 
 
 ## How it works
 
@@ -12,7 +12,7 @@ Browser -(RDP-over-WebRTC)-> Punchd Gateway -(RDP-over-TCP)-> Windows Machine
 ```
 
 
-1. User initate a request to RDP from KeyleSSH to an internal RDP endpoint (desktop)
+1. User initiate a request to RDP from KeyleSSH to an internal RDP endpoint (desktop)
 2. User's browser (KeyleSSH client) establishes a WebRTP connection with that desktop's gateway
 3. Gateway verifies KeyleSSH JWT access token and sends it to the desktop (via CredSSP/NLA)
 4. The TideSSP driver on that desktops verifies the JWT's Ed25519 signature against the public key from the TideCloak config
@@ -27,9 +27,9 @@ The permanent Ed25519 public key is extracted from `jwk.keys[0].x` in the JSON a
 
 ## Build (using specialized builder docker image)
 
-This describes the process of building the TideSSP windows driver from source by first creating a specialized docker image with all the prerequisits, and then using that docker image to build the driver.
+This describes the process of building the TideSSP windows driver from source by first creating a specialized docker image with all the prerequisites, and then using that docker image to build the driver.
 
-### Prerequisits
+### Prerequisites
 
 - Windows machine (Windows 10 or above, Windows server 2022 or above)
 - Docker Desktop
@@ -77,7 +77,7 @@ Double click (or run `start c:\tide\TideSSP.msi`) the driver installer and follo
 
 ### Option 2: CLI installation
 
-For quick, no-UI installation (especially on servers without UI), follow these steps using elevated `Powershell` console:
+For quick, no-UI installation (especially on servers without UI), follow these steps using elevated `PowerShell` console:
 
 > [!CAUTION]
 > This is a quiet installation that will immediately restart your machine upon successful installation.
@@ -87,7 +87,7 @@ cd c:\tide
 msiexec /i "C:\tide\TideSSP.msi" /qn TIDE_CONFIG_FILE="C:\tide\tidecloak.json" /L*V "C:\tide\tidessp.log"
 ```
 
-A succeful installation will copy `TideSSP.dll` and `tidecloak.json` (+few others) to your `System32` folder.
+A saucerful installation will copy `TideSSP.dll` and `tidecloak.json` (+few others) to your `System32` folder.
 
 ### Changing the TideCloak adapter
 
