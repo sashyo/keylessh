@@ -40,7 +40,9 @@ use crate::auth::tidecloak::TidecloakAuth;
 use crate::config::BackendEntry;
 
 const MAX_PEERS: usize = 200;
+#[allow(dead_code)]
 const CONTROL_MAX_BUFFER: usize = 512_000; // 512KB for control channel
+#[allow(dead_code)]
 const BULK_MAX_BUFFER: usize = 4_194_304; // 4MB for bulk channel
 const COALESCE_TARGET: usize = 65_536; // 64KB target coalesced message size
 const BINARY_WS_MAGIC: u8 = 0x02;
@@ -48,6 +50,7 @@ const TCP_TUNNEL_MAGIC: u8 = 0x03;
 const MAX_TCP_PER_DC: usize = 5;
 const MAX_WS_PER_DC: usize = 50;
 const MAX_SINGLE_MSG: usize = 32_000; // 32KB
+#[allow(dead_code)]
 const DC_MAX_RANGE: usize = 5 * 1024 * 1024; // 5MB per range response
 const MAX_BODY_SIZE: usize = 10 * 1024 * 1024; // 10MB
 const MAX_BUFFERED_RESPONSE: usize = 10 * 1024 * 1024; // 10MB safety limit
@@ -68,6 +71,7 @@ const HOP_BY_HOP: &[&str] = &[
     "content-length",
 ];
 
+#[allow(dead_code)]
 pub struct PeerHandlerOptions {
     pub ice_servers: Vec<String>,
     pub turn_server: Option<String>,
@@ -876,7 +880,7 @@ async fn handle_dc_http_request(
                     .await;
 
                     // Stream body chunks
-                    let mut stream = response;
+                    let stream = response;
                     let mut chunks_sent = 0u64;
                     let id_bytes = rid.as_bytes().to_vec();
 
@@ -1130,7 +1134,7 @@ async fn handle_ws_open(
         use futures_util::{SinkExt, StreamExt};
 
         // Task to forward outgoing messages (client -> backend WS)
-        let ws_id_out = ws_id_clone.clone();
+        let _ws_id_out = ws_id_clone.clone();
         let outgoing_task = tokio::spawn(async move {
             while let Some(data) = outgoing_rx.recv().await {
                 let msg = tokio_tungstenite::tungstenite::Message::Binary(data.into());
@@ -1406,7 +1410,7 @@ async fn handle_tcp_open(
         let (mut read_half, mut write_half) = stream.into_split();
 
         // Task: write data from client to TCP socket
-        let tid_write = tid.clone();
+        let _tid_write = tid.clone();
         let write_task = tokio::spawn(async move {
             loop {
                 tokio::select! {

@@ -17,7 +17,7 @@ use crate::config::{BackendAuth, BackendEntry};
 
 use super::rdcleanpath::{
     build_error, build_response, parse_request, RDCleanPathError, RDCleanPathResponse,
-    RDCLEANPATH_ERROR_GENERAL, RDCLEANPATH_ERROR_NEGOTIATION,
+    RDCLEANPATH_ERROR_GENERAL,
 };
 
 pub type SendBinaryFn = Arc<dyn Fn(Vec<u8>) + Send + Sync>;
@@ -55,6 +55,7 @@ impl RDCleanPathSession {
     }
 
     /// Signal that the client connection has closed.
+    #[allow(dead_code)]
     pub fn close(&self) {
         // Dropping the sender (or just letting it go out of scope) will cause
         // the receiver side to observe a closed channel.
@@ -262,7 +263,7 @@ async fn run_session(
     let (mut tls_read, mut tls_write) = tokio::io::split(tls_stream);
 
     // Task: client -> RDP server
-    let send_close_c2s = send_close.clone();
+    let _send_close_c2s = send_close.clone();
     let c2s = tokio::spawn(async move {
         let mut first_msg = true;
         let mut mcs_proto = mcs_patch_protocol;
@@ -414,7 +415,7 @@ fn check_dest_roles(payload: &JwtPayload, destination: &str, tc_client_id: Optio
     }
 
     // Check resource_access[tc_client_id].roles
-    if let (Some(ref resource_access), Some(client_id)) = (&payload.resource_access, tc_client_id)
+    if let (Some(resource_access), Some(client_id)) = (&payload.resource_access, tc_client_id)
     {
         if let Some(client_obj) = resource_access.get(client_id) {
             if let Some(roles) = client_obj.get("roles").and_then(|v| v.as_array()) {

@@ -205,7 +205,7 @@ fn generate_gateway_id() -> String {
 // ── Main config loader ──────────────────────────────────────────
 
 pub fn load_config() -> ServerConfig {
-    let mut toml_cfg = load_toml();
+    let toml_cfg = load_toml();
 
     // If no config file AND no critical env vars, run first-time setup
     let has_config_file = config_file_path().exists();
