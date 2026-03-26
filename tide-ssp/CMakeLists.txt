@@ -3,6 +3,9 @@ project(TideSSP C)
 
 set(CMAKE_C_STANDARD 11)
 
+# Static CRT so DLLs work on Server Core without VC++ Redistributable
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
 add_library(TideSSP SHARED
     src/main.c
     src/ssp.c
