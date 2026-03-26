@@ -1076,8 +1076,13 @@ async fn handle_request(
     );
 
     // Check if this backend skips JWT validation
+    let effective_backend = if active_backend.is_empty() {
+        &state.default_backend_name
+    } else {
+        &active_backend
+    };
     let is_no_auth = is_public_resource(&effective_path)
-        || (!active_backend.is_empty() && state.no_auth_backends.contains(&active_backend));
+        || state.no_auth_backends.contains(effective_backend);
 
     let mut payload: Option<JwtPayload> = None;
     let mut access_token: Option<String> = None;
