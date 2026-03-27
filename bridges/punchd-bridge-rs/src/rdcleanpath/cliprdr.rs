@@ -303,63 +303,62 @@ fn find_cs_net_position(data: &[u8]) -> Option<usize> {
     None
 }
 
-/// Update MCS Connect Initial length fields after inserting bytes.
-/// This handles the BER-encoded lengths in the MCS/GCC wrapper.
+/// Update MCS Connect Initial length fields after inserting `added` bytes
+/// into the user data area. Updates right-to-left to avoid position shifts.
+///
+/// Structure: TPKT(4) + X.224(3) + [0x7F,0x65] + BER_len + ... + [0x04] + BER_len + GCC... + "Duca" + PER_len + blocks
 fn update_mcs_lengths(data: &mut Vec<u8>, added: usize) {
-    // MCS Connect Initial structure (after TPKT + X.224):
-    //   [0x7F, 0x65] = Connect-Initial tag
-    //   BER length (of entire Connect-Initial content)
-    //   ... callingDomainSelector, calledDomainSelector, upwardFlag ...
-    //   [0x04] = OCTET STRING tag (userData)
-    //   BER length (of GCC Conference Create Request)
-    //   ... GCC header ...
-    //   PER length (of user data blocks)
-    //   ... CS_CORE, CS_SECURITY, CS_NET ...
+    let x224_end = 7; // TPKT(4) + X.224(3)
+    if data.len() < x224_end + 4 { return; }
+    if data[x224_end] != 0x7F || data[x224_end + 1] != 0x65 { return; }
 
-    let x224_end = if data.len() > 7 { 7 } else { return }; // TPKT(4) + X.224(3)
+    // 1. Find all three length positions WITHOUT modifying data
+    let mcs_len_pos = x224_end + 2;
+    let mcs_len_size = ber_length_size(&data[mcs_len_pos..]);
+    let mcs_len_val = read_ber_length(&data[mcs_len_pos..]);
 
-    // Find Connect-Initial tag [0x7F, 0x65]
-    if x224_end + 2 > data.len() || data[x224_end] != 0x7F || data[x224_end + 1] != 0x65 {
-        return;
-    }
-    // Update BER length after Connect-Initial tag
-    update_ber_length_at(data, x224_end + 2, added);
-
-    // Find the OCTET STRING [0x04] for userData — scan forward
-    let mut pos = x224_end + 2;
-    pos += ber_length_size(&data[pos..]); // skip Connect-Initial length
-
-    // Skip callingDomainSelector, calledDomainSelector, upwardFlag
-    // These are BER-encoded fields. We need to find [0x04] tag for userData.
+    // Skip BER TLVs to find [0x04] userData tag
+    let mut pos = mcs_len_pos + mcs_len_size;
+    let mut ud_len_pos = 0usize;
+    let mut ud_len_size = 0usize;
     for _ in 0..10 {
         if pos >= data.len() { return; }
         if data[pos] == 0x04 {
-            // Found OCTET STRING — update its length
-            update_ber_length_at(data, pos + 1, added);
-
-            // Inside the OCTET STRING is a GCC Conference Create Request
-            // with a PER-encoded length of user data.
-            // Find "Duca" (0x44, 0x75, 0x63, 0x61) — the H.221 key
-            let oc_start = pos + 1 + ber_length_size(&data[pos + 1..]);
-            for j in oc_start..data.len().saturating_sub(6) {
-                if data[j] == 0x44 && data[j + 1] == 0x75 && data[j + 2] == 0x63 && data[j + 3] == 0x61 {
-                    // PER length follows "Duca"
-                    let per_pos = j + 4;
-                    if per_pos < data.len() {
-                        update_per_length_at(data, per_pos, added);
-                    }
-                    return;
-                }
-            }
-            return;
+            ud_len_pos = pos + 1;
+            ud_len_size = ber_length_size(&data[ud_len_pos..]);
+            break;
         }
-        // Skip this BER TLV
-        pos += 1; // tag
+        pos += 1;
         if pos >= data.len() { return; }
-        let len_size = ber_length_size(&data[pos..]);
-        let len_val = read_ber_length(&data[pos..]);
-        pos += len_size + len_val;
+        let ls = ber_length_size(&data[pos..]);
+        let lv = read_ber_length(&data[pos..]);
+        pos += ls + lv;
     }
+    if ud_len_pos == 0 { return; }
+    let ud_len_val = read_ber_length(&data[ud_len_pos..]);
+
+    // Find "Duca" and the PER length after it
+    let mut per_len_pos = 0usize;
+    for j in (ud_len_pos + ud_len_size)..data.len().saturating_sub(6) {
+        if data[j] == 0x44 && data[j+1] == 0x75 && data[j+2] == 0x63 && data[j+3] == 0x61 {
+            per_len_pos = j + 4;
+            break;
+        }
+    }
+    if per_len_pos == 0 || per_len_pos >= data.len() { return; }
+
+    // 2. Update right-to-left so positions don't shift
+
+    // PER length (rightmost)
+    let per_shift = write_per_length(data, per_len_pos, added);
+    let shift1 = per_shift.max(0) as usize;
+
+    // userData BER length (middle) — shifted by PER expansion
+    let ud_shift = write_ber_length(data, ud_len_pos + shift1, ud_len_val + added);
+    let shift2 = shift1 + ud_shift.max(0) as usize;
+
+    // MCS Connect-Initial BER length (leftmost) — shifted by both
+    write_ber_length(data, mcs_len_pos + shift2, mcs_len_val + added);
 }
 
 fn ber_length_size(data: &[u8]) -> usize {
@@ -382,50 +381,47 @@ fn read_ber_length(data: &[u8]) -> usize {
     }
 }
 
-fn update_ber_length_at(data: &mut Vec<u8>, pos: usize, added: usize) {
-    if pos >= data.len() { return; }
-    let old_len = read_ber_length(&data[pos..]);
-    let old_size = ber_length_size(&data[pos..]);
-    let new_len = old_len + added;
-
+/// Write a BER length at `pos`, replacing old encoding. Returns bytes added (0 or positive).
+fn write_ber_length(data: &mut Vec<u8>, pos: usize, new_val: usize) -> isize {
+    if pos >= data.len() { return 0; }
+    let old_size = ber_length_size(&data[pos..]) as isize;
     let mut new_bytes = Vec::new();
-    if new_len < 0x80 {
-        new_bytes.push(new_len as u8);
-    } else if new_len < 0x100 {
+    if new_val < 0x80 {
+        new_bytes.push(new_val as u8);
+    } else if new_val < 0x100 {
         new_bytes.push(0x81);
-        new_bytes.push(new_len as u8);
+        new_bytes.push(new_val as u8);
     } else {
         new_bytes.push(0x82);
-        new_bytes.push((new_len >> 8) as u8);
-        new_bytes.push((new_len & 0xFF) as u8);
+        new_bytes.push((new_val >> 8) as u8);
+        new_bytes.push((new_val & 0xFF) as u8);
     }
-
-    // Replace old length bytes with new
-    data.splice(pos..pos + old_size, new_bytes);
+    let new_size = new_bytes.len() as isize;
+    data.splice(pos..pos + old_size as usize, new_bytes);
+    new_size - old_size
 }
 
-fn update_per_length_at(data: &mut Vec<u8>, pos: usize, added: usize) {
-    if pos >= data.len() { return; }
+/// Update a PER length at `pos` by adding `added`. Returns bytes inserted (0 or 1).
+fn write_per_length(data: &mut Vec<u8>, pos: usize, added: usize) -> isize {
+    if pos >= data.len() { return 0; }
     if data[pos] & 0x80 == 0 {
-        // Short form: single byte < 128
         let old = data[pos] as usize;
         let new_len = old + added;
         if new_len < 0x80 {
             data[pos] = new_len as u8;
+            0
         } else {
-            // Need to expand to 2-byte form
-            let hi = ((new_len >> 8) & 0x3F) as u8 | 0x80;
-            let lo = (new_len & 0xFF) as u8;
-            data[pos] = hi;
-            data.insert(pos + 1, lo);
+            data[pos] = ((new_len >> 8) & 0x3F) as u8 | 0x80;
+            data.insert(pos + 1, (new_len & 0xFF) as u8);
+            1
         }
     } else {
-        // Two-byte PER: (first & 0x3F) << 8 | second
-        if pos + 1 >= data.len() { return; }
+        if pos + 1 >= data.len() { return 0; }
         let old = (((data[pos] & 0x3F) as usize) << 8) | data[pos + 1] as usize;
         let new_len = old + added;
         data[pos] = ((new_len >> 8) & 0x3F) as u8 | 0x80;
         data[pos + 1] = (new_len & 0xFF) as u8;
+        0
     }
 }
 

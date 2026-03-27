@@ -295,11 +295,7 @@ async fn run_session(
                     // Scan early messages for CS_NET (MCS Connect Initial)
                     // The first messages may be CredSSP/NLA, not MCS.
                     if !cs_net_found {
-                        // Log every message until we find CS_NET
                         let is_tpkt = data.len() > 4 && data[0] == 0x03 && data[1] == 0x00;
-                        if is_tpkt {
-                            tracing::info!("CLIPRDR: c2s TPKT message ({} bytes)", data.len());
-                        }
 
                         let names = cliprdr::parse_cs_net_channel_names(&data);
                         if !names.is_empty() {
@@ -307,27 +303,25 @@ async fn run_session(
                             tracing::info!("CLIPRDR: CS_NET channels: {:?} (cliprdr={})", names, has_cliprdr);
                             if !has_cliprdr {
                                 if cliprdr::inject_cliprdr_channel(&mut data) {
-                                    tracing::info!("CLIPRDR: Injected cliprdr channel into CS_NET");
-                                } else {
-                                    tracing::warn!("CLIPRDR: Failed to inject cliprdr channel");
+                                    tracing::info!("CLIPRDR: Injected cliprdr into existing CS_NET");
                                 }
                             }
-                            // Re-parse after potential injection
                             let final_names = cliprdr::parse_cs_net_channel_names(&data);
                             let mut cs = clip_c2s.lock().await;
                             cs.channel_names = final_names;
                             cs_net_found = true;
                         } else if is_tpkt && data.len() > 100 {
-                            // This is likely the MCS Connect Initial but has no CS_NET block.
-                            // Try to inject a whole CS_NET block with cliprdr.
+                            // No CS_NET block at all — inject one
                             if cliprdr::inject_cs_net_with_cliprdr(&mut data) {
-                                tracing::info!("CLIPRDR: Injected entire CS_NET block with cliprdr channel");
+                                tracing::info!("CLIPRDR: Injected CS_NET block with cliprdr");
                                 let final_names = cliprdr::parse_cs_net_channel_names(&data);
-                                tracing::info!("CLIPRDR: After injection: {:?}", final_names);
+                                tracing::info!("CLIPRDR: Channels after injection: {:?}", final_names);
                                 let mut cs = clip_c2s.lock().await;
                                 cs.channel_names = final_names;
-                                cs_net_found = true;
+                            } else {
+                                tracing::warn!("CLIPRDR: Failed to inject CS_NET block");
                             }
+                            cs_net_found = true;
                         }
 
                         // For eddsa: patch serverSelectedProtocol in MCS Connect Initial
