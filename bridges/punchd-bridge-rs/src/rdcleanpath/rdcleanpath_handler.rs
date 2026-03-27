@@ -299,8 +299,17 @@ async fn run_session(
                         if !names.is_empty() {
                             let has_cliprdr = names.iter().any(|n| n.eq_ignore_ascii_case("cliprdr"));
                             tracing::info!("CLIPRDR: CS_NET channels: {:?} (cliprdr={})", names, has_cliprdr);
+                            if !has_cliprdr {
+                                if cliprdr::inject_cliprdr_channel(&mut data) {
+                                    tracing::info!("CLIPRDR: Injected cliprdr channel into CS_NET");
+                                } else {
+                                    tracing::warn!("CLIPRDR: Failed to inject cliprdr channel");
+                                }
+                            }
+                            // Re-parse after potential injection
+                            let final_names = cliprdr::parse_cs_net_channel_names(&data);
                             let mut cs = clip_c2s.lock().await;
-                            cs.channel_names = names;
+                            cs.channel_names = final_names;
                             cs_net_found = true;
                         }
                         // For eddsa: patch serverSelectedProtocol in MCS Connect Initial

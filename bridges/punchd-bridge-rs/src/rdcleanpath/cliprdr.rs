@@ -218,6 +218,217 @@ pub fn parse_cs_net_channel_names(mcs_data: &[u8]) -> Vec<String> {
     names
 }
 
+/// Inject a "cliprdr" channel into CS_NET if not already present.
+/// Modifies the MCS Connect Initial in-place, updating channel count,
+/// CS_NET block length, and all outer length fields (TPKT, X.224, BER, PER).
+/// Returns true if injection was performed.
+pub fn inject_cliprdr_channel(data: &mut Vec<u8>) -> bool {
+    // Find CS_NET block
+    let cs_net_pos = match find_cs_net_position(data) {
+        Some(pos) => pos,
+        None => return false,
+    };
+
+    let block_len = u16::from_le_bytes([data[cs_net_pos + 2], data[cs_net_pos + 3]]) as usize;
+    if block_len < 8 || cs_net_pos + block_len > data.len() {
+        return false;
+    }
+
+    // Check if cliprdr already exists
+    let channel_count = u32::from_le_bytes([
+        data[cs_net_pos + 4], data[cs_net_pos + 5],
+        data[cs_net_pos + 6], data[cs_net_pos + 7],
+    ]) as usize;
+
+    let mut offset = cs_net_pos + 8;
+    for _ in 0..channel_count {
+        if offset + 12 > data.len() { break; }
+        let name: String = data[offset..offset + 8]
+            .iter()
+            .take_while(|&&b| b != 0)
+            .map(|&b| b as char)
+            .collect();
+        if name.eq_ignore_ascii_case("cliprdr") {
+            return false; // Already present
+        }
+        offset += 12;
+    }
+
+    // Build the new channel entry: 8 bytes name + 4 bytes options
+    let mut entry = [0u8; 12];
+    let name_bytes = b"cliprdr\0";
+    entry[..8].copy_from_slice(name_bytes);
+    // Channel options: CHANNEL_OPTION_INITIALIZED | CHANNEL_OPTION_ENCRYPT_RDP
+    let options: u32 = 0x80000000 | 0x40000000;
+    entry[8..12].copy_from_slice(&options.to_le_bytes());
+
+    // Insert the entry at the end of CS_NET channels
+    let insert_pos = cs_net_pos + block_len;
+    data.splice(insert_pos..insert_pos, entry.iter().cloned());
+
+    // Update channel count (+1)
+    let new_count = (channel_count + 1) as u32;
+    data[cs_net_pos + 4..cs_net_pos + 8].copy_from_slice(&new_count.to_le_bytes());
+
+    // Update CS_NET block length (+12)
+    let new_block_len = (block_len + 12) as u16;
+    data[cs_net_pos + 2..cs_net_pos + 4].copy_from_slice(&new_block_len.to_le_bytes());
+
+    // Update TPKT length (first 4 bytes: [0x03, 0x00, len_hi, len_lo])
+    if data.len() >= 4 && data[0] == 0x03 && data[1] == 0x00 {
+        let old_tpkt_len = u16::from_be_bytes([data[2], data[3]]);
+        let new_tpkt_len = old_tpkt_len + 12;
+        data[2..4].copy_from_slice(&new_tpkt_len.to_be_bytes());
+    }
+
+    // Update BER/PER lengths in MCS Connect Initial
+    // The MCS Connect Initial has nested length fields that need updating.
+    // Rather than parsing the full ASN.1/PER structure, we update all
+    // length fields between TPKT header and CS_NET by scanning for them.
+    update_mcs_lengths(data, 12);
+
+    true
+}
+
+/// Find the byte offset of CS_NET (type 0xC003) in the data.
+fn find_cs_net_position(data: &[u8]) -> Option<usize> {
+    for i in 0..data.len().saturating_sub(8) {
+        if data[i] == 0x03 && data[i + 1] == 0xC0 {
+            let block_len = u16::from_le_bytes([data[i + 2], data[i + 3]]) as usize;
+            if block_len >= 8 && i + block_len <= data.len() {
+                return Some(i);
+            }
+        }
+    }
+    None
+}
+
+/// Update MCS Connect Initial length fields after inserting bytes.
+/// This handles the BER-encoded lengths in the MCS/GCC wrapper.
+fn update_mcs_lengths(data: &mut Vec<u8>, added: usize) {
+    // MCS Connect Initial structure (after TPKT + X.224):
+    //   [0x7F, 0x65] = Connect-Initial tag
+    //   BER length (of entire Connect-Initial content)
+    //   ... callingDomainSelector, calledDomainSelector, upwardFlag ...
+    //   [0x04] = OCTET STRING tag (userData)
+    //   BER length (of GCC Conference Create Request)
+    //   ... GCC header ...
+    //   PER length (of user data blocks)
+    //   ... CS_CORE, CS_SECURITY, CS_NET ...
+
+    let x224_end = if data.len() > 7 { 7 } else { return }; // TPKT(4) + X.224(3)
+
+    // Find Connect-Initial tag [0x7F, 0x65]
+    if x224_end + 2 > data.len() || data[x224_end] != 0x7F || data[x224_end + 1] != 0x65 {
+        return;
+    }
+    // Update BER length after Connect-Initial tag
+    update_ber_length_at(data, x224_end + 2, added);
+
+    // Find the OCTET STRING [0x04] for userData — scan forward
+    let mut pos = x224_end + 2;
+    pos += ber_length_size(&data[pos..]); // skip Connect-Initial length
+
+    // Skip callingDomainSelector, calledDomainSelector, upwardFlag
+    // These are BER-encoded fields. We need to find [0x04] tag for userData.
+    for _ in 0..10 {
+        if pos >= data.len() { return; }
+        if data[pos] == 0x04 {
+            // Found OCTET STRING — update its length
+            update_ber_length_at(data, pos + 1, added);
+
+            // Inside the OCTET STRING is a GCC Conference Create Request
+            // with a PER-encoded length of user data.
+            // Find "Duca" (0x44, 0x75, 0x63, 0x61) — the H.221 key
+            let oc_start = pos + 1 + ber_length_size(&data[pos + 1..]);
+            for j in oc_start..data.len().saturating_sub(6) {
+                if data[j] == 0x44 && data[j + 1] == 0x75 && data[j + 2] == 0x63 && data[j + 3] == 0x61 {
+                    // PER length follows "Duca"
+                    let per_pos = j + 4;
+                    if per_pos < data.len() {
+                        update_per_length_at(data, per_pos, added);
+                    }
+                    return;
+                }
+            }
+            return;
+        }
+        // Skip this BER TLV
+        pos += 1; // tag
+        if pos >= data.len() { return; }
+        let len_size = ber_length_size(&data[pos..]);
+        let len_val = read_ber_length(&data[pos..]);
+        pos += len_size + len_val;
+    }
+}
+
+fn ber_length_size(data: &[u8]) -> usize {
+    if data.is_empty() { return 1; }
+    if data[0] & 0x80 == 0 { 1 }
+    else { 1 + (data[0] & 0x7F) as usize }
+}
+
+fn read_ber_length(data: &[u8]) -> usize {
+    if data.is_empty() { return 0; }
+    if data[0] & 0x80 == 0 {
+        data[0] as usize
+    } else {
+        let n = (data[0] & 0x7F) as usize;
+        let mut val = 0usize;
+        for i in 0..n.min(data.len() - 1) {
+            val = (val << 8) | data[1 + i] as usize;
+        }
+        val
+    }
+}
+
+fn update_ber_length_at(data: &mut Vec<u8>, pos: usize, added: usize) {
+    if pos >= data.len() { return; }
+    let old_len = read_ber_length(&data[pos..]);
+    let old_size = ber_length_size(&data[pos..]);
+    let new_len = old_len + added;
+
+    let mut new_bytes = Vec::new();
+    if new_len < 0x80 {
+        new_bytes.push(new_len as u8);
+    } else if new_len < 0x100 {
+        new_bytes.push(0x81);
+        new_bytes.push(new_len as u8);
+    } else {
+        new_bytes.push(0x82);
+        new_bytes.push((new_len >> 8) as u8);
+        new_bytes.push((new_len & 0xFF) as u8);
+    }
+
+    // Replace old length bytes with new
+    data.splice(pos..pos + old_size, new_bytes);
+}
+
+fn update_per_length_at(data: &mut Vec<u8>, pos: usize, added: usize) {
+    if pos >= data.len() { return; }
+    if data[pos] & 0x80 == 0 {
+        // Short form: single byte < 128
+        let old = data[pos] as usize;
+        let new_len = old + added;
+        if new_len < 0x80 {
+            data[pos] = new_len as u8;
+        } else {
+            // Need to expand to 2-byte form
+            let hi = ((new_len >> 8) & 0x3F) as u8 | 0x80;
+            let lo = (new_len & 0xFF) as u8;
+            data[pos] = hi;
+            data.insert(pos + 1, lo);
+        }
+    } else {
+        // Two-byte PER: (first & 0x3F) << 8 | second
+        if pos + 1 >= data.len() { return; }
+        let old = (((data[pos] & 0x3F) as usize) << 8) | data[pos + 1] as usize;
+        let new_len = old + added;
+        data[pos] = ((new_len >> 8) & 0x3F) as u8 | 0x80;
+        data[pos + 1] = (new_len & 0xFF) as u8;
+    }
+}
+
 /// Parse SC_NET (Server Network Data, type 0x0C03) from MCS Connect Response
 /// to extract assigned channel IDs.
 pub fn parse_sc_net_channel_ids(mcs_data: &[u8]) -> Vec<u16> {
