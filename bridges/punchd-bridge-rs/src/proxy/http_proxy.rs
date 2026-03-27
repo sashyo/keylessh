@@ -86,6 +86,7 @@ pub struct ProxyState {
     pub server_endpoints: OidcEndpoints,
     pub browser_endpoints: Option<OidcEndpoints>,
     pub client_id: String,
+    pub role_client_id: String,
     pub refresh_cache: DashMap<String, RefreshResult>,
     pub refresh_in_flight: DashMap<String, Arc<Notify>>,
     pub use_tls: bool,
@@ -439,6 +440,7 @@ impl ProxyState {
             backend_cookie_jar: DashMap::new(),
             server_endpoints,
             browser_endpoints,
+            role_client_id: client_id.clone(),
             client_id,
             refresh_cache: DashMap::new(),
             refresh_in_flight: DashMap::new(),
@@ -670,6 +672,7 @@ pub fn build_proxy_state(
     tc_config: &TidecloakConfig,
     auth: Arc<TidecloakAuth>,
     use_tls: bool,
+    role_client_id: &str,
 ) -> Arc<ProxyState> {
     let base_url = config
         .tc_internal_url
@@ -746,6 +749,7 @@ pub fn build_proxy_state(
         server_endpoints,
         browser_endpoints,
         client_id: tc_config.resource.clone(),
+        role_client_id: role_client_id.to_string(),
         refresh_cache: DashMap::new(),
         refresh_in_flight: DashMap::new(),
         use_tls,
@@ -824,7 +828,7 @@ async fn handle_rdcleanpath_socket(socket: WebSocket, state: Arc<ProxyState>) {
             backends: state.config.backends.clone(),
             auth: state.auth.clone(),
             gateway_id: state.gateway_id.clone(),
-            tc_client_id: Some(state.client_id.clone()),
+            tc_client_id: Some(state.role_client_id.clone()),
         },
     );
 
@@ -1250,7 +1254,7 @@ async fn handle_request(
             let client_roles: Vec<&str> = jwt
                 .resource_access
                 .as_ref()
-                .and_then(|ra| ra.get(&state.client_id))
+                .and_then(|ra| ra.get(&state.role_client_id))
                 .and_then(|v| v.get("roles"))
                 .and_then(|v| v.as_array())
                 .map(|arr| {

@@ -102,13 +102,8 @@ fn load_config() -> Result<(TidecloakConfig, u16), String> {
         (fs::read_to_string(&path).map_err(|e| format!("Read error: {e}"))?, None)
     };
 
-    let mut config: TidecloakConfig =
+    let config: TidecloakConfig =
         serde_json::from_str(&config_data).map_err(|e| format!("JSON parse error: {e}"))?;
-
-    if let Ok(client_id) = env::var("TC_CLIENT_ID") {
-        tracing::info!("TC_CLIENT_ID override: {}", client_id);
-        config.resource = client_id;
-    }
 
     if config.jwk.keys.is_empty() {
         return Err("No JWKS keys found in config".into());

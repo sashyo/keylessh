@@ -40,10 +40,11 @@ async fn main() {
 
     // Load config
     let config = config::load_config();
-    let mut tc_config = config::load_tidecloak_config();
-    if let Some(ref client_id) = config.tc_client_id {
-        tracing::info!("TC_CLIENT_ID override: {}", client_id);
-        tc_config.resource = client_id.clone();
+    let tc_config = config::load_tidecloak_config();
+    // TC_CLIENT_ID overrides only role lookups, not OIDC client_id
+    let tc_client_id = config.tc_client_id.clone().unwrap_or_else(|| tc_config.resource.clone());
+    if tc_client_id != tc_config.resource {
+        tracing::info!("TC_CLIENT_ID role override: {} (OIDC client: {})", tc_client_id, tc_config.resource);
     }
 
     // Auth
@@ -71,6 +72,7 @@ async fn main() {
         &tc_config,
         auth.clone(),
         tls_cert.is_some(),
+        &tc_client_id,
     );
     let app = proxy::http_proxy::build_router(proxy_state.clone());
 
@@ -138,7 +140,7 @@ async fn main() {
         },
         backends: config.backends.clone(),
         auth: Some(auth.clone()),
-        tc_client_id: Some(tc_config.resource.clone()),
+        tc_client_id: Some(tc_client_id.clone()),
     });
 
     // System tray icon
