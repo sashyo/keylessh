@@ -376,14 +376,15 @@ async fn run_session(
                         let ids = cliprdr::parse_sc_net_channel_ids(chunk);
                         if !ids.is_empty() {
                             let mut cs = clip_s2c.lock().await;
-                            tracing::info!("CLIPRDR: SC_NET channel IDs: {:?}, names: {:?}", ids, cs.channel_names);
+                            tracing::info!("CLIPRDR: SC_NET channel IDs: {:?}, client names: {:?}", ids, cs.channel_names);
+                            if cs.channel_names.is_empty() {
+                                tracing::warn!("CLIPRDR: SC_NET arrived but CS_NET names not yet parsed — IronRDP may not request cliprdr");
+                            }
                             if let Some(ch_id) = cliprdr::find_cliprdr_channel_id(&cs.channel_names, &ids) {
                                 cs.channel_id = Some(ch_id);
                                 tracing::info!("CLIPRDR: channel ID = {ch_id}");
-                                setup_phase = false;
-                            } else {
-                                tracing::warn!("CLIPRDR: No cliprdr channel found in SC_NET");
                             }
+                            setup_phase = false; // stop scanning regardless
                         }
                     }
 

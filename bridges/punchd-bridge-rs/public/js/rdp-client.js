@@ -1001,47 +1001,33 @@
   }
 
   function typeTextIntoRdp(text) {
-    if (!rdpSession) return;
-    var typed = 0, skipped = 0;
+    if (!rdpSession || !wasmModule) return;
+    var DE = wasmModule.DeviceEvent;
+    var IT = wasmModule.InputTransaction;
     for (var i = 0; i < text.length; i++) {
-      var ch = text[i];
       var code = text.charCodeAt(i);
-
       if (code === 10 || code === 13) {
-        pressAndRelease(0x1C); // Enter
+        pressAndRelease(0x1C);
         if (code === 13 && i + 1 < text.length && text.charCodeAt(i + 1) === 10) i++;
-        typed++;
         continue;
       }
       if (code === 9) {
-        pressAndRelease(0x0F); // Tab
-        typed++;
+        pressAndRelease(0x0F);
         continue;
       }
-
-      var mapping = CHAR_TO_SCANCODE[ch];
-      if (mapping) {
-        if (mapping.shift) {
-          try {
-            var tx = new wasmModule.InputTransaction();
-            tx.addEvent(wasmModule.DeviceEvent.keyPressed(0x2A)); // LShift down
-            rdpSession.applyInputs(tx);
-          } catch (e) {}
-        }
-        pressAndRelease(mapping.sc);
-        if (mapping.shift) {
-          try {
-            var tx = new wasmModule.InputTransaction();
-            tx.addEvent(wasmModule.DeviceEvent.keyReleased(0x2A)); // LShift up
-            rdpSession.applyInputs(tx);
-          } catch (e) {}
-        }
-        typed++;
-      } else {
-        skipped++;
+      try {
+        var tx = new IT();
+        tx.addEvent(DE.unicodePressed(code));
+        rdpSession.applyInputs(tx);
+        tx = new IT();
+        tx.addEvent(DE.unicodeReleased(code));
+        rdpSession.applyInputs(tx);
+      } catch (err) {
+        if (i === 0) console.error("[RDP] unicodePressed failed:", err, "methods:", Object.getOwnPropertyNames(DE));
+        break;
       }
     }
-    console.log("[RDP] typeTextIntoRdp: typed", typed, "skipped", skipped, "of", text.length);
+    console.log("[RDP] typeTextIntoRdp: sent", text.length, "chars");
   }
 
   function pressAndRelease(scancode) {
