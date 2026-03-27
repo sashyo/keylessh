@@ -978,16 +978,16 @@
       if (mapping) {
         if (mapping.shift) {
           try {
-            var tx = new InputTransaction();
-            tx.addEvent(DeviceEvent.keyPressed(0x2A)); // LShift down
+            var tx = new wasmModule.InputTransaction();
+            tx.addEvent(wasmModule.DeviceEvent.keyPressed(0x2A)); // LShift down
             rdpSession.applyInputs(tx);
           } catch (e) {}
         }
         pressAndRelease(mapping.sc);
         if (mapping.shift) {
           try {
-            var tx = new InputTransaction();
-            tx.addEvent(DeviceEvent.keyReleased(0x2A)); // LShift up
+            var tx = new wasmModule.InputTransaction();
+            tx.addEvent(wasmModule.DeviceEvent.keyReleased(0x2A)); // LShift up
             rdpSession.applyInputs(tx);
           } catch (e) {}
         }
@@ -1000,13 +1000,13 @@
   }
 
   function pressAndRelease(scancode) {
-    if (!rdpSession) return;
+    if (!rdpSession || !wasmModule) return;
     try {
-      var tx = new InputTransaction();
-      tx.addEvent(DeviceEvent.keyPressed(scancode));
+      var tx = new wasmModule.InputTransaction();
+      tx.addEvent(wasmModule.DeviceEvent.keyPressed(scancode));
       rdpSession.applyInputs(tx);
-      tx = new InputTransaction();
-      tx.addEvent(DeviceEvent.keyReleased(scancode));
+      tx = new wasmModule.InputTransaction();
+      tx.addEvent(wasmModule.DeviceEvent.keyReleased(scancode));
       rdpSession.applyInputs(tx);
     } catch (err) {
       console.error("[RDP] pressAndRelease error:", err, "scancode:", scancode);
@@ -1015,19 +1015,20 @@
 
   // ── Send Ctrl+V as RDP keystrokes ──────────────────────────
   function sendCtrlV() {
-    if (!rdpSession) return;
+    if (!rdpSession || !wasmModule) return;
     try {
-      var tx = new InputTransaction();
-      tx.addEvent(DeviceEvent.keyPressed(0x1D)); // Ctrl down
+      var DE = wasmModule.DeviceEvent;
+      var tx = new wasmModule.InputTransaction();
+      tx.addEvent(DE.keyPressed(0x1D)); // Ctrl down
       rdpSession.applyInputs(tx);
-      tx = new InputTransaction();
-      tx.addEvent(DeviceEvent.keyPressed(0x2F)); // V down
+      tx = new wasmModule.InputTransaction();
+      tx.addEvent(DE.keyPressed(0x2F)); // V down
       rdpSession.applyInputs(tx);
-      tx = new InputTransaction();
-      tx.addEvent(DeviceEvent.keyReleased(0x2F)); // V up
+      tx = new wasmModule.InputTransaction();
+      tx.addEvent(DE.keyReleased(0x2F)); // V up
       rdpSession.applyInputs(tx);
-      tx = new InputTransaction();
-      tx.addEvent(DeviceEvent.keyReleased(0x1D)); // Ctrl up
+      tx = new wasmModule.InputTransaction();
+      tx.addEvent(DE.keyReleased(0x1D)); // Ctrl up
       rdpSession.applyInputs(tx);
     } catch (err) {
       console.error("[RDP] sendCtrlV error:", err);

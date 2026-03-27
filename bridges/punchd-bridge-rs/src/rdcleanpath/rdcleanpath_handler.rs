@@ -286,28 +286,27 @@ async fn run_session(
     let send_close_c2s = send_close.clone();
     let clip_c2s = clip_session.clone();
     let c2s = tokio::spawn(async move {
-        let mut first_msg = true;
+        let mut cs_net_found = false;
+        let mut mcs_patched = false;
         loop {
             tokio::select! {
                 msg = rx.recv() => {
                     let Some(mut data) = msg else { break };
-                    if first_msg {
-                        first_msg = false;
-                        tracing::info!("CLIPRDR: First c2s message ({} bytes), parsing CS_NET", data.len());
-                        // Parse channel names from MCS Connect Initial for CLIPRDR discovery
+                    // Scan early messages for CS_NET (MCS Connect Initial)
+                    // The first messages may be CredSSP/NLA, not MCS.
+                    if !cs_net_found {
                         let names = cliprdr::parse_cs_net_channel_names(&data);
                         if !names.is_empty() {
                             let has_cliprdr = names.iter().any(|n| n.eq_ignore_ascii_case("cliprdr"));
                             tracing::info!("CLIPRDR: CS_NET channels: {:?} (cliprdr={})", names, has_cliprdr);
                             let mut cs = clip_c2s.lock().await;
                             cs.channel_names = names;
-                        } else {
-                            tracing::warn!("CLIPRDR: No channel names found in CS_NET (first {} bytes: {:02x?})",
-                                data.len().min(64), &data[..data.len().min(64)]);
+                            cs_net_found = true;
                         }
-                        // For eddsa: patch serverSelectedProtocol in first MCS Connect Initial
-                        if mcs_patch_protocol > 0 {
+                        // For eddsa: patch serverSelectedProtocol in MCS Connect Initial
+                        if !mcs_patched && mcs_patch_protocol > 0 && data.len() > 100 && data[0] == 0x03 {
                             patch_mcs_selected_protocol(&mut data, mcs_patch_protocol);
+                            mcs_patched = true;
                         }
                     }
                     if let Err(e) = tls_write.write_all(&data).await {
