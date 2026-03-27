@@ -786,9 +786,46 @@
       // Set up input handling
       setupInputHandlers();
 
+      // Set up clipboard WebSocket for RDP→browser copy
+      var clipboardWs = new WebSocket("wss://" + location.host + "/ws/clipboard");
+      clipboardWs.onmessage = function (event) {
+        if (typeof event.data !== "string" || !event.data.length) return;
+        try {
+          var msg = JSON.parse(event.data);
+          if (msg.type === "text" && msg.content) {
+            navigator.clipboard.writeText(msg.content).then(function () {
+              console.log("[RDP] Clipboard text updated (" + msg.content.length + " chars)");
+            }).catch(function (err) {
+              console.warn("[RDP] Clipboard write failed:", err);
+            });
+          } else if (msg.type === "files" && msg.files && msg.files.length > 0) {
+            console.log("[RDP] Files available from RDP:", msg.files);
+            msg.files.forEach(function (f) {
+              if (f.id && f.name) {
+                showFileDownload(f.id, f.name, f.size || 0);
+              }
+            });
+          }
+        } catch (e) {
+          navigator.clipboard.writeText(event.data).catch(function () {});
+        }
+      };
+      clipboardWs.onerror = function () {
+        console.warn("[RDP] Clipboard WebSocket error");
+      };
+
+      // Set up file upload (browser → RDP paste)
+      setupFileUpload();
+
       // Run the session (blocks until session ends)
       var termInfo = await rdpSession.run();
       console.log("[RDP] Session ended:", termInfo ? termInfo.reason() : "unknown");
+
+      // Clean up
+      var uploadBtn = document.getElementById("rdp-upload-btn");
+      if (uploadBtn) uploadBtn.remove();
+      // Clean up clipboard WebSocket
+      if (clipboardWs.readyState === WebSocket.OPEN) clipboardWs.close();
 
       rdpSession = null;
       setStatus("error", "Session ended");
@@ -946,6 +983,129 @@
         rdpSession.applyInputs(tx);
       } catch (err) { /* ignore */ }
     }
+  }
+
+  // ── File Download Notification ──────────────────────────────
+
+  function showFileDownload(fileId, fileName, fileSize) {
+    var container = document.getElementById("rdp-file-notifications");
+    if (!container) {
+      container = document.createElement("div");
+      container.id = "rdp-file-notifications";
+      container.style.cssText = "position:fixed;top:10px;right:10px;z-index:10000;display:flex;flex-direction:column;gap:8px;max-width:320px";
+      document.body.appendChild(container);
+    }
+
+    var sizeStr = fileSize < 1024 ? fileSize + " B"
+      : fileSize < 1048576 ? (fileSize / 1024).toFixed(1) + " KB"
+      : (fileSize / 1048576).toFixed(1) + " MB";
+
+    var note = document.createElement("div");
+    note.style.cssText = "background:#1e293b;color:#f1f5f9;padding:12px 16px;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,.3);display:flex;align-items:center;gap:10px;font-family:system-ui;font-size:13px;cursor:pointer;transition:opacity .3s";
+    note.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#60a5fa" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>'
+      + '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + fileName + ' <span style="color:#94a3b8">(' + sizeStr + ')</span></span>';
+    note.title = "Click to download " + fileName;
+
+    note.onclick = function () {
+      var a = document.createElement("a");
+      a.href = "/api/clipboard-files/" + encodeURIComponent(fileId);
+      a.download = fileName;
+      a.style.display = "none";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      note.style.opacity = "0";
+      setTimeout(function () { note.remove(); }, 300);
+    };
+
+    container.appendChild(note);
+
+    setTimeout(function () {
+      if (note.parentNode) {
+        note.style.opacity = "0";
+        setTimeout(function () { note.remove(); }, 300);
+      }
+    }, 30000);
+  }
+
+  // ── File Upload (browser → RDP) ─────────────────────────────
+
+  function setupFileUpload() {
+    var btn = document.createElement("div");
+    btn.id = "rdp-upload-btn";
+    btn.style.cssText = "position:fixed;bottom:20px;right:20px;z-index:10000;width:48px;height:48px;border-radius:50%;background:#4f46e5;display:flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,.3);transition:transform .2s";
+    btn.innerHTML = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>';
+    btn.title = "Upload files to RDP session";
+    btn.onmouseenter = function () { btn.style.transform = "scale(1.1)"; };
+    btn.onmouseleave = function () { btn.style.transform = "scale(1)"; };
+
+    var fileInput = document.createElement("input");
+    fileInput.type = "file";
+    fileInput.multiple = true;
+    fileInput.style.display = "none";
+
+    btn.onclick = function () { fileInput.click(); };
+    fileInput.onchange = function () {
+      if (fileInput.files && fileInput.files.length > 0) {
+        uploadFiles(fileInput.files);
+        fileInput.value = "";
+      }
+    };
+
+    document.body.appendChild(fileInput);
+    document.body.appendChild(btn);
+
+    var canvas = document.getElementById("rdpCanvas");
+    if (canvas) {
+      canvas.addEventListener("dragover", function (e) {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "copy";
+      });
+      canvas.addEventListener("drop", function (e) {
+        e.preventDefault();
+        if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+          uploadFiles(e.dataTransfer.files);
+        }
+      });
+    }
+  }
+
+  function uploadFiles(fileList) {
+    var formData = new FormData();
+    for (var i = 0; i < fileList.length; i++) {
+      formData.append("file" + i, fileList[i]);
+    }
+    fetch("/api/clipboard-upload", { method: "POST", body: formData })
+      .then(function (resp) { return resp.json(); })
+      .then(function (data) {
+        if (data.ok) {
+          console.log("[RDP] Uploaded " + data.files + " file(s) for paste");
+          showUploadNotification(fileList.length);
+        } else {
+          console.warn("[RDP] Upload failed:", data.error);
+        }
+      })
+      .catch(function (err) { console.error("[RDP] Upload error:", err); });
+  }
+
+  function showUploadNotification(count) {
+    var container = document.getElementById("rdp-file-notifications");
+    if (!container) {
+      container = document.createElement("div");
+      container.id = "rdp-file-notifications";
+      container.style.cssText = "position:fixed;top:10px;right:10px;z-index:10000;display:flex;flex-direction:column;gap:8px;max-width:320px";
+      document.body.appendChild(container);
+    }
+    var note = document.createElement("div");
+    note.style.cssText = "background:#065f46;color:#d1fae5;padding:12px 16px;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,.3);font-family:system-ui;font-size:13px;transition:opacity .3s";
+    note.textContent = count + " file(s) sent to RDP clipboard. Use Ctrl+V in the RDP session to paste.";
+    container.appendChild(note);
+    setTimeout(function () {
+      if (note.parentNode) {
+        note.style.opacity = "0";
+        setTimeout(function () { note.remove(); }, 300);
+      }
+    }, 8000);
   }
 
   // ── Keyboard Scancode Mapping ─────────────────────────────────

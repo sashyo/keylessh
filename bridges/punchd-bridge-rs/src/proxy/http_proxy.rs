@@ -96,6 +96,9 @@ pub struct ProxyState {
     pub tc_public_origin: Option<String>,
     pub gateway_id: Option<String>,
     pub default_backend_name: String,
+    pub clipboard_tx: tokio::sync::broadcast::Sender<crate::rdcleanpath::rdcleanpath_handler::ClipboardEvent>,
+    pub clipboard_files: Arc<DashMap<String, (String, Vec<u8>)>>, // uuid -> (filename, data)
+    pub upload_tx: std::sync::Mutex<Option<crate::rdcleanpath::rdcleanpath_handler::UploadTx>>,
 }
 
 const TC_SESS_MAX_AGE: u64 = 3600;
@@ -449,6 +452,9 @@ impl ProxyState {
             tc_proxy_url,
             tc_public_origin,
             default_backend_name,
+            clipboard_tx: tokio::sync::broadcast::channel(16).0,
+            clipboard_files: Arc::new(DashMap::new()),
+            upload_tx: std::sync::Mutex::new(None),
         }
     }
 
@@ -759,6 +765,9 @@ pub fn build_proxy_state(
         tc_public_origin,
         gateway_id: Some(config.gateway_id.clone()),
         default_backend_name,
+        clipboard_tx: tokio::sync::broadcast::channel(16).0,
+        clipboard_files: Arc::new(DashMap::new()),
+        upload_tx: std::sync::Mutex::new(None),
     })
 }
 
@@ -777,6 +786,9 @@ pub fn build_router(state: Arc<ProxyState>) -> Router {
 
     Router::new()
         .route("/ws/rdcleanpath", get(handle_rdcleanpath_ws))
+        .route("/ws/clipboard", get(handle_clipboard_ws))
+        .route("/api/clipboard-files/:id", get(handle_clipboard_file_download))
+        .route("/api/clipboard-upload", axum::routing::post(handle_clipboard_upload))
         .fallback(any(handle_request))
         .with_state(state)
 }
@@ -821,6 +833,10 @@ async fn handle_rdcleanpath_socket(socket: WebSocket, state: Arc<ProxyState>) {
     };
     drop(out_tx); // Only the callbacks hold references now
 
+    // Create upload channel for browser → RDP file paste
+    let (upload_tx, upload_rx) = tokio::sync::mpsc::unbounded_channel();
+    { *state.upload_tx.lock().unwrap() = Some(upload_tx); }
+
     let session = crate::rdcleanpath::rdcleanpath_handler::RDCleanPathSession::new(
         crate::rdcleanpath::rdcleanpath_handler::RDCleanPathSessionOptions {
             send_binary,
@@ -829,6 +845,9 @@ async fn handle_rdcleanpath_socket(socket: WebSocket, state: Arc<ProxyState>) {
             auth: state.auth.clone(),
             gateway_id: state.gateway_id.clone(),
             tc_client_id: Some(state.role_client_id.clone()),
+            clipboard_tx: Some(state.clipboard_tx.clone()),
+            clipboard_files: Some(state.clipboard_files.clone()),
+            upload_rx: Some(upload_rx),
         },
     );
 
@@ -878,6 +897,136 @@ async fn handle_rdcleanpath_socket(socket: WebSocket, state: Arc<ProxyState>) {
 
     writer_task.abort();
     tracing::info!("[RDCleanPath-WS] Handler exiting");
+}
+
+// ── Clipboard WebSocket handler ──────────────────────────────────
+
+async fn handle_clipboard_ws(
+    State(state): State<Arc<ProxyState>>,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_clipboard_socket(socket, state))
+}
+
+async fn handle_clipboard_socket(socket: WebSocket, state: Arc<ProxyState>) {
+    use crate::rdcleanpath::rdcleanpath_handler::ClipboardEvent;
+    use futures_util::{SinkExt, StreamExt};
+
+    let (mut ws_sink, mut ws_stream) = socket.split();
+    let mut rx = state.clipboard_tx.subscribe();
+
+    tracing::info!("[Clipboard-WS] Client connected");
+
+    loop {
+        tokio::select! {
+            result = rx.recv() => {
+                match result {
+                    Ok(event) => {
+                        let json = match event {
+                            ClipboardEvent::Text(text) => {
+                                serde_json::json!({"type": "text", "content": text}).to_string()
+                            }
+                            ClipboardEvent::Files(files) => {
+                                serde_json::json!({
+                                    "type": "files",
+                                    "files": files.iter().map(|f| serde_json::json!({
+                                        "id": f.id,
+                                        "name": f.name,
+                                        "size": f.size,
+                                    })).collect::<Vec<_>>()
+                                }).to_string()
+                            }
+                        };
+                        if ws_sink.send(Message::Text(json.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => break,
+                }
+            }
+            // Keep alive / detect close
+            msg = ws_stream.next() => {
+                match msg {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    tracing::info!("[Clipboard-WS] Client disconnected");
+}
+
+// ── Clipboard File Download ──────────────────────────────────────
+
+async fn handle_clipboard_file_download(
+    State(state): State<Arc<ProxyState>>,
+    axum::extract::Path(file_id): axum::extract::Path<String>,
+) -> Response {
+    if let Some((_, (name, data))) = state.clipboard_files.remove(&file_id) {
+        let disposition = format!("attachment; filename=\"{}\"", name.replace('"', "_"));
+        let mut resp = Response::new(Body::from(data));
+        resp.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/octet-stream"),
+        );
+        if let Ok(v) = HeaderValue::from_str(&disposition) {
+            resp.headers_mut().insert(header::CONTENT_DISPOSITION, v);
+        }
+        resp
+    } else {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        make_response(StatusCode::NOT_FOUND, headers, r#"{"error":"File not found or already downloaded"}"#)
+    }
+}
+
+// ── Clipboard File Upload (browser → RDP) ───────────────────────
+
+async fn handle_clipboard_upload(
+    State(state): State<Arc<ProxyState>>,
+    mut multipart: axum::extract::Multipart,
+) -> Response {
+    use crate::rdcleanpath::cliprdr::UploadedFile;
+
+    let mut files = Vec::new();
+
+    while let Ok(Some(field)) = multipart.next_field().await {
+        let name = field.file_name().unwrap_or("file").to_string();
+        match field.bytes().await {
+            Ok(data) => {
+                tracing::info!("[Clipboard-Upload] File: {} ({} bytes)", name, data.len());
+                files.push(UploadedFile {
+                    name,
+                    data: data.to_vec(),
+                });
+            }
+            Err(e) => {
+                tracing::error!("[Clipboard-Upload] Read error: {e}");
+            }
+        }
+    }
+
+    if files.is_empty() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        return make_response(StatusCode::BAD_REQUEST, headers, r#"{"error":"No files uploaded"}"#);
+    }
+
+    let count = files.len();
+    let tx = state.upload_tx.lock().unwrap().clone();
+    if let Some(tx) = tx {
+        if tx.send(files).is_ok() {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+            return make_response(StatusCode::OK, headers, &format!(r#"{{"ok":true,"files":{count}}}"#));
+        }
+    }
+
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    make_response(StatusCode::SERVICE_UNAVAILABLE, headers, r#"{"error":"No active RDP session"}"#)
 }
 
 // ── Main request handler ─────────────────────────────────────────

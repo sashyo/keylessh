@@ -3,3 +3,4 @@ pub mod negoex;
 pub mod credssp;
 pub mod rdcleanpath;
 pub mod rdcleanpath_handler;
+pub mod cliprdr;
