@@ -1,5 +1,5 @@
 [package]
-name = "punchd-gateway"
+name = "punchd-bridge-rs"
 version = "0.1.0"
 edition = "2021"
 
