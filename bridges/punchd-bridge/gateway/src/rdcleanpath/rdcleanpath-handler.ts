@@ -63,6 +63,30 @@ const CONNECT_TIMEOUT = 10_000;
 const TLS_TIMEOUT = 10_000;
 const X224_READ_TIMEOUT = 10_000;
 
+// ── CLIPRDR constants for logging ────────────────────────────────
+const CB_MONITOR_READY     = 0x0001;
+const CB_FORMAT_LIST       = 0x0002;
+const CB_FORMAT_LIST_RESP  = 0x0003;
+const CB_FORMAT_DATA_REQ   = 0x0004;
+const CB_FORMAT_DATA_RESP  = 0x0005;
+const CB_FILECONTENTS_REQ  = 0x0008;
+const CB_FILECONTENTS_RESP = 0x0009;
+
+const CLIPRDR_MSG_NAMES: Record<number, string> = {
+  [CB_MONITOR_READY]:     "CB_MONITOR_READY",
+  [CB_FORMAT_LIST]:       "CB_FORMAT_LIST",
+  [CB_FORMAT_LIST_RESP]:  "CB_FORMAT_LIST_RESPONSE",
+  [CB_FORMAT_DATA_REQ]:   "CB_FORMAT_DATA_REQUEST",
+  [CB_FORMAT_DATA_RESP]:  "CB_FORMAT_DATA_RESPONSE",
+  [CB_FILECONTENTS_REQ]:  "CB_FILECONTENTS_REQUEST",
+  [CB_FILECONTENTS_RESP]: "CB_FILECONTENTS_RESPONSE",
+};
+
+const CF_UNICODETEXT = 13;
+
+const VC_FLAG_FIRST = 0x00000001;
+const VC_FLAG_LAST  = 0x00000002;
+
 // ── Session factory ──────────────────────────────────────────────
 
 export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCleanPathSession {
@@ -72,6 +96,12 @@ export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCle
   let relayBytesToClient = 0;
   let relayBytesFromClient = 0;
   let mcsPatchProtocol = 0; // eddsa: original selectedProtocol to restore in MCS
+
+  // CLIPRDR logging state
+  let clipChannelNames: string[] = [];
+  let clipChannelId: number | null = null;
+  let clipSetupPhase = true;
+  let clipVcReassembly = new Map<number, Buffer>();
 
   function sendError(errorCode: number, httpStatus?: number, wsaError?: number, tlsAlert?: number): void {
     try {
@@ -287,6 +317,27 @@ export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCle
         relayBytesToClient += data.length;
         const hex = data.subarray(0, Math.min(64, data.length)).toString("hex");
         console.log(`[RDCleanPath] Relay RDP→client: ${data.length} bytes (total: ${relayBytesToClient}) hex: ${hex} at ${Date.now()}`);
+
+        // CLIPRDR: discover channel ID from SC_NET during setup
+        if (clipSetupPhase) {
+          const ids = parseScNetChannelIds(data);
+          if (ids.length > 0) {
+            const idx = clipChannelNames.findIndex(n => n.toLowerCase() === "cliprdr");
+            if (idx >= 0 && idx < ids.length) {
+              clipChannelId = ids[idx];
+              clipSetupPhase = false;
+              console.log(`[CLIPRDR] Channel ID = ${clipChannelId} (from SC_NET, index ${idx})`);
+            } else {
+              console.log(`[CLIPRDR] SC_NET has ${ids.length} IDs but no cliprdr match (names: ${clipChannelNames.join(",")})`);
+            }
+          }
+        }
+
+        // Log CLIPRDR PDUs in server→client direction
+        if (clipChannelId !== null) {
+          logClipdrFrames(data, "s2c", clipChannelId!, clipVcReassembly);
+        }
+
         opts.sendBinary(data);
       });
 
@@ -353,6 +404,21 @@ export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCle
               }
               patchMcsSelectedProtocol(data, proto);
               decodeMcsConnectInitial(data);
+              // Parse CS_NET channel names for CLIPRDR discovery
+              clipChannelNames = parseCsNetChannelNames(data);
+              if (clipChannelNames.length > 0) {
+                console.log(`[CLIPRDR] Discovered ${clipChannelNames.length} channel names: ${clipChannelNames.join(", ")}`);
+              }
+            } else if (relayBytesFromClient === 0 && clipChannelNames.length === 0) {
+              // Non-eddsa: parse first message for CS_NET
+              clipChannelNames = parseCsNetChannelNames(data);
+              if (clipChannelNames.length > 0) {
+                console.log(`[CLIPRDR] Discovered ${clipChannelNames.length} channel names: ${clipChannelNames.join(", ")}`);
+              }
+            }
+            // Log CLIPRDR PDUs in client→server direction
+            if (clipChannelId !== null) {
+              logClipdrFrames(data, "c2s", clipChannelId!, clipVcReassembly);
             }
             relayBytesFromClient += data.length;
             console.log(`[RDCleanPath] Relay client→RDP: ${data.length} bytes (total: ${relayBytesFromClient}), tls: readable=${tlsSocket.readable} writable=${tlsSocket.writable} at ${Date.now()}`);
@@ -678,4 +744,234 @@ function decodeMcsConnectInitial(data: Buffer): void {
     pos += len;
   }
   console.log(`[RDCleanPath] MCS decode: ${pos - udStart}/${udLen} bytes parsed`);
+}
+
+// ── CLIPRDR Logging Helpers ──────────────────────────────────────
+
+/**
+ * Parse CS_NET (Client Network Data, type 0xC003) from MCS Connect Initial
+ * to extract requested channel names.
+ */
+function parseCsNetChannelNames(data: Buffer): string[] {
+  const names: string[] = [];
+  for (let i = 0; i < data.length - 8; i++) {
+    if (data[i] === 0x03 && data[i + 1] === 0xC0) {
+      const blockLen = data.readUInt16LE(i + 2);
+      if (blockLen < 8 || i + blockLen > data.length) continue;
+      const block = data.subarray(i + 4, i + blockLen);
+      if (block.length < 4) continue;
+      const count = block.readUInt32LE(0);
+      let off = 4;
+      for (let c = 0; c < count; c++) {
+        if (off + 12 > block.length) break;
+        // Channel name: 8 bytes null-padded ASCII
+        let name = "";
+        for (let j = 0; j < 8; j++) {
+          const b = block[off + j];
+          if (b === 0) break;
+          name += String.fromCharCode(b);
+        }
+        names.push(name);
+        off += 12; // 8 name + 4 options
+      }
+      break;
+    }
+  }
+  return names;
+}
+
+/**
+ * Parse SC_NET (Server Network Data, type 0x0C03) from MCS Connect Response
+ * to extract assigned channel IDs.
+ */
+function parseScNetChannelIds(data: Buffer): number[] {
+  const ids: number[] = [];
+  for (let i = 0; i < data.length - 8; i++) {
+    if (data[i] === 0x03 && data[i + 1] === 0x0C) {
+      const blockLen = data.readUInt16LE(i + 2);
+      if (blockLen < 8 || i + blockLen > data.length) continue;
+      const block = data.subarray(i + 4, i + blockLen);
+      if (block.length < 4) continue;
+      const _mcsChannelId = block.readUInt16LE(0);
+      const count = block.readUInt16LE(2);
+      let off = 4;
+      for (let c = 0; c < count; c++) {
+        if (off + 2 > block.length) break;
+        ids.push(block.readUInt16LE(off));
+        off += 2;
+      }
+      break;
+    }
+  }
+  return ids;
+}
+
+/**
+ * Parse MCS Send Data to extract channel ID and VC payload.
+ * Returns { channelId, vcTotalLen, vcFlags, vcPayload } or null.
+ */
+function parseMcsSendData(frame: Buffer): { channelId: number; vcTotalLen: number; vcFlags: number; vcPayload: Buffer } | null {
+  if (frame.length < 8) return null;
+  const mcsStart = 7; // TPKT(4) + X.224(3)
+  if (mcsStart >= frame.length) return null;
+  const mcsType = frame[mcsStart] >> 2;
+  // Send Data Indication = 26, Send Data Request = 25
+  if (mcsType !== 26 && mcsType !== 25) return null;
+
+  let pos = mcsStart + 1;
+  if (pos + 2 > frame.length) return null;
+  pos += 2; // skip initiator
+  if (pos + 2 > frame.length) return null;
+  const channelId = frame.readUInt16BE(pos);
+  pos += 2;
+  if (pos >= frame.length) return null;
+  pos += 1; // data priority
+  if (pos >= frame.length) return null;
+
+  // BER length
+  let userDataLen: number;
+  if (frame[pos] & 0x80) {
+    const numBytes = frame[pos] & 0x7F;
+    if (numBytes === 0 || numBytes > 3 || pos + 1 + numBytes > frame.length) return null;
+    userDataLen = 0;
+    for (let j = 0; j < numBytes; j++) userDataLen = (userDataLen << 8) | frame[pos + 1 + j];
+    pos += 1 + numBytes;
+  } else {
+    userDataLen = frame[pos];
+    pos += 1;
+  }
+
+  if (pos + 8 > frame.length) return null;
+  const vcTotalLen = frame.readUInt32LE(pos);
+  const vcFlags = frame.readUInt32LE(pos + 4);
+  const vcPayload = frame.subarray(pos + 8, pos + userDataLen);
+  return { channelId, vcTotalLen, vcFlags, vcPayload };
+}
+
+/**
+ * Extract TPKT frames from a buffer and log any CLIPRDR PDUs found.
+ */
+function logClipdrFrames(data: Buffer, direction: string, chId: number, reassembly: Map<number, Buffer>): void {
+  let pos = 0;
+  while (pos + 4 <= data.length) {
+    if (data[pos] !== 0x03 || data[pos + 1] !== 0x00) {
+      pos++;
+      continue;
+    }
+    const frameLen = data.readUInt16BE(pos + 2);
+    if (frameLen < 4 || pos + frameLen > data.length) break;
+    const frame = data.subarray(pos, pos + frameLen);
+
+    const parsed = parseMcsSendData(frame);
+    if (parsed && parsed.channelId === chId) {
+      // Reassemble VC chunks
+      const isFirst = (parsed.vcFlags & VC_FLAG_FIRST) !== 0;
+      const isLast = (parsed.vcFlags & VC_FLAG_LAST) !== 0;
+
+      if (isFirst && isLast) {
+        logClipdrPdu(parsed.vcPayload, direction);
+      } else if (isFirst) {
+        reassembly.set(parsed.channelId, Buffer.from(parsed.vcPayload));
+      } else {
+        const existing = reassembly.get(parsed.channelId);
+        if (existing) {
+          const combined = Buffer.concat([existing, parsed.vcPayload]);
+          if (isLast) {
+            reassembly.delete(parsed.channelId);
+            logClipdrPdu(combined, direction);
+          } else {
+            reassembly.set(parsed.channelId, combined);
+          }
+        }
+      }
+    }
+    pos += frameLen;
+  }
+}
+
+/**
+ * Log a complete CLIPRDR PDU.
+ */
+function logClipdrPdu(pdu: Buffer, direction: string): void {
+  if (pdu.length < 8) return;
+  const msgType = pdu.readUInt16LE(0);
+  const msgFlags = pdu.readUInt16LE(2);
+  const dataLen = pdu.readUInt32LE(4);
+  const name = CLIPRDR_MSG_NAMES[msgType] || `UNKNOWN(0x${msgType.toString(16)})`;
+  const arrow = direction === "s2c" ? "Server→Client" : "Client→Server";
+
+  console.log(`[CLIPRDR] ${arrow}: ${name} flags=0x${msgFlags.toString(16)} dataLen=${dataLen}`);
+
+  if (msgType === CB_FORMAT_LIST) {
+    // Parse format list entries
+    const payload = pdu.subarray(8);
+    let off = 0;
+    const end = Math.min(dataLen, payload.length);
+    while (off + 4 < end) {
+      const fmtId = payload.readUInt32LE(off);
+      off += 4;
+      // UTF-16LE null-terminated name
+      let fmtName = "";
+      while (off + 1 < end) {
+        const c = payload.readUInt16LE(off);
+        off += 2;
+        if (c === 0) break;
+        fmtName += String.fromCharCode(c);
+      }
+      const knownName = fmtId === CF_UNICODETEXT ? " (CF_UNICODETEXT)" : "";
+      console.log(`[CLIPRDR]   format ${fmtId}${knownName}: "${fmtName}"`);
+    }
+  } else if (msgType === CB_FORMAT_DATA_REQ) {
+    if (pdu.length >= 12) {
+      const fmtId = pdu.readUInt32LE(8);
+      console.log(`[CLIPRDR]   requestedFormatId=${fmtId}${fmtId === CF_UNICODETEXT ? " (CF_UNICODETEXT)" : ""}`);
+    }
+  } else if (msgType === CB_FORMAT_DATA_RESP) {
+    const ok = msgFlags === 0x0001;
+    console.log(`[CLIPRDR]   response=${ok ? "OK" : "FAIL"} payloadSize=${dataLen}`);
+    if (ok && dataLen >= 4) {
+      const payload = pdu.subarray(8);
+      // Check if FileGroupDescriptorW (starts with count, each entry 592 bytes)
+      const count = payload.readUInt32LE(0);
+      if (count > 0 && payload.length >= 4 + count * 592) {
+        console.log(`[CLIPRDR]   FileGroupDescriptorW: ${count} file(s)`);
+        for (let i = 0; i < count; i++) {
+          const fdOff = 4 + i * 592;
+          // filename at offset 72, UTF-16LE, 520 bytes
+          const nameBytes = payload.subarray(fdOff + 72, fdOff + 72 + 520);
+          let fname = "";
+          for (let j = 0; j < 520; j += 2) {
+            const c = nameBytes.readUInt16LE(j);
+            if (c === 0) break;
+            fname += String.fromCharCode(c);
+          }
+          const sizeHi = payload.readUInt32LE(fdOff + 64);
+          const sizeLo = payload.readUInt32LE(fdOff + 68);
+          const size = sizeHi * 0x100000000 + sizeLo;
+          console.log(`[CLIPRDR]     [${i}] "${fname}" (${size} bytes)`);
+        }
+      } else if (dataLen >= 2) {
+        // Might be text — show first 100 chars
+        const chars: number[] = [];
+        for (let j = 0; j + 1 < Math.min(dataLen, 200, payload.length); j += 2) {
+          const c = payload.readUInt16LE(j);
+          if (c === 0) break;
+          chars.push(c);
+        }
+        if (chars.length > 0) {
+          const text = String.fromCharCode(...chars);
+          console.log(`[CLIPRDR]   text(${chars.length} chars): "${text.substring(0, 100)}${text.length > 100 ? "..." : ""}"`);
+        }
+      }
+    }
+  } else if (msgType === CB_FILECONTENTS_REQ && pdu.length >= 32) {
+    const streamId = pdu.readUInt32LE(8);
+    const listIndex = pdu.readUInt32LE(12);
+    const flags = pdu.readUInt32LE(16);
+    const flagStr = flags === 1 ? "SIZE" : flags === 2 ? "RANGE" : `0x${flags.toString(16)}`;
+    console.log(`[CLIPRDR]   streamId=${streamId} listIndex=${listIndex} flags=${flagStr}`);
+  } else if (msgType === CB_FILECONTENTS_RESP && pdu.length >= 12) {
+    const streamId = pdu.readUInt32LE(8);
+    console.log(`[CLIPRDR]   streamId=${streamId} dataSize=${dataLen - 4}`);
+  }
 }

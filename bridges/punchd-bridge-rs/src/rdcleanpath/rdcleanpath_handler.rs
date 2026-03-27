@@ -287,15 +287,12 @@ async fn run_session(
     let clip_c2s = clip_session.clone();
     let c2s = tokio::spawn(async move {
         let mut first_msg = true;
-        let mut mcs_proto = mcs_patch_protocol;
         loop {
             tokio::select! {
                 msg = rx.recv() => {
                     let Some(mut data) = msg else { break };
-                    // For eddsa: patch serverSelectedProtocol in first MCS Connect Initial
-                    if first_msg && mcs_proto > 0 {
+                    if first_msg {
                         first_msg = false;
-                        mcs_proto = 0;
                         // Parse channel names from MCS Connect Initial for CLIPRDR discovery
                         let names = cliprdr::parse_cs_net_channel_names(&data);
                         if !names.is_empty() {
@@ -303,9 +300,10 @@ async fn run_session(
                             cs.channel_names = names;
                             tracing::info!("CLIPRDR: discovered {} channel names", cs.channel_names.len());
                         }
-                        patch_mcs_selected_protocol(&mut data, mcs_patch_protocol);
-                    } else {
-                        first_msg = false;
+                        // For eddsa: patch serverSelectedProtocol in first MCS Connect Initial
+                        if mcs_patch_protocol > 0 {
+                            patch_mcs_selected_protocol(&mut data, mcs_patch_protocol);
+                        }
                     }
                     if let Err(e) = tls_write.write_all(&data).await {
                         tracing::error!("Relay c2s write error: {e}");
@@ -442,18 +440,52 @@ fn handle_cliprdr_s2c(
     inject_tx: &mpsc::UnboundedSender<Vec<u8>>,
     file_store: &Option<Arc<dashmap::DashMap<String, (String, Vec<u8>)>>>,
 ) {
-    let Some(header) = cliprdr::parse_cliprdr_header(pdu) else { return };
+    let Some(header) = cliprdr::parse_cliprdr_header(pdu) else {
+        tracing::warn!("CLIPRDR: Failed to parse PDU header ({} bytes)", pdu.len());
+        return;
+    };
+
+    let type_name = match header.msg_type {
+        cliprdr::CB_MONITOR_READY => "CB_MONITOR_READY",
+        cliprdr::CB_FORMAT_LIST => "CB_FORMAT_LIST",
+        cliprdr::CB_FORMAT_LIST_RESPONSE => "CB_FORMAT_LIST_RESPONSE",
+        cliprdr::CB_FORMAT_DATA_REQUEST => "CB_FORMAT_DATA_REQUEST",
+        cliprdr::CB_FORMAT_DATA_RESPONSE => "CB_FORMAT_DATA_RESPONSE",
+        cliprdr::CB_FILECONTENTS_REQUEST => "CB_FILECONTENTS_REQUEST",
+        cliprdr::CB_FILECONTENTS_RESPONSE => "CB_FILECONTENTS_RESPONSE",
+        _ => "UNKNOWN",
+    };
+    tracing::info!("CLIPRDR: S2C PDU: {} (0x{:04X}) flags=0x{:04X} dataLen={}", type_name, header.msg_type, header.msg_flags, header.data_len);
 
     match header.msg_type {
+        cliprdr::CB_MONITOR_READY => {
+            tracing::info!("CLIPRDR: Server sent Monitor Ready");
+            // Send our own CB_FORMAT_LIST to advertise clipboard support
+            if let Some(ch_id) = cs.channel_id {
+                let format_list = cliprdr::build_format_list_with_text();
+                let frame = cliprdr::wrap_cliprdr_pdu(&format_list, ch_id, cs.initiator);
+                let _ = inject_tx.send(frame);
+                tracing::info!("CLIPRDR: Sent FORMAT_LIST (CF_UNICODETEXT) to server");
+            }
+        }
+
         cliprdr::CB_FORMAT_LIST => {
             let formats = cliprdr::parse_format_list(pdu);
             tracing::info!("CLIPRDR: Format List ({} formats)", formats.len());
             for f in &formats {
-                tracing::debug!("  format {}: '{}'", f.id, f.name);
+                tracing::info!("CLIPRDR:   format {}: '{}'", f.id, f.name);
                 if f.name == "FileGroupDescriptorW" {
                     cs.file_descriptor_format_id = Some(f.id);
                     tracing::info!("CLIPRDR: FileGroupDescriptorW format ID = {}", f.id);
                 }
+            }
+
+            // Send FORMAT_LIST_RESPONSE to acknowledge (required by CLIPRDR protocol)
+            if let Some(ch_id) = cs.channel_id {
+                let resp = cliprdr::build_format_list_response();
+                let frame = cliprdr::wrap_cliprdr_pdu(&resp, ch_id, cs.initiator);
+                let _ = inject_tx.send(frame);
+                tracing::info!("CLIPRDR: Sent FORMAT_LIST_RESPONSE");
             }
 
             // If files are offered, request the file descriptor
@@ -477,6 +509,7 @@ fn handle_cliprdr_s2c(
 
         cliprdr::CB_FORMAT_DATA_RESPONSE => {
             if header.msg_flags != cliprdr::CB_RESPONSE_OK {
+                tracing::warn!("CLIPRDR: FORMAT_DATA_RESPONSE failed (flags=0x{:04X})", header.msg_flags);
                 return;
             }
             let payload = &pdu[8..];
@@ -593,7 +626,7 @@ fn handle_cliprdr_s2c(
                                 );
                                 let frame = cliprdr::wrap_cliprdr_pdu(&req, ch_id, cs.initiator);
                                 let _ = inject_tx.send(frame);
-                                tracing::debug!(
+                                tracing::info!(
                                     "CLIPRDR: Requesting chunk at offset {} ({} bytes, {:.0}%)",
                                     new_offset, chunk_size,
                                     (new_offset as f64 / expected as f64) * 100.0

@@ -610,6 +610,19 @@ pub fn parse_file_contents_response(cliprdr_data: &[u8]) -> Option<(u32, Vec<u8>
 
 // ── Upload direction (browser → RDP) PDU builders ────────────────
 
+/// Build a CB_FORMAT_LIST announcing CF_UNICODETEXT (so the server knows we accept text).
+pub fn build_format_list_with_text() -> Vec<u8> {
+    // Short format: formatId(u32LE) + empty name (just null terminator in UTF-16LE)
+    let entry_len = 4 + 2; // formatId + null terminator (UTF-16LE)
+    let mut pdu = Vec::with_capacity(8 + entry_len);
+    pdu.extend_from_slice(&CB_FORMAT_LIST.to_le_bytes()); // msgType
+    pdu.extend_from_slice(&0u16.to_le_bytes()); // msgFlags
+    pdu.extend_from_slice(&(entry_len as u32).to_le_bytes()); // dataLen
+    pdu.extend_from_slice(&CF_UNICODETEXT.to_le_bytes()); // formatId
+    pdu.extend_from_slice(&0u16.to_le_bytes()); // null terminator
+    pdu
+}
+
 /// Build a CB_FORMAT_LIST announcing FileGroupDescriptorW (Long Format).
 pub fn build_format_list_with_files(format_id: u32) -> Vec<u8> {
     let name = "FileGroupDescriptorW";
