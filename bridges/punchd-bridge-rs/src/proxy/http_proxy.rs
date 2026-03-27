@@ -788,7 +788,8 @@ pub fn build_router(state: Arc<ProxyState>) -> Router {
         .route("/ws/rdcleanpath", get(handle_rdcleanpath_ws))
         .route("/ws/clipboard", get(handle_clipboard_ws))
         .route("/api/clipboard-files/{id}", get(handle_clipboard_file_download))
-        .route("/api/clipboard-upload", axum::routing::post(handle_clipboard_upload))
+        .route("/api/clipboard-upload", axum::routing::post(handle_clipboard_upload)
+            .layer(axum::extract::DefaultBodyLimit::max(100 * 1024 * 1024))) // 100MB
         .fallback(any(handle_request))
         .with_state(state)
 }
@@ -922,11 +923,13 @@ async fn handle_clipboard_socket(socket: WebSocket, state: Arc<ProxyState>) {
             result = rx.recv() => {
                 match result {
                     Ok(event) => {
-                        let json = match event {
+                        let json = match &event {
                             ClipboardEvent::Text(text) => {
+                                tracing::info!("[Clipboard-WS] Sending text event ({} chars)", text.len());
                                 serde_json::json!({"type": "text", "content": text}).to_string()
                             }
                             ClipboardEvent::Files(files) => {
+                                tracing::info!("[Clipboard-WS] Sending files event ({} files)", files.len());
                                 serde_json::json!({
                                     "type": "files",
                                     "files": files.iter().map(|f| serde_json::json!({
@@ -990,25 +993,42 @@ async fn handle_clipboard_upload(
 ) -> Response {
     use crate::rdcleanpath::cliprdr::UploadedFile;
 
+    tracing::info!("[Clipboard-Upload] Upload request received");
+
     let mut files = Vec::new();
 
-    while let Ok(Some(field)) = multipart.next_field().await {
-        let name = field.file_name().unwrap_or("file").to_string();
-        match field.bytes().await {
-            Ok(data) => {
-                tracing::info!("[Clipboard-Upload] File: {} ({} bytes)", name, data.len());
-                files.push(UploadedFile {
-                    name,
-                    data: data.to_vec(),
-                });
+    loop {
+        match multipart.next_field().await {
+            Ok(Some(field)) => {
+                let field_name = field.name().unwrap_or("?").to_string();
+                let name = field.file_name().unwrap_or("file").to_string();
+                tracing::info!("[Clipboard-Upload] Field: name={}, filename={}", field_name, name);
+                match field.bytes().await {
+                    Ok(data) => {
+                        tracing::info!("[Clipboard-Upload] File: {} ({} bytes)", name, data.len());
+                        files.push(UploadedFile {
+                            name,
+                            data: data.to_vec(),
+                        });
+                    }
+                    Err(e) => {
+                        tracing::error!("[Clipboard-Upload] Read error: {e}");
+                    }
+                }
+            }
+            Ok(None) => {
+                tracing::info!("[Clipboard-Upload] No more fields, total files: {}", files.len());
+                break;
             }
             Err(e) => {
-                tracing::error!("[Clipboard-Upload] Read error: {e}");
+                tracing::error!("[Clipboard-Upload] Multipart error: {e}");
+                break;
             }
         }
     }
 
     if files.is_empty() {
+        tracing::warn!("[Clipboard-Upload] No files parsed from upload");
         let mut headers = HeaderMap::new();
         headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
         return make_response(StatusCode::BAD_REQUEST, headers, r#"{"error":"No files uploaded"}"#);
@@ -1018,10 +1038,14 @@ async fn handle_clipboard_upload(
     let tx = state.upload_tx.lock().unwrap().clone();
     if let Some(tx) = tx {
         if tx.send(files).is_ok() {
+            tracing::info!("[Clipboard-Upload] Sent {} file(s) to RDP session", count);
             let mut headers = HeaderMap::new();
             headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
             return make_response(StatusCode::OK, headers, &format!(r#"{{"ok":true,"files":{count}}}"#));
         }
+        tracing::error!("[Clipboard-Upload] upload_tx.send() failed — RDP session channel closed");
+    } else {
+        tracing::warn!("[Clipboard-Upload] No upload_tx — no active RDP session");
     }
 
     let mut headers = HeaderMap::new();
