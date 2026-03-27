@@ -738,8 +738,13 @@
       setupInputHandlers();
 
       // Set up clipboard WebSocket for RDP→browser copy
+      console.log("[RDP] Opening clipboard WebSocket...");
       var clipboardWs = new WebSocket("wss://" + location.host + "/ws/clipboard");
+      clipboardWs.onopen = function () {
+        console.log("[RDP] Clipboard WebSocket connected");
+      };
       clipboardWs.onmessage = function (event) {
+        console.log("[RDP] Clipboard WS message:", typeof event.data, typeof event.data === "string" ? event.data.substring(0, 200) : event.data);
         if (typeof event.data !== "string" || !event.data.length) return;
         try {
           var msg = JSON.parse(event.data);
@@ -759,11 +764,15 @@
           }
         } catch (e) {
           // Legacy plain text fallback
+          console.log("[RDP] Clipboard WS: legacy text fallback");
           navigator.clipboard.writeText(event.data).catch(function () {});
         }
       };
-      clipboardWs.onerror = function () {
-        console.warn("[RDP] Clipboard WebSocket error");
+      clipboardWs.onerror = function (e) {
+        console.warn("[RDP] Clipboard WebSocket error:", e);
+      };
+      clipboardWs.onclose = function (e) {
+        console.warn("[RDP] Clipboard WebSocket closed:", e.code, e.reason);
       };
 
       // Set up file upload (browser → RDP paste)
@@ -865,34 +874,53 @@
     });
 
     document.addEventListener("keydown", function (e) {
-      if (!rdpSession || !connectForm.classList.contains("hidden")) return;
+      if (!rdpSession || !connectForm.classList.contains("hidden")) {
+        if (e.ctrlKey || e.metaKey) console.log("[RDP] keydown ignored (no session or form visible):", e.code);
+        return;
+      }
 
       // Ctrl+V / Cmd+V — paste from browser clipboard as keystrokes
       if ((e.ctrlKey || e.metaKey) && e.code === "KeyV") {
         e.preventDefault();
+        console.log("[RDP] Ctrl+V: reading clipboard...");
         navigator.clipboard.readText().then(function (text) {
-          if (!text || !rdpSession) return;
+          if (!text || !rdpSession) {
+            console.log("[RDP] Ctrl+V: no text or no session");
+            return;
+          }
+          console.log("[RDP] Ctrl+V: typing", text.length, "chars");
           typeTextIntoRdp(text);
-        }).catch(function () { /* clipboard permission denied */ });
+        }).catch(function (err) {
+          console.warn("[RDP] Ctrl+V: clipboard read failed:", err);
+        });
         return;
       }
 
       e.preventDefault();
+      var scancode = browserKeyToScancode(e.code);
+      if (e.ctrlKey || e.metaKey) {
+        console.log("[RDP] keydown:", e.code, "scancode:", "0x" + scancode.toString(16), "ctrl:", e.ctrlKey, "meta:", e.metaKey);
+      }
       try {
         var tx = new InputTransaction();
-        tx.addEvent(DeviceEvent.keyPressed(browserKeyToScancode(e.code)));
+        tx.addEvent(DeviceEvent.keyPressed(scancode));
         rdpSession.applyInputs(tx);
-      } catch (err) { /* ignore */ }
+      } catch (err) {
+        console.error("[RDP] keyPressed error:", err, "code:", e.code, "scancode:", scancode);
+      }
     });
 
     document.addEventListener("keyup", function (e) {
       if (!rdpSession || !connectForm.classList.contains("hidden")) return;
       e.preventDefault();
+      var scancode = browserKeyToScancode(e.code);
       try {
         var tx = new InputTransaction();
-        tx.addEvent(DeviceEvent.keyReleased(browserKeyToScancode(e.code)));
+        tx.addEvent(DeviceEvent.keyReleased(scancode));
         rdpSession.applyInputs(tx);
-      } catch (err) { /* ignore */ }
+      } catch (err) {
+        console.error("[RDP] keyReleased error:", err, "code:", e.code, "scancode:", scancode);
+      }
     });
   }
 
@@ -1035,12 +1063,18 @@
   function uploadFiles(fileList) {
     var formData = new FormData();
     for (var i = 0; i < fileList.length; i++) {
+      console.log("[RDP] Upload file[" + i + "]:", fileList[i].name, fileList[i].size, "bytes");
       formData.append("file" + i, fileList[i]);
     }
+    console.log("[RDP] Uploading " + fileList.length + " file(s) to /api/clipboard-upload");
 
     fetch("/api/clipboard-upload", { method: "POST", body: formData })
-      .then(function (resp) { return resp.json(); })
+      .then(function (resp) {
+        console.log("[RDP] Upload response status:", resp.status);
+        return resp.json();
+      })
       .then(function (data) {
+        console.log("[RDP] Upload response:", JSON.stringify(data));
         if (data.ok) {
           console.log("[RDP] Uploaded " + data.files + " file(s) for paste");
           showUploadNotification(fileList.length);
