@@ -347,18 +347,17 @@ fn update_mcs_lengths(data: &mut Vec<u8>, added: usize) {
     }
     if per_len_pos == 0 || per_len_pos >= data.len() { return; }
 
-    // 2. Update right-to-left so positions don't shift
+    // 2. Update right-to-left: each position is before the previous,
+    //    so expansions at later positions don't affect earlier ones.
 
-    // PER length (rightmost)
-    let per_shift = write_per_length(data, per_len_pos, added);
-    let shift1 = per_shift.max(0) as usize;
+    // PER length (highest position in stream)
+    write_per_length(data, per_len_pos, added);
 
-    // userData BER length (middle) — shifted by PER expansion
-    let ud_shift = write_ber_length(data, ud_len_pos + shift1, ud_len_val + added);
-    let shift2 = shift1 + ud_shift.max(0) as usize;
+    // userData BER length (before PER, unaffected by PER expansion)
+    write_ber_length(data, ud_len_pos, ud_len_val + added);
 
-    // MCS Connect-Initial BER length (leftmost) — shifted by both
-    write_ber_length(data, mcs_len_pos + shift2, mcs_len_val + added);
+    // MCS Connect-Initial BER length (before userData, unaffected)
+    write_ber_length(data, mcs_len_pos, mcs_len_val + added);
 }
 
 fn ber_length_size(data: &[u8]) -> usize {
