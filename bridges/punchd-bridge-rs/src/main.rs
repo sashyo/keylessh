@@ -40,7 +40,11 @@ async fn main() {
 
     // Load config
     let config = config::load_config();
-    let tc_config = config::load_tidecloak_config();
+    let mut tc_config = config::load_tidecloak_config();
+    if let Ok(client_id) = std::env::var("TC_CLIENT_ID") {
+        tracing::info!("TC_CLIENT_ID override: {}", client_id);
+        tc_config.resource = client_id;
+    }
 
     // Auth
     let extra_issuers = config

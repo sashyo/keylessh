@@ -1680,7 +1680,7 @@ fn handle_auth_login(
     let endpoints = state.get_browser_endpoints();
     let (mut auth_url, state_param) = build_auth_url(&endpoints, &state.client_id, &callback_url, &original_url);
     if force_login {
-        auth_url.push_str("&prompt=login");
+        auth_url.push_str("&prompt=login&max_age=0");
     }
     let (nonce, _redirect) = parse_state(&state_param);
 
