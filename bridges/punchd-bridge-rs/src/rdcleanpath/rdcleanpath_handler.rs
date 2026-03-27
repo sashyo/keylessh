@@ -295,6 +295,12 @@ async fn run_session(
                     // Scan early messages for CS_NET (MCS Connect Initial)
                     // The first messages may be CredSSP/NLA, not MCS.
                     if !cs_net_found {
+                        // Log every message until we find CS_NET
+                        let is_tpkt = data.len() > 4 && data[0] == 0x03 && data[1] == 0x00;
+                        if is_tpkt {
+                            tracing::info!("CLIPRDR: c2s TPKT message ({} bytes)", data.len());
+                        }
+
                         let names = cliprdr::parse_cs_net_channel_names(&data);
                         if !names.is_empty() {
                             let has_cliprdr = names.iter().any(|n| n.eq_ignore_ascii_case("cliprdr"));
@@ -311,9 +317,21 @@ async fn run_session(
                             let mut cs = clip_c2s.lock().await;
                             cs.channel_names = final_names;
                             cs_net_found = true;
+                        } else if is_tpkt && data.len() > 100 {
+                            // This is likely the MCS Connect Initial but has no CS_NET block.
+                            // Try to inject a whole CS_NET block with cliprdr.
+                            if cliprdr::inject_cs_net_with_cliprdr(&mut data) {
+                                tracing::info!("CLIPRDR: Injected entire CS_NET block with cliprdr channel");
+                                let final_names = cliprdr::parse_cs_net_channel_names(&data);
+                                tracing::info!("CLIPRDR: After injection: {:?}", final_names);
+                                let mut cs = clip_c2s.lock().await;
+                                cs.channel_names = final_names;
+                                cs_net_found = true;
+                            }
                         }
+
                         // For eddsa: patch serverSelectedProtocol in MCS Connect Initial
-                        if !mcs_patched && mcs_patch_protocol > 0 && data.len() > 100 && data[0] == 0x03 {
+                        if !mcs_patched && mcs_patch_protocol > 0 && is_tpkt && data.len() > 100 {
                             patch_mcs_selected_protocol(&mut data, mcs_patch_protocol);
                             mcs_patched = true;
                         }

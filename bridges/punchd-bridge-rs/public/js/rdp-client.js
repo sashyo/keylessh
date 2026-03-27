@@ -978,31 +978,28 @@
     if (!rdpSession || !wasmModule) return;
     var DE = wasmModule.DeviceEvent;
     var IT = wasmModule.InputTransaction;
-    for (var i = 0; i < text.length; i++) {
-      var code = text.charCodeAt(i);
-      if (code === 10 || code === 13) {
-        pressAndRelease(0x1C);
-        if (code === 13 && i + 1 < text.length && text.charCodeAt(i + 1) === 10) i++;
-        continue;
+    try {
+      var tx = new IT();
+      for (var i = 0; i < text.length; i++) {
+        var code = text.charCodeAt(i);
+        if (code === 10 || code === 13) {
+          tx.addEvent(DE.keyPressed(0x1C));
+          tx.addEvent(DE.keyReleased(0x1C));
+          if (code === 13 && i + 1 < text.length && text.charCodeAt(i + 1) === 10) i++;
+          continue;
+        }
+        if (code === 9) {
+          tx.addEvent(DE.keyPressed(0x0F));
+          tx.addEvent(DE.keyReleased(0x0F));
+          continue;
+        }
+        tx.addEvent(DE.unicodePressed(text[i]));
       }
-      if (code === 9) {
-        pressAndRelease(0x0F);
-        continue;
-      }
-      try {
-        var ch = text[i];
-        var tx = new IT();
-        tx.addEvent(DE.unicodePressed(ch));
-        rdpSession.applyInputs(tx);
-        tx = new IT();
-        tx.addEvent(DE.unicodeReleased(ch));
-        rdpSession.applyInputs(tx);
-      } catch (err) {
-        if (i === 0) console.error("[RDP] unicodePressed failed:", err, "methods:", Object.getOwnPropertyNames(DE));
-        break;
-      }
+      rdpSession.applyInputs(tx);
+      console.log("[RDP] typeTextIntoRdp: sent", text.length, "chars in single transaction");
+    } catch (err) {
+      console.error("[RDP] typeTextIntoRdp error:", err);
     }
-    console.log("[RDP] typeTextIntoRdp: sent", text.length, "chars");
   }
 
   function pressAndRelease(scancode) {

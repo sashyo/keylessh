@@ -429,6 +429,75 @@ fn update_per_length_at(data: &mut Vec<u8>, pos: usize, added: usize) {
     }
 }
 
+/// Inject an entire CS_NET block (with a single cliprdr channel) into an
+/// MCS Connect Initial that has no CS_NET. Inserts after the last GCC user data block.
+pub fn inject_cs_net_with_cliprdr(data: &mut Vec<u8>) -> bool {
+    // Find "Duca" H.221 key to locate the GCC user data area
+    let duca_pos = match find_duca_position(data) {
+        Some(p) => p,
+        None => return false,
+    };
+
+    // Find the PER length after "Duca"
+    let per_pos = duca_pos + 4;
+    if per_pos >= data.len() { return false; }
+
+    let (ud_len, per_size) = read_per_length(&data[per_pos..]);
+    let ud_start = per_pos + per_size;
+    let ud_end = ud_start + ud_len;
+
+    if ud_end > data.len() { return false; }
+
+    // Build CS_NET block: type(2) + len(2) + channelCount(4) + 1 channel entry(12) = 20 bytes
+    let cs_net_len: u16 = 20;
+    let mut cs_net = Vec::with_capacity(20);
+    cs_net.extend_from_slice(&0xC003u16.to_le_bytes()); // CS_NET type
+    cs_net.extend_from_slice(&cs_net_len.to_le_bytes()); // block length
+    cs_net.extend_from_slice(&1u32.to_le_bytes()); // channelCount = 1
+    // Channel entry: "cliprdr\0" + options
+    cs_net.extend_from_slice(b"cliprdr\0");
+    let options: u32 = 0x80000000 | 0x40000000; // INITIALIZED | ENCRYPT_RDP
+    cs_net.extend_from_slice(&options.to_le_bytes());
+
+    let added = cs_net.len(); // 20 bytes
+
+    // Insert CS_NET at the end of user data blocks
+    data.splice(ud_end..ud_end, cs_net);
+
+    // Update TPKT length
+    if data.len() >= 4 && data[0] == 0x03 && data[1] == 0x00 {
+        let old_tpkt = u16::from_be_bytes([data[2], data[3]]);
+        let new_tpkt = old_tpkt + added as u16;
+        data[2..4].copy_from_slice(&new_tpkt.to_be_bytes());
+    }
+
+    // Update all MCS/GCC length fields
+    update_mcs_lengths(data, added);
+
+    true
+}
+
+fn find_duca_position(data: &[u8]) -> Option<usize> {
+    for i in 7..data.len().saturating_sub(6) {
+        if data[i] == 0x44 && data[i + 1] == 0x75 && data[i + 2] == 0x63 && data[i + 3] == 0x61 {
+            return Some(i);
+        }
+    }
+    None
+}
+
+fn read_per_length(data: &[u8]) -> (usize, usize) {
+    if data.is_empty() { return (0, 1); }
+    if data[0] & 0x80 == 0 {
+        (data[0] as usize, 1)
+    } else if data.len() >= 2 {
+        let len = (((data[0] & 0x3F) as usize) << 8) | data[1] as usize;
+        (len, 2)
+    } else {
+        (0, 1)
+    }
+}
+
 /// Parse SC_NET (Server Network Data, type 0x0C03) from MCS Connect Response
 /// to extract assigned channel IDs.
 pub fn parse_sc_net_channel_ids(mcs_data: &[u8]) -> Vec<u16> {
