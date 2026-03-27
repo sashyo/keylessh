@@ -25,21 +25,47 @@ KeyleSSH has several deployable components. This guide walks through deploying e
 
 ## 1. TideCloak
 
-TideCloak provides OIDC authentication. After setup, export the adapter config — every other component needs it.
+TideCloak provides OIDC authentication. After setup, you'll create clients and export adapter configs.
+
+### Create clients
+
+You need **two clients** in your TideCloak realm:
+
+1. **Application client** (e.g. `keylessh`) — used by the main server, gateways, and SSH bridge for JWT verification and OIDC login. This is the client whose roles (`dest:`, `ssh:`) control user access.
+
+2. **Signal server client** (e.g. `keylessh-signal`) — used by the signal server for JWT verification of gateway registrations. This client needs either:
+   - **Full scope mapping** enabled (so it can see all roles from the application client), or
+   - The application client (`keylessh`) updated to include signal server role management (so `dest:` and `ssh:` roles appear in tokens issued for the signal server client too).
+
+   If using the `keylessh` app client for all role management (recommended), set `TC_CLIENT_ID=keylessh` on the signal server so it looks up roles under `resource_access.keylessh` regardless of what `"resource"` is in the signal server's own `tidecloak.json`.
 
 ### Export tidecloak.json
 
-1. Open **TideCloak Admin Console**
-2. Go to **Clients > your client > Action dropdown > Download adapter config**
-3. Save as `tidecloak.json`
+For each client:
 
-Keep this file — you'll need it for every component below.
+1. Open **TideCloak Admin Console**
+2. Go to **Clients > the client > Action dropdown > Download adapter config**
+3. Save as `tidecloak.json` (one per component that needs it)
+
+The application client's `tidecloak.json` is used by gateways, SSH bridge, TideSSP, and the main server. The signal server client's `tidecloak.json` is used by the signal server.
+
+### TC_CLIENT_ID override
+
+If your `tidecloak.json` has a different `resource` value than the client ID used for roles in the token (e.g. the config says `"resource":"myclient"` but roles are under `resource_access.keylessh`), set `TC_CLIENT_ID` to override it:
+
+```bash
+TC_CLIENT_ID=keylessh  # overrides tidecloak.json's "resource" field
+```
+
+This is supported by both the Punch'd Bridge and SSH Bridge.
 
 ---
 
 ## 2. Signal Server
 
 The signal server is the public entry point. It coordinates WebRTC connections between browsers and gateways, and relays HTTP traffic as a fallback.
+
+**The signal server needs its own TideCloak client** (e.g. `keylessh-signal`) — see step 1. Use this client's `tidecloak.json` when deploying the signal server.
 
 ### Deploy with Docker
 
@@ -82,6 +108,7 @@ TURN_SECRET: <generated>
 | `ICE_SERVERS` | — | STUN servers, e.g. `stun:YOUR_IP:3478` |
 | `TURN_SERVER` | — | TURN server, e.g. `turn:YOUR_IP:3478` |
 | `ALLOWED_ORIGINS` | same-origin | Comma-separated CORS origins |
+| `TC_CLIENT_ID` | from `tidecloak.json` | Set to `keylessh` if using the app client for all role management |
 
 ### Firewall rules
 
@@ -161,6 +188,7 @@ BACKENDS="MyApp=http://localhost:3000" \
 | `GATEWAY_DISPLAY_NAME` | — | auto | Name shown in portal |
 | `GATEWAY_DESCRIPTION` | — | — | Description shown in portal |
 | `HTTPS` | — | true | Generate self-signed TLS |
+| `TC_CLIENT_ID` | — | from `tidecloak.json` | Override client ID for role lookups in `resource_access` |
 
 ### Backend format
 
@@ -309,6 +337,7 @@ BRIDGE_URL=wss://<bridge-fqdn>
 | `PORT` | 8081 | Listen port |
 | `TIDECLOAK_CONFIG_B64` | — | Base64-encoded `tidecloak.json` |
 | `client_adapter` | — | `tidecloak.json` as a JSON string (highest priority) |
+| `TC_CLIENT_ID` | — | Override client ID for role lookups in `resource_access` |
 
 Falls back to `data/tidecloak.json` if no env var is set.
 
@@ -400,10 +429,9 @@ This removes the DLLs, cleans up registry entries, and clears `UF_MNS_LOGON_ACCO
 If the TideCloak realm signing key is rotated:
 
 1. Export a new `tidecloak.json` from TideCloak admin console
-2. Update the registry:
+2. Replace the file in System32:
    ```powershell
-   $json = Get-Content tidecloak.json -Raw
-   Set-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\TideSSP" -Name "Config" -Value $json
+   Copy-Item tidecloak.json $env:SystemRoot\System32\tidecloak.json -Force
    ```
 3. Reboot (the SSP reads the key once at LSA startup)
 
