@@ -117,6 +117,14 @@ async fn run_session(
 
         // Check dest: roles and extract RDP username if present
         // Role format: dest:<gw>:<endpoint>:<username>
+        if let Some(ref ra) = payload.realm_access {
+            tracing::info!("Realm roles: {:?}", ra.roles);
+        }
+        if let Some(ref ra) = payload.resource_access {
+            tracing::info!("Resource access: {}", ra);
+        }
+        tracing::info!("tc_client_id: {:?}, destination: {}", opts.tc_client_id, req.destination);
+
         _rdp_username = match check_dest_roles(&payload, &req.destination, opts.tc_client_id.as_deref()) {
             Some(u) => u,
             None => {
