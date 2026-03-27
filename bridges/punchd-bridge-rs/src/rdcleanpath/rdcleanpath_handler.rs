@@ -293,12 +293,17 @@ async fn run_session(
                     let Some(mut data) = msg else { break };
                     if first_msg {
                         first_msg = false;
+                        tracing::info!("CLIPRDR: First c2s message ({} bytes), parsing CS_NET", data.len());
                         // Parse channel names from MCS Connect Initial for CLIPRDR discovery
                         let names = cliprdr::parse_cs_net_channel_names(&data);
                         if !names.is_empty() {
+                            let has_cliprdr = names.iter().any(|n| n.eq_ignore_ascii_case("cliprdr"));
+                            tracing::info!("CLIPRDR: CS_NET channels: {:?} (cliprdr={})", names, has_cliprdr);
                             let mut cs = clip_c2s.lock().await;
                             cs.channel_names = names;
-                            tracing::info!("CLIPRDR: discovered {} channel names", cs.channel_names.len());
+                        } else {
+                            tracing::warn!("CLIPRDR: No channel names found in CS_NET (first {} bytes: {:02x?})",
+                                data.len().min(64), &data[..data.len().min(64)]);
                         }
                         // For eddsa: patch serverSelectedProtocol in first MCS Connect Initial
                         if mcs_patch_protocol > 0 {
@@ -372,10 +377,13 @@ async fn run_session(
                         let ids = cliprdr::parse_sc_net_channel_ids(chunk);
                         if !ids.is_empty() {
                             let mut cs = clip_s2c.lock().await;
+                            tracing::info!("CLIPRDR: SC_NET channel IDs: {:?}, names: {:?}", ids, cs.channel_names);
                             if let Some(ch_id) = cliprdr::find_cliprdr_channel_id(&cs.channel_names, &ids) {
                                 cs.channel_id = Some(ch_id);
                                 tracing::info!("CLIPRDR: channel ID = {ch_id}");
                                 setup_phase = false;
+                            } else {
+                                tracing::warn!("CLIPRDR: No cliprdr channel found in SC_NET");
                             }
                         }
                     }

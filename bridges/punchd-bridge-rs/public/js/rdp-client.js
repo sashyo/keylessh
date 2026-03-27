@@ -929,47 +929,87 @@
   // ── Clipboard Paste Helper ───────────────────────────────────
   // Types text into the RDP session using Unicode scancode events.
 
+  // Map printable ASCII chars to {scancode, shift} for scancode-based typing
+  var CHAR_TO_SCANCODE = {};
+  (function () {
+    var lower = "abcdefghijklmnopqrstuvwxyz";
+    var scancodes = [0x1E,0x30,0x2E,0x20,0x12,0x21,0x22,0x23,0x17,0x24,0x25,0x26,0x32,0x31,0x18,0x19,0x10,0x13,0x1F,0x14,0x16,0x2F,0x11,0x2D,0x15,0x2C];
+    for (var i = 0; i < 26; i++) {
+      CHAR_TO_SCANCODE[lower[i]] = { sc: scancodes[i], shift: false };
+      CHAR_TO_SCANCODE[lower[i].toUpperCase()] = { sc: scancodes[i], shift: true };
+    }
+    var digits = "0123456789";
+    var digitSc = [0x0B,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0A];
+    var shiftDigits = ")!@#$%^&*(";
+    for (var i = 0; i < 10; i++) {
+      CHAR_TO_SCANCODE[digits[i]] = { sc: digitSc[i], shift: false };
+      CHAR_TO_SCANCODE[shiftDigits[i]] = { sc: digitSc[i], shift: true };
+    }
+    var sym =  ["-","=","[","]","\\",";","'","`",",",".","/"];
+    var symSc = [0x0C,0x0D,0x1A,0x1B,0x2B,0x27,0x28,0x29,0x33,0x34,0x35];
+    var symS =  ["_","+","{","}","|",":","\"","~","<",">","?"];
+    for (var i = 0; i < sym.length; i++) {
+      CHAR_TO_SCANCODE[sym[i]] = { sc: symSc[i], shift: false };
+      CHAR_TO_SCANCODE[symS[i]] = { sc: symSc[i], shift: true };
+    }
+    CHAR_TO_SCANCODE[" "] = { sc: 0x39, shift: false };
+  })();
+
   function typeTextIntoRdp(text) {
     if (!rdpSession) return;
+    var typed = 0, skipped = 0;
     for (var i = 0; i < text.length; i++) {
+      var ch = text[i];
       var code = text.charCodeAt(i);
+
       if (code === 10 || code === 13) {
-        // Enter key
-        try {
-          var tx = new InputTransaction();
-          tx.addEvent(DeviceEvent.keyPressed(0x1C));
-          rdpSession.applyInputs(tx);
-          tx = new InputTransaction();
-          tx.addEvent(DeviceEvent.keyReleased(0x1C));
-          rdpSession.applyInputs(tx);
-        } catch (err) { /* ignore */ }
-        // Skip \n after \r in \r\n
+        pressAndRelease(0x1C); // Enter
         if (code === 13 && i + 1 < text.length && text.charCodeAt(i + 1) === 10) i++;
+        typed++;
         continue;
       }
       if (code === 9) {
-        // Tab key
-        try {
-          var tx = new InputTransaction();
-          tx.addEvent(DeviceEvent.keyPressed(0x0F));
-          rdpSession.applyInputs(tx);
-          tx = new InputTransaction();
-          tx.addEvent(DeviceEvent.keyReleased(0x0F));
-          rdpSession.applyInputs(tx);
-        } catch (err) { /* ignore */ }
+        pressAndRelease(0x0F); // Tab
+        typed++;
         continue;
       }
-      // Use Unicode scancode for all other characters
-      try {
-        var tx = new InputTransaction();
-        tx.addEvent(DeviceEvent.unicodePressed(code));
-        rdpSession.applyInputs(tx);
-        tx = new InputTransaction();
-        tx.addEvent(DeviceEvent.unicodeReleased(code));
-        rdpSession.applyInputs(tx);
-      } catch (err) {
-        if (i === 0) console.error("[RDP] unicodePressed failed:", err, "- DeviceEvent methods:", Object.getOwnPropertyNames(DeviceEvent));
+
+      var mapping = CHAR_TO_SCANCODE[ch];
+      if (mapping) {
+        if (mapping.shift) {
+          try {
+            var tx = new InputTransaction();
+            tx.addEvent(DeviceEvent.keyPressed(0x2A)); // LShift down
+            rdpSession.applyInputs(tx);
+          } catch (e) {}
+        }
+        pressAndRelease(mapping.sc);
+        if (mapping.shift) {
+          try {
+            var tx = new InputTransaction();
+            tx.addEvent(DeviceEvent.keyReleased(0x2A)); // LShift up
+            rdpSession.applyInputs(tx);
+          } catch (e) {}
+        }
+        typed++;
+      } else {
+        skipped++;
       }
+    }
+    console.log("[RDP] typeTextIntoRdp: typed", typed, "skipped", skipped, "of", text.length);
+  }
+
+  function pressAndRelease(scancode) {
+    if (!rdpSession) return;
+    try {
+      var tx = new InputTransaction();
+      tx.addEvent(DeviceEvent.keyPressed(scancode));
+      rdpSession.applyInputs(tx);
+      tx = new InputTransaction();
+      tx.addEvent(DeviceEvent.keyReleased(scancode));
+      rdpSession.applyInputs(tx);
+    } catch (err) {
+      console.error("[RDP] pressAndRelease error:", err, "scancode:", scancode);
     }
   }
 
