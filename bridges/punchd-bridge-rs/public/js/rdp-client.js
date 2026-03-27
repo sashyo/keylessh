@@ -879,19 +879,21 @@
         return;
       }
 
-      // Ctrl+V / Cmd+V — paste from browser clipboard as keystrokes
+      // Ctrl+V / Cmd+V — try browser clipboard paste, fall back to RDP keystroke
       if ((e.ctrlKey || e.metaKey) && e.code === "KeyV") {
         e.preventDefault();
         console.log("[RDP] Ctrl+V: reading clipboard...");
         navigator.clipboard.readText().then(function (text) {
           if (!text || !rdpSession) {
-            console.log("[RDP] Ctrl+V: no text or no session");
+            console.log("[RDP] Ctrl+V: no text, sending Ctrl+V to RDP");
+            sendCtrlV();
             return;
           }
           console.log("[RDP] Ctrl+V: typing", text.length, "chars");
           typeTextIntoRdp(text);
         }).catch(function (err) {
-          console.warn("[RDP] Ctrl+V: clipboard read failed:", err);
+          console.warn("[RDP] Ctrl+V: clipboard read failed, sending Ctrl+V to RDP:", err);
+          sendCtrlV();
         });
         return;
       }
@@ -966,6 +968,27 @@
         tx.addEvent(DeviceEvent.unicodeReleased(code));
         rdpSession.applyInputs(tx);
       } catch (err) { /* ignore */ }
+    }
+  }
+
+  // ── Send Ctrl+V as RDP keystrokes ──────────────────────────
+  function sendCtrlV() {
+    if (!rdpSession) return;
+    try {
+      var tx = new InputTransaction();
+      tx.addEvent(DeviceEvent.keyPressed(0x1D)); // Ctrl down
+      rdpSession.applyInputs(tx);
+      tx = new InputTransaction();
+      tx.addEvent(DeviceEvent.keyPressed(0x2F)); // V down
+      rdpSession.applyInputs(tx);
+      tx = new InputTransaction();
+      tx.addEvent(DeviceEvent.keyReleased(0x2F)); // V up
+      rdpSession.applyInputs(tx);
+      tx = new InputTransaction();
+      tx.addEvent(DeviceEvent.keyReleased(0x1D)); // Ctrl up
+      rdpSession.applyInputs(tx);
+    } catch (err) {
+      console.error("[RDP] sendCtrlV error:", err);
     }
   }
 

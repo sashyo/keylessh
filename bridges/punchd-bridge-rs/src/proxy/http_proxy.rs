@@ -1156,7 +1156,10 @@ async fn handle_request(
                 resp_headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
                 Some(ASSET_JS_SW)
             }
-            "/js/rdp-client.js" => Some(ASSET_JS_RDP_CLIENT),
+            "/js/rdp-client.js" => {
+                resp_headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+                Some(ASSET_JS_RDP_CLIENT)
+            }
             "/js/webrtc-upgrade.js" => Some(ASSET_JS_WEBRTC_UPGRADE),
             "/js/tide-e2e.js" => Some(ASSET_JS_TIDE_E2E),
             _ => None,
