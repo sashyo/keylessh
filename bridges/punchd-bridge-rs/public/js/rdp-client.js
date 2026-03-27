@@ -967,7 +967,9 @@
         tx = new InputTransaction();
         tx.addEvent(DeviceEvent.unicodeReleased(code));
         rdpSession.applyInputs(tx);
-      } catch (err) { /* ignore */ }
+      } catch (err) {
+        if (i === 0) console.error("[RDP] unicodePressed failed:", err, "- DeviceEvent methods:", Object.getOwnPropertyNames(DeviceEvent));
+      }
     }
   }
 
