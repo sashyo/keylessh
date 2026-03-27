@@ -783,8 +783,7 @@
       console.log("[RDP] Session ended:", termInfo ? termInfo.reason() : "unknown");
 
       // Clean up
-      var uploadBtn = document.getElementById("rdp-upload-btn");
-      if (uploadBtn) uploadBtn.remove();
+      // Clean up
       // Clean up clipboard WebSocket
       if (clipboardWs.readyState === WebSocket.OPEN) clipboardWs.close();
 
@@ -879,22 +878,47 @@
         return;
       }
 
-      // Ctrl+V / Cmd+V — try browser clipboard paste, fall back to RDP keystroke
+      // Ctrl+V / Cmd+V — paste text or files from browser clipboard
       if ((e.ctrlKey || e.metaKey) && e.code === "KeyV") {
         e.preventDefault();
         console.log("[RDP] Ctrl+V: reading clipboard...");
-        navigator.clipboard.readText().then(function (text) {
-          if (!text || !rdpSession) {
-            console.log("[RDP] Ctrl+V: no text, sending Ctrl+V to RDP");
-            sendCtrlV();
-            return;
-          }
-          console.log("[RDP] Ctrl+V: typing", text.length, "chars");
-          typeTextIntoRdp(text);
-        }).catch(function (err) {
-          console.warn("[RDP] Ctrl+V: clipboard read failed, sending Ctrl+V to RDP:", err);
-          sendCtrlV();
-        });
+        // Try reading clipboard items (supports files + text)
+        if (navigator.clipboard.read) {
+          navigator.clipboard.read().then(function (items) {
+            var files = [];
+            var textItem = null;
+            var pending = 0;
+            for (var i = 0; i < items.length; i++) {
+              var types = items[i].types;
+              for (var j = 0; j < types.length; j++) {
+                if (types[j].startsWith("image/") || types[j] === "application/octet-stream") {
+                  pending++;
+                  (function (item, type) {
+                    item.getType(type).then(function (blob) {
+                      var ext = type.split("/")[1] || "bin";
+                      files.push(new File([blob], "clipboard." + ext, { type: type }));
+                      pending--;
+                      if (pending === 0) finishPaste(files, textItem);
+                    }).catch(function () { pending--; if (pending === 0) finishPaste(files, textItem); });
+                  })(items[i], types[j]);
+                } else if (types[j] === "text/plain" && !textItem) {
+                  pending++;
+                  (function (item) {
+                    item.getType("text/plain").then(function (blob) {
+                      blob.text().then(function (t) { textItem = t; pending--; if (pending === 0) finishPaste(files, textItem); });
+                    }).catch(function () { pending--; if (pending === 0) finishPaste(files, textItem); });
+                  })(items[i]);
+                }
+              }
+            }
+            if (pending === 0) finishPaste(files, textItem);
+          }).catch(function (err) {
+            console.warn("[RDP] Ctrl+V: clipboard.read() failed, trying readText:", err);
+            fallbackReadText();
+          });
+        } else {
+          fallbackReadText();
+        }
         return;
       }
 
@@ -954,6 +978,27 @@
     }
     CHAR_TO_SCANCODE[" "] = { sc: 0x39, shift: false };
   })();
+
+  function finishPaste(files, text) {
+    if (files.length > 0) {
+      console.log("[RDP] Ctrl+V: pasting", files.length, "file(s)");
+      uploadFiles(files);
+    } else if (text) {
+      console.log("[RDP] Ctrl+V: typing", text.length, "chars");
+      typeTextIntoRdp(text);
+    } else {
+      console.log("[RDP] Ctrl+V: nothing in clipboard, sending Ctrl+V to RDP");
+      sendCtrlV();
+    }
+  }
+
+  function fallbackReadText() {
+    navigator.clipboard.readText().then(function (text) {
+      if (!text || !rdpSession) { sendCtrlV(); return; }
+      console.log("[RDP] Ctrl+V: typing", text.length, "chars (fallback)");
+      typeTextIntoRdp(text);
+    }).catch(function () { sendCtrlV(); });
+  }
 
   function typeTextIntoRdp(text) {
     if (!rdpSession) return;
@@ -1085,31 +1130,6 @@
   // ── File Upload (browser → RDP) ─────────────────────────────
 
   function setupFileUpload() {
-    // Floating upload button
-    var btn = document.createElement("div");
-    btn.id = "rdp-upload-btn";
-    btn.style.cssText = "position:fixed;bottom:20px;right:20px;z-index:10000;width:48px;height:48px;border-radius:50%;background:#4f46e5;display:flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,.3);transition:transform .2s";
-    btn.innerHTML = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>';
-    btn.title = "Upload files to RDP session";
-    btn.onmouseenter = function () { btn.style.transform = "scale(1.1)"; };
-    btn.onmouseleave = function () { btn.style.transform = "scale(1)"; };
-
-    var fileInput = document.createElement("input");
-    fileInput.type = "file";
-    fileInput.multiple = true;
-    fileInput.style.display = "none";
-
-    btn.onclick = function () { fileInput.click(); };
-    fileInput.onchange = function () {
-      if (fileInput.files && fileInput.files.length > 0) {
-        uploadFiles(fileInput.files);
-        fileInput.value = "";
-      }
-    };
-
-    document.body.appendChild(fileInput);
-    document.body.appendChild(btn);
-
     // Drag and drop on the canvas
     var canvas = document.getElementById("rdpCanvas");
     if (canvas) {
