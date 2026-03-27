@@ -787,7 +787,7 @@ pub fn build_router(state: Arc<ProxyState>) -> Router {
     Router::new()
         .route("/ws/rdcleanpath", get(handle_rdcleanpath_ws))
         .route("/ws/clipboard", get(handle_clipboard_ws))
-        .route("/api/clipboard-files/:id", get(handle_clipboard_file_download))
+        .route("/api/clipboard-files/{id}", get(handle_clipboard_file_download))
         .route("/api/clipboard-upload", axum::routing::post(handle_clipboard_upload))
         .fallback(any(handle_request))
         .with_state(state)
