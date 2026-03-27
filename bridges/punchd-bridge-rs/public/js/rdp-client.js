@@ -1116,20 +1116,19 @@
   // ── File Upload (browser → RDP) ─────────────────────────────
 
   function setupFileUpload() {
-    // Drag and drop on the canvas
-    var canvas = document.getElementById("rdpCanvas");
-    if (canvas) {
-      canvas.addEventListener("dragover", function (e) {
-        e.preventDefault();
-        e.dataTransfer.dropEffect = "copy";
-      });
-      canvas.addEventListener("drop", function (e) {
-        e.preventDefault();
-        if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-          uploadFiles(e.dataTransfer.files);
-        }
-      });
-    }
+    // Prevent browser default file open on drag/drop anywhere
+    document.addEventListener("dragover", function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      e.dataTransfer.dropEffect = "copy";
+    });
+    document.addEventListener("drop", function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+        uploadFiles(e.dataTransfer.files);
+      }
+    });
   }
 
   function uploadFiles(fileList) {
