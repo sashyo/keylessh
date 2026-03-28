@@ -43,11 +43,13 @@ pub struct StunRegistrationOptions {
     pub tc_client_id: Option<String>,
 }
 
+#[allow(dead_code)]
 pub struct StunRegistration {
     shutdown_tx: mpsc::Sender<()>,
 }
 
 impl StunRegistration {
+    #[allow(dead_code)]
     pub fn close(&self) {
         let _ = self.shutdown_tx.try_send(());
     }
@@ -148,7 +150,7 @@ async fn connect_and_run(
     };
 
     tracing::info!("[STUN-Reg] Connected to STUN server");
-    let mut reconnect_delay_reset = true;
+    let _reconnect_delay_reset = true;
 
     // Shared HTTP client for relay requests (reuse connections, avoid per-request allocation)
     let relay_http_client = reqwest::Client::builder()

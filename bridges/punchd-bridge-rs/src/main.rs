@@ -98,7 +98,7 @@ async fn main() {
             .to_string_lossy()
             .to_string()
     });
-    let stun_reg = stun::stun_client::register(stun::stun_client::StunRegistrationOptions {
+    let _stun_reg = stun::stun_client::register(stun::stun_client::StunRegistrationOptions {
         stun_server_url: config.stun_server_url.clone(),
         gateway_id: config.gateway_id.clone(),
         addresses: vec![format!("{}:{}", local_addr, config.listen_port)],
