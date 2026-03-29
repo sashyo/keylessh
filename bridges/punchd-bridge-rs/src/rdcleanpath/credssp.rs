@@ -155,7 +155,10 @@ pub async fn perform_credssp(tls: &mut TlsStream<TcpStream>, jwt: &str, username
     tracing::info!("[CredSSP] Client VERIFY checksum (ku={}): {}", ku_client_verify, hex::encode(&client_checksum));
 
     let client_verify = build_verify_message(&conversation_id, seq_num, TIDESSP_AUTH_SCHEME, &client_checksum, CHECKSUM_TYPE_HMAC_SHA1_96_AES128);
-    seq_num += 1;
+    #[allow(unused_assignments)]
+    {
+        seq_num += 1;
+    }
 
     let verify_spnego = build_spnego_response(Some(&client_verify), None);
     let ts_req_verify = build_ts_request(CREDSSP_VERSION, Some(&verify_spnego), None, None, Some(&client_nonce));

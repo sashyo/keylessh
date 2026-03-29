@@ -15,6 +15,9 @@ WORKDIR C:/TEMP
 
 RUN echo shell-ok && where cmd && dotnet --info
 
+USER ContainerAdministrator
+RUN setx /M TEMP "C:\TEMP" && setx /M TMP "C:\TEMP"
+
 RUN echo Install Visual Studio Build Tools - this is the command shape that worked
 RUN curl -SL --output C:\TEMP\vs_buildtools.exe %VS_BUILDTOOLS_URI% `
  && start /w C:\TEMP\vs_buildtools.exe --quiet --wait --norestart --nocache `

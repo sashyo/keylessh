@@ -3,7 +3,6 @@
 //! opens the browser, and waits for the user to submit the form.
 
 use std::fs;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::extract::State;

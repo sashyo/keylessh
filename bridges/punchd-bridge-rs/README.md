@@ -54,6 +54,7 @@ The gateway:
 | `GATEWAY_DISPLAY_NAME` | Display name for portal | No |
 | `GATEWAY_DESCRIPTION` | Description for portal | No |
 | `GATEWAY_ADDRESS` | Override advertised address | No |
+| `TC_CLIENT_ID` | The TideCloak client name where the roles are | Only when the TideCloak roles used are under a different client than the one in the tidecloak.json |
 
 \* Either `BACKENDS` or `BACKEND_URL` is required.
 \** Defaults to `data/tidecloak.json` if neither is set.
@@ -61,44 +62,20 @@ The gateway:
 ### Backend flags
 
 Append flags to backend URLs with `;`:
+- `;eddsa` — Tide JWT validation using the tide-ssp driver
 - `;noauth` — skip JWT validation (backend handles its own auth)
 - `;stripauth` — remove Authorization header before proxying
 
 Example: `BACKENDS=app=http://localhost:3000,admin=http://localhost:8080;stripauth,rdp=rdp://192.168.1.100:3389`
 
-## Local Development
-
-### Prerequisites
-
-- Rust 1.75+ (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`)
-- `data/tidecloak.json` — TideCloak client adapter config
-- A running STUN signaling server
-
-### Build and run
-
-```bash
-cd bridges/punchd-bridge-rs
-
-# Symlink data directory from main project
-ln -s ../../data data
-
-# Development
-STUN_SERVER_URL=ws://localhost:3478 \
-API_SECRET=your-secret \
-BACKENDS=myapp=http://localhost:3000 \
-cargo run
-
-# Production build
-cargo build --release
-./target/release/punchd-bridge-rs
-```
+---
 
 ## Docker Deployment
 
 ### Build
 
 ```bash
-docker build --no-cache -t keylessh-punchd-bridge-rs .
+docker buildx build --no-cache -t keylessh-punchd-bridge-rs .
 ```
 
 ### Run
@@ -151,4 +128,31 @@ The Container App is configured with:
 ```bash
 curl http://localhost:7892/health
 # {"status":"ok"}
+```
+
+## Local Development
+
+### Prerequisites
+
+- Rust 1.75+ (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`)
+- `data/tidecloak.json` — TideCloak client adapter config
+- A running STUN signaling server
+
+### Build and run
+
+```bash
+cd bridges/punchd-bridge-rs
+
+# Symlink data directory from main project
+ln -s ../../data data
+
+# Development
+STUN_SERVER_URL=ws://localhost:3478 \
+API_SECRET=your-secret \
+BACKENDS=myapp=http://localhost:3000 \
+cargo run
+
+# Production build
+cargo build --release
+./target/release/punchd-bridge-rs
 ```

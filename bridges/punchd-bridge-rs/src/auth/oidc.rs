@@ -12,6 +12,7 @@ pub struct OidcEndpoints {
 }
 
 #[derive(Deserialize, Debug)]
+#[allow(dead_code)]
 pub struct TokenResponse {
     pub access_token: String,
     pub refresh_token: Option<String>,
