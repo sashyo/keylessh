@@ -238,6 +238,7 @@ impl DerReader {
     }
 
     /// Skip one TLV without returning its contents.
+    #[allow(dead_code)]
     pub fn skip(&mut self) -> Result<(), String> {
         let _tag = self.read_tag()?;
         let len = self.read_length()?;
@@ -249,6 +250,7 @@ impl DerReader {
     }
 
     /// Read a SEQUENCE whose elements are all OCTET STRINGs.
+    #[allow(dead_code)]
     pub fn read_sequence_of_octet_strings(&mut self) -> Result<Vec<Vec<u8>>, String> {
         let mut seq = self.read_sequence()?;
         let mut result = Vec::new();
@@ -279,6 +281,7 @@ impl DerReader {
 
 impl DerReader {
     /// Convenience: read EXPLICIT [n] and return sub-reader, or None.
+    #[allow(dead_code)]
     pub fn try_read_explicit(&mut self, tag_num: u8) -> Option<DerReader> {
         self.read_explicit(tag_num).ok().flatten()
     }

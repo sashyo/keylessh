@@ -4,8 +4,10 @@ use super::der_codec::*;
 
 pub const RDCLEANPATH_VERSION: i64 = 3390;
 pub const RDCLEANPATH_ERROR_GENERAL: i64 = 1;
+#[allow(dead_code)]
 pub const RDCLEANPATH_ERROR_NEGOTIATION: i64 = 2;
 
+#[allow(dead_code)]
 pub struct RDCleanPathRequest {
     pub version: i64,
     pub destination: String,
