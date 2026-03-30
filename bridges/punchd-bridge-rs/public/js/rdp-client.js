@@ -816,8 +816,8 @@
       e.preventDefault();
       try {
         var tx = new InputTransaction();
-        // vertical=true, amount, unit=0 (pixel)
-        tx.addEvent(DeviceEvent.wheelRotations(true, e.deltaY, 0));
+        // Negate deltaY: browser positive=down, RDP positive=up
+        tx.addEvent(DeviceEvent.wheelRotations(true, -e.deltaY, 0));
         rdpSession.applyInputs(tx);
       } catch (err) { /* ignore */ }
     }, { passive: false });
@@ -828,6 +828,17 @@
 
     document.addEventListener("keydown", function (e) {
       if (!rdpSession || !connectForm.classList.contains("hidden")) return;
+
+      // Ctrl+V / Cmd+V — paste from browser clipboard as keystrokes
+      if ((e.ctrlKey || e.metaKey) && e.code === "KeyV") {
+        e.preventDefault();
+        navigator.clipboard.readText().then(function (text) {
+          if (!text || !rdpSession) return;
+          typeTextIntoRdp(text);
+        }).catch(function () { /* clipboard permission denied */ });
+        return;
+      }
+
       e.preventDefault();
       try {
         var tx = new InputTransaction();
@@ -845,6 +856,51 @@
         rdpSession.applyInputs(tx);
       } catch (err) { /* ignore */ }
     });
+  }
+
+  // ── Clipboard Paste Helper ───────────────────────────────────
+  // Types text into the RDP session using Unicode scancode events.
+
+  function typeTextIntoRdp(text) {
+    if (!rdpSession) return;
+    for (var i = 0; i < text.length; i++) {
+      var code = text.charCodeAt(i);
+      if (code === 10 || code === 13) {
+        // Enter key
+        try {
+          var tx = new InputTransaction();
+          tx.addEvent(DeviceEvent.keyPressed(0x1C));
+          rdpSession.applyInputs(tx);
+          tx = new InputTransaction();
+          tx.addEvent(DeviceEvent.keyReleased(0x1C));
+          rdpSession.applyInputs(tx);
+        } catch (err) { /* ignore */ }
+        // Skip \n after \r in \r\n
+        if (code === 13 && i + 1 < text.length && text.charCodeAt(i + 1) === 10) i++;
+        continue;
+      }
+      if (code === 9) {
+        // Tab key
+        try {
+          var tx = new InputTransaction();
+          tx.addEvent(DeviceEvent.keyPressed(0x0F));
+          rdpSession.applyInputs(tx);
+          tx = new InputTransaction();
+          tx.addEvent(DeviceEvent.keyReleased(0x0F));
+          rdpSession.applyInputs(tx);
+        } catch (err) { /* ignore */ }
+        continue;
+      }
+      // Use Unicode scancode for all other characters
+      try {
+        var tx = new InputTransaction();
+        tx.addEvent(DeviceEvent.unicodePressed(code));
+        rdpSession.applyInputs(tx);
+        tx = new InputTransaction();
+        tx.addEvent(DeviceEvent.unicodeReleased(code));
+        rdpSession.applyInputs(tx);
+      } catch (err) { /* ignore */ }
+    }
   }
 
   // ── Keyboard Scancode Mapping ─────────────────────────────────
