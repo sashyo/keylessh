@@ -55,14 +55,10 @@ RUN curl -SL --output C:\TEMP\rustup-init.exe https://static.rust-lang.org/rustu
  && del /q C:\TEMP\rustup-init.exe
 RUN rustc --version && cargo --version
 
-RUN echo Download NSSM (service wrapper)
-ARG NSSM_VERSION=2.24
-RUN curl -SL --output C:\TEMP\nssm.zip https://nssm.cc/release/nssm-%NSSM_VERSION%.zip `
- && tar -xf C:\TEMP\nssm.zip -C C:\TEMP `
- && if not exist C:\tools\nssm mkdir C:\tools\nssm `
- && copy C:\TEMP\nssm-%NSSM_VERSION%\win64\nssm.exe C:\tools\nssm\nssm.exe `
- && rmdir /s /q C:\TEMP\nssm-%NSSM_VERSION% `
- && del /q C:\TEMP\nssm.zip
+RUN echo Download WinSW (service wrapper)
+ARG WINSW_VERSION=v2.12.0
+RUN if not exist C:\tools\winsw mkdir C:\tools\winsw `
+ && curl -SL -o C:\tools\winsw\WinSW-x64.exe https://github.com/winsw/winsw/releases/download/%WINSW_VERSION%/WinSW-x64.exe
 
 RUN echo Prove the MSVC toolchain exists
 RUN dir "%ProgramFiles(x86)%\Microsoft Visual Studio\2022\BuildTools\Common7\Tools" `
@@ -73,7 +69,7 @@ RUN dir "%ProgramFiles(x86)%\Microsoft Visual Studio\2022\BuildTools\Common7\Too
 
 RUN echo Generate runtime build scripts inside the image
 
-REM --- build.cmd: TideSSP only (mount tide-ssp at C:\src) ---
+RUN echo --- build.cmd: TideSSP only (mount tide-ssp at C:\src) ---
 RUN > C:\build.cmd echo @echo off `
  && >> C:\build.cmd echo setlocal `
  && >> C:\build.cmd echo call "%%ProgramFiles(x86)%%\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" -arch=amd64 `
@@ -85,7 +81,7 @@ RUN > C:\build.cmd echo @echo off `
  && >> C:\build.cmd echo if errorlevel 1 exit /b %%errorlevel%% `
  && >> C:\build.cmd echo endlocal
 
-REM --- workstationbuild.cmd: TideSSP + Punchd Gateway (mount repo root at C:\src) ---
+RUN echo --- workstationbuild.cmd: TideSSP + Punchd Gateway (mount repo root at C:\src) ---
 RUN > C:\workstationbuild.cmd echo @echo off `
  && >> C:\workstationbuild.cmd echo setlocal `
  && >> C:\workstationbuild.cmd echo call "%%ProgramFiles(x86)%%\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" -arch=amd64 `

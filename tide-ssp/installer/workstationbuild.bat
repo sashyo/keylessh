@@ -13,7 +13,7 @@ REM    - Visual Studio Build Tools (MSVC)
 REM    - CMake, Ninja
 REM    - WiX Toolset v6+
 REM    - Rust toolchain (stable-x86_64-pc-windows-msvc)
-REM    - NSSM at C:\tools\nssm\nssm.exe
+REM    - WinSW at C:\tools\winsw\WinSW-x64.exe
 REM ---------------------------------------------------------------
 
 set "TIDESSP=%~dp0.."
@@ -48,7 +48,7 @@ wix build "%TIDESSP%\installer\WorkstationProduct.wxs" ^
     -bindpath BinDir="%BUILD%\Release" ^
     -bindpath InstallerDir="%TIDESSP%\installer" ^
     -bindpath PunchdDir="%PUNCHD%\target\release" ^
-    -bindpath NssmDir="C:\tools\nssm" ^
+    -bindpath WinSwDir="C:\tools\winsw" ^
     -o "%OUTDIR%\TideWorkstation.msi"
 if %errorlevel% neq 0 goto :fail
 if not exist "%OUTDIR%\TideWorkstation.msi" (

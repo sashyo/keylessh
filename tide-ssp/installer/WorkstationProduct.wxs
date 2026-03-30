@@ -40,8 +40,8 @@
         <Component Id="PunchdGateway_EXE" Guid="E5F6A7B8-C9D0-4E1F-2A3B-4C5D6E7F8A9B">
           <File Id="punchd_bridge_rs.exe" Source="!(bindpath.PunchdDir)\punchd-bridge-rs.exe" KeyPath="yes" />
         </Component>
-        <Component Id="Nssm_EXE" Guid="F6A7B8C9-D0E1-4F2A-3B4C-5D6E7F8A9B0C">
-          <File Id="nssm.exe" Source="!(bindpath.NssmDir)\nssm.exe" KeyPath="yes" />
+        <Component Id="WinSW_EXE" Guid="F6A7B8C9-D0E1-4F2A-3B4C-5D6E7F8A9B0C">
+          <File Id="PunchdGateway.exe" Source="!(bindpath.WinSwDir)\WinSW-x64.exe" Name="PunchdGateway.exe" KeyPath="yes" />
           <ServiceInstall Id="PunchdGatewayService"
                           Name="PunchdGateway"
                           DisplayName="Punchd Gateway"
@@ -55,15 +55,8 @@
                           Remove="uninstall"
                           Wait="yes" />
         </Component>
-        <Component Id="PunchdGateway_NssmConfig" Guid="A7B8C9D0-E1F2-4A3B-4C5D-6E7F8A9B0C1D">
-          <RegistryKey Root="HKLM" Key="SYSTEM\CurrentControlSet\Services\PunchdGateway\Parameters">
-            <RegistryValue Name="Application" Type="string" Value="[PUNCHDFOLDER]punchd-bridge-rs.exe" KeyPath="yes" />
-            <RegistryValue Name="AppDirectory" Type="string" Value="[PUNCHDFOLDER]" />
-            <RegistryValue Name="AppStdout" Type="string" Value="[PUNCHDFOLDER]logs\gateway.log" />
-            <RegistryValue Name="AppStderr" Type="string" Value="[PUNCHDFOLDER]logs\gateway.log" />
-            <RegistryValue Name="AppRotateFiles" Type="integer" Value="1" />
-            <RegistryValue Name="AppRotateBytes" Type="integer" Value="10485760" />
-          </RegistryKey>
+        <Component Id="PunchdGateway_Config" Guid="A7B8C9D0-E1F2-4A3B-4C5D-6E7F8A9B0C1D">
+          <File Id="PunchdGateway.xml" Source="!(bindpath.InstallerDir)\PunchdGateway.xml" KeyPath="yes" />
         </Component>
         <Directory Id="PUNCHDLOGSFOLDER" Name="logs" />
       </Directory>
@@ -73,8 +66,8 @@
       <ComponentRef Id="TideSSP_DLL" />
       <ComponentRef Id="TideSubAuth_DLL" />
       <ComponentRef Id="PunchdGateway_EXE" />
-      <ComponentRef Id="Nssm_EXE" />
-      <ComponentRef Id="PunchdGateway_NssmConfig" />
+      <ComponentRef Id="WinSW_EXE" />
+      <ComponentRef Id="PunchdGateway_Config" />
     </Feature>
 
     <!-- ═══════════ Custom actions DLL ═══════════ -->
