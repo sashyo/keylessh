@@ -9,7 +9,7 @@ ARG WIX_VERSION=6.0.2
 ARG CMAKE_VERSION=4.3.0
 ARG NINJA_VERSION=1.13.0
 
-ENV PATH="C:\tools\cmake\bin;C:\tools\ninja;C:\Users\ContainerAdministrator\.dotnet\tools;C:\Program Files\dotnet;C:\Windows\System32;C:\Windows"
+ENV PATH="C:\Users\ContainerAdministrator\.cargo\bin;C:\tools\cmake\bin;C:\tools\ninja;C:\Users\ContainerAdministrator\.dotnet\tools;C:\Program Files\dotnet;C:\Windows\System32;C:\Windows"
 
 WORKDIR C:/TEMP
 
@@ -49,6 +49,21 @@ RUN dotnet tool install --global wix --version %WIX_VERSION% `
  && wix extension add --global WixToolset.UI.wixext/%WIX_VERSION% `
  && wix extension add --global WixToolset.Util.wixext/%WIX_VERSION%
 
+RUN echo Install Rust toolchain
+RUN curl -SL --output C:\TEMP\rustup-init.exe https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe `
+ && C:\TEMP\rustup-init.exe -y --default-toolchain stable-x86_64-pc-windows-msvc `
+ && del /q C:\TEMP\rustup-init.exe
+RUN rustc --version && cargo --version
+
+RUN echo Download NSSM (service wrapper)
+ARG NSSM_VERSION=2.24
+RUN curl -SL --output C:\TEMP\nssm.zip https://nssm.cc/release/nssm-%NSSM_VERSION%.zip `
+ && tar -xf C:\TEMP\nssm.zip -C C:\TEMP `
+ && if not exist C:\tools\nssm mkdir C:\tools\nssm `
+ && copy C:\TEMP\nssm-%NSSM_VERSION%\win64\nssm.exe C:\tools\nssm\nssm.exe `
+ && rmdir /s /q C:\TEMP\nssm-%NSSM_VERSION% `
+ && del /q C:\TEMP\nssm.zip
+
 RUN echo Prove the MSVC toolchain exists
 RUN dir "%ProgramFiles(x86)%\Microsoft Visual Studio\2022\BuildTools\Common7\Tools" `
  && dir "%ProgramFiles(x86)%\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC" `
@@ -56,7 +71,9 @@ RUN dir "%ProgramFiles(x86)%\Microsoft Visual Studio\2022\BuildTools\Common7\Too
  && where cl `
  && cl
 
-RUN echo Generate runtime build script inside the image
+RUN echo Generate runtime build scripts inside the image
+
+REM --- build.cmd: TideSSP only (mount tide-ssp at C:\src) ---
 RUN > C:\build.cmd echo @echo off `
  && >> C:\build.cmd echo setlocal `
  && >> C:\build.cmd echo call "%%ProgramFiles(x86)%%\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" -arch=amd64 `
@@ -67,6 +84,18 @@ RUN > C:\build.cmd echo @echo off `
  && >> C:\build.cmd echo call installer\build.bat `
  && >> C:\build.cmd echo if errorlevel 1 exit /b %%errorlevel%% `
  && >> C:\build.cmd echo endlocal
+
+REM --- workstationbuild.cmd: TideSSP + Punchd Gateway (mount repo root at C:\src) ---
+RUN > C:\workstationbuild.cmd echo @echo off `
+ && >> C:\workstationbuild.cmd echo setlocal `
+ && >> C:\workstationbuild.cmd echo call "%%ProgramFiles(x86)%%\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" -arch=amd64 `
+ && >> C:\workstationbuild.cmd echo if errorlevel 1 exit /b %%errorlevel%% `
+ && >> C:\workstationbuild.cmd echo cd /d C:\src\tide-ssp `
+ && >> C:\workstationbuild.cmd echo if errorlevel 1 exit /b %%errorlevel%% `
+ && >> C:\workstationbuild.cmd echo if exist build rmdir /s /q build `
+ && >> C:\workstationbuild.cmd echo call installer\workstationbuild.bat `
+ && >> C:\workstationbuild.cmd echo if errorlevel 1 exit /b %%errorlevel%% `
+ && >> C:\workstationbuild.cmd echo endlocal
 
 WORKDIR C:/work
 

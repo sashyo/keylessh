@@ -1,0 +1,337 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+
+  <Package Name="TideWorkstation"
+           Manufacturer="Tide Foundation"
+           Version="1.0.0.0"
+           UpgradeCode="D4E5F6A7-B8C9-4D0E-1F2A-3B4C5D6E7F8A"
+           Scope="perMachine">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of TideWorkstation is already installed."
+                  AllowSameVersionUpgrades="yes"
+                  Schedule="afterInstallInitialize" />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <Launch Condition="Privileged" Message="This installer requires administrator privileges." />
+
+    <!-- Properties -->
+    <Property Id="REINSTALLMODE" Value="amus" Secure="yes" />
+    <Property Id="ARPNOREPAIR" Value="yes" Secure="yes" />
+    <Property Id="TIDE_CONFIG_FILE" Secure="yes" />
+    <Property Id="TIDE_CONFIG_JSON" Secure="yes" />
+    <Property Id="GATEWAY_CONFIG_FILE" Secure="yes" />
+
+    <!-- ═══════════ Directory layout ═══════════ -->
+
+    <!-- TideSSP DLLs → System32 -->
+    <StandardDirectory Id="System64Folder">
+      <Component Id="TideSSP_DLL" Guid="B1C2D3E4-F5A6-47B8-9C0D-1E2F3A4B5C6D">
+        <File Id="TideSSP.dll" Source="!(bindpath.BinDir)\TideSSP.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="TideSubAuth_DLL" Guid="C2D3E4F5-A6B7-48C9-0D1E-2F3A4B5C6D7E">
+        <File Id="TideSubAuth.dll" Source="!(bindpath.BinDir)\TideSubAuth.dll" KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <!-- Punchd Gateway → Program Files\PunchdGateway -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="PUNCHDFOLDER" Name="PunchdGateway">
+        <Component Id="PunchdGateway_EXE" Guid="E5F6A7B8-C9D0-4E1F-2A3B-4C5D6E7F8A9B">
+          <File Id="punchd_bridge_rs.exe" Source="!(bindpath.PunchdDir)\punchd-bridge-rs.exe" KeyPath="yes" />
+        </Component>
+        <Component Id="Nssm_EXE" Guid="F6A7B8C9-D0E1-4F2A-3B4C-5D6E7F8A9B0C">
+          <File Id="nssm.exe" Source="!(bindpath.NssmDir)\nssm.exe" KeyPath="yes" />
+          <ServiceInstall Id="PunchdGatewayService"
+                          Name="PunchdGateway"
+                          DisplayName="Punchd Gateway"
+                          Description="Punchd Gateway - WebRTC NAT-traversing reverse proxy service"
+                          Type="ownProcess"
+                          Start="auto"
+                          ErrorControl="normal" />
+          <ServiceControl Id="PunchdGatewayControl"
+                          Name="PunchdGateway"
+                          Stop="both"
+                          Remove="uninstall"
+                          Wait="yes" />
+        </Component>
+        <Component Id="PunchdGateway_NssmConfig" Guid="A7B8C9D0-E1F2-4A3B-4C5D-6E7F8A9B0C1D">
+          <RegistryKey Root="HKLM" Key="SYSTEM\CurrentControlSet\Services\PunchdGateway\Parameters">
+            <RegistryValue Name="Application" Type="string" Value="[PUNCHDFOLDER]punchd-bridge-rs.exe" KeyPath="yes" />
+            <RegistryValue Name="AppDirectory" Type="string" Value="[PUNCHDFOLDER]" />
+            <RegistryValue Name="AppStdout" Type="string" Value="[PUNCHDFOLDER]logs\gateway.log" />
+            <RegistryValue Name="AppStderr" Type="string" Value="[PUNCHDFOLDER]logs\gateway.log" />
+            <RegistryValue Name="AppRotateFiles" Type="integer" Value="1" />
+            <RegistryValue Name="AppRotateBytes" Type="integer" Value="10485760" />
+          </RegistryKey>
+        </Component>
+        <Directory Id="PUNCHDLOGSFOLDER" Name="logs" />
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="Complete" Title="TideWorkstation" Level="1">
+      <ComponentRef Id="TideSSP_DLL" />
+      <ComponentRef Id="TideSubAuth_DLL" />
+      <ComponentRef Id="PunchdGateway_EXE" />
+      <ComponentRef Id="Nssm_EXE" />
+      <ComponentRef Id="PunchdGateway_NssmConfig" />
+    </Feature>
+
+    <!-- ═══════════ Custom actions DLL ═══════════ -->
+
+    <Binary Id="TideCA" SourceFile="!(bindpath.BinDir)\TideCA.dll" />
+
+    <!-- TideCloak config actions (shared by TideSSP and Gateway) -->
+    <CustomAction Id="CA_ValidateConfig"
+                  DllEntry="ValidateConfig"
+                  BinaryRef="TideCA"
+                  Execute="immediate"
+                  Return="check" />
+
+    <CustomAction Id="CA_SetCopyConfigData"
+                  Property="CA_CopyConfig"
+                  Value="FILE=[TIDE_CONFIG_FILE]|JSON=[TIDE_CONFIG_JSON]" />
+
+    <CustomAction Id="CA_CopyConfig"
+                  DllEntry="CopyConfig"
+                  BinaryRef="TideCA"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="check" />
+
+    <CustomAction Id="CA_RegisterSecurityPackage"
+                  DllEntry="RegisterSecurityPackage"
+                  BinaryRef="TideCA"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="check" />
+
+    <CustomAction Id="CA_RegisterSubAuth"
+                  DllEntry="RegisterSubAuth"
+                  BinaryRef="TideCA"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="check" />
+
+    <CustomAction Id="CA_UnregisterSecurityPackage"
+                  DllEntry="UnregisterSecurityPackage"
+                  BinaryRef="TideCA"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <CustomAction Id="CA_UnregisterSubAuth"
+                  DllEntry="UnregisterSubAuth"
+                  BinaryRef="TideCA"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <CustomAction Id="CA_ClearMnsFlags"
+                  DllEntry="ClearMnsFlags"
+                  BinaryRef="TideCA"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <CustomAction Id="CA_RemoveConfig"
+                  DllEntry="RemoveConfig"
+                  BinaryRef="TideCA"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <!-- Gateway config actions -->
+    <CustomAction Id="CA_ValidateGatewayConfig"
+                  DllEntry="ValidateGatewayConfig"
+                  BinaryRef="TideCA"
+                  Execute="immediate"
+                  Return="check" />
+
+    <CustomAction Id="CA_SetCopyGatewayData"
+                  Property="CA_CopyGatewayConfig"
+                  Value="FILE=[GATEWAY_CONFIG_FILE]|DEST=[PUNCHDFOLDER]" />
+
+    <CustomAction Id="CA_CopyGatewayConfig"
+                  DllEntry="CopyGatewayConfig"
+                  BinaryRef="TideCA"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="check" />
+
+    <CustomAction Id="CA_SetRemoveGatewayData"
+                  Property="CA_RemoveGatewayConfig"
+                  Value="[PUNCHDFOLDER]" />
+
+    <CustomAction Id="CA_RemoveGatewayConfig"
+                  DllEntry="RemoveGatewayConfig"
+                  BinaryRef="TideCA"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <!-- ═══════════ Installer UI ═══════════ -->
+    <UI>
+      <TextStyle Id="TitleFont" FaceName="Tahoma" Size="10" Bold="yes" />
+      <TextStyle Id="BodyFont" FaceName="Tahoma" Size="8" />
+      <TextStyle Id="SmallFont" FaceName="Tahoma" Size="7" />
+
+      <Dialog Id="WelcomeDlg" Width="370" Height="270" Title="TideWorkstation Setup">
+        <Control Id="Title" Type="Text" X="20" Y="20" Width="330" Height="20"
+                 Text="{\TitleFont}Welcome to TideWorkstation Setup" />
+        <Control Id="Desc" Type="Text" X="20" Y="50" Width="330" Height="60"
+                 Text="{\BodyFont}This will install TideSSP (passwordless Ed25519 RDP authentication) and the Punchd Gateway as a Windows background service. You will need your TideCloak configuration (tidecloak.json) and a gateway configuration (gateway.toml)." />
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17"
+                 Default="yes" Text="Next">
+          <Publish Event="NewDialog" Value="ConfigDlg" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17"
+                 Cancel="yes" Text="Cancel">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+      </Dialog>
+
+      <Dialog Id="ConfigDlg" Width="370" Height="240" Title="TideWorkstation Setup">
+        <Control Id="Title" Type="Text" X="20" Y="20" Width="330" Height="20"
+                 Text="{\TitleFont}TideCloak Configuration" />
+        <Control Id="Desc" Type="Text" X="20" Y="50" Width="330" Height="50"
+                 Text="{\BodyFont}Clicking Next will open a file browser for you to select your tidecloak.json file. You can download it from TideCloak Admin Console: Clients > your client > Action dropdown > Download adapter config." />
+        <Control Id="Hint" Type="Text" X="20" Y="100" Width="330" Height="24"
+                 Text="{\SmallFont}The file will be copied to System32\tidecloak.json and the Gateway install directory." />
+        <Control Id="Back" Type="PushButton" X="180" Y="210" Width="56" Height="17"
+                 Text="Back">
+          <Publish Event="NewDialog" Value="WelcomeDlg" />
+        </Control>
+        <Control Id="Next" Type="PushButton" X="236" Y="210" Width="56" Height="17"
+                 Default="yes" Text="Next">
+          <Publish Event="DoAction" Value="CA_ValidateConfig" Order="1" />
+          <Publish Event="NewDialog" Value="GatewayConfigDlg" Order="2" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="210" Width="56" Height="17"
+                 Cancel="yes" Text="Cancel">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+      </Dialog>
+
+      <Dialog Id="GatewayConfigDlg" Width="370" Height="240" Title="TideWorkstation Setup">
+        <Control Id="Title" Type="Text" X="20" Y="20" Width="330" Height="20"
+                 Text="{\TitleFont}Gateway Configuration" />
+        <Control Id="Desc" Type="Text" X="20" Y="50" Width="330" Height="60"
+                 Text="{\BodyFont}Clicking Install will open a file browser for you to select your gateway.toml file. This configures the Punchd Gateway (STUN server, backends, etc). You can create one using the gateway setup wizard or by editing the template." />
+        <Control Id="Hint" Type="Text" X="20" Y="110" Width="330" Height="30"
+                 Text="{\SmallFont}The file will be copied to Program Files\PunchdGateway\gateway.toml. The gateway service will start automatically on the next reboot." />
+        <Control Id="Back" Type="PushButton" X="180" Y="210" Width="56" Height="17"
+                 Text="Back">
+          <Publish Event="NewDialog" Value="ConfigDlg" />
+        </Control>
+        <Control Id="Next" Type="PushButton" X="236" Y="210" Width="56" Height="17"
+                 Default="yes" Text="Install">
+          <Publish Event="DoAction" Value="CA_ValidateGatewayConfig" Order="1" />
+          <Publish Event="EndDialog" Value="Return" Order="2" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="210" Width="56" Height="17"
+                 Cancel="yes" Text="Cancel">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+      </Dialog>
+
+      <Dialog Id="CancelDlg" Width="260" Height="85" Title="Cancel Setup">
+        <Control Id="Text" Type="Text" X="48" Y="15" Width="194" Height="30"
+                 Text="{\BodyFont}Are you sure you want to cancel?" />
+        <Control Id="Yes" Type="PushButton" X="72" Y="57" Width="56" Height="17"
+                 Text="Yes">
+          <Publish Event="EndDialog" Value="Exit" />
+        </Control>
+        <Control Id="No" Type="PushButton" X="132" Y="57" Width="56" Height="17"
+                 Cancel="yes" Default="yes" Text="No">
+          <Publish Event="EndDialog" Value="Return" />
+        </Control>
+      </Dialog>
+
+      <Dialog Id="ExitDlg" Width="370" Height="270" Title="TideWorkstation Setup Complete">
+        <Control Id="Title" Type="Text" X="20" Y="20" Width="330" Height="20"
+                 Text="{\TitleFont}Installation Complete" />
+        <Control Id="Desc" Type="Text" X="20" Y="50" Width="330" Height="70"
+                 Text="{\BodyFont}TideSSP and Punchd Gateway have been installed. A reboot is required. After reboot: (1) TideSSP will activate for passwordless RDP, and (2) the Punchd Gateway service will start automatically." />
+        <Control Id="Finish" Type="PushButton" X="304" Y="243" Width="56" Height="17"
+                 Default="yes" Cancel="yes" Text="Finish">
+          <Publish Event="EndDialog" Value="Return" />
+        </Control>
+      </Dialog>
+
+      <Dialog Id="AlreadyInstalledDlg" Width="370" Height="200" Title="TideWorkstation Setup">
+        <Control Id="Title" Type="Text" X="20" Y="20" Width="330" Height="20"
+                 Text="{\TitleFont}TideWorkstation is already installed" />
+        <Control Id="Desc" Type="Text" X="20" Y="50" Width="330" Height="40"
+                 Text="{\BodyFont}Would you like to uninstall? This will remove TideSSP, the Punchd Gateway service, and all configuration. A reboot will be required." />
+        <Control Id="Uninstall" Type="PushButton" X="172" Y="170" Width="64" Height="17"
+                 Default="yes" Text="Uninstall">
+          <Publish Property="REMOVE" Value="ALL" />
+          <Publish Event="EndDialog" Value="Return" />
+        </Control>
+        <Control Id="Reinstall" Type="PushButton" X="240" Y="170" Width="64" Height="17"
+                 Text="Reinstall">
+          <Publish Property="REINSTALL" Value="ALL" />
+          <Publish Event="EndDialog" Value="Return" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="308" Y="170" Width="52" Height="17"
+                 Cancel="yes" Text="Cancel">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+      </Dialog>
+
+      <Dialog Id="UninstallExitDlg" Width="370" Height="270" Title="TideWorkstation Setup">
+        <Control Id="Title" Type="Text" X="20" Y="20" Width="330" Height="20"
+                 Text="{\TitleFont}Uninstall Complete" />
+        <Control Id="Desc" Type="Text" X="20" Y="50" Width="330" Height="50"
+                 Text="{\BodyFont}TideWorkstation has been removed. A reboot is required to fully deactivate the security package." />
+        <Control Id="Finish" Type="PushButton" X="304" Y="243" Width="56" Height="17"
+                 Default="yes" Cancel="yes" Text="Finish">
+          <Publish Event="EndDialog" Value="Return" />
+        </Control>
+      </Dialog>
+
+      <InstallUISequence>
+        <Show Dialog="WelcomeDlg" Before="ExecuteAction" Condition="NOT Installed" />
+        <Show Dialog="AlreadyInstalledDlg" Before="ExecuteAction" Condition="Installed AND NOT REMOVE" />
+        <Show Dialog="ExitDlg" After="ExecuteAction" Condition="NOT Installed OR REINSTALL" />
+        <Show Dialog="UninstallExitDlg" After="ExecuteAction" Condition="REMOVE=&quot;ALL&quot;" />
+      </InstallUISequence>
+    </UI>
+
+    <!-- ═══════════ Execute sequence ═══════════ -->
+
+    <InstallExecuteSequence>
+      <!-- Install actions -->
+      <Custom Action="CA_SetCopyConfigData" After="InstallFiles"
+              Condition="NOT REMOVE=&quot;ALL&quot;" />
+      <Custom Action="CA_CopyConfig" After="CA_SetCopyConfigData"
+              Condition="NOT REMOVE=&quot;ALL&quot;" />
+      <Custom Action="CA_RegisterSecurityPackage" After="CA_CopyConfig"
+              Condition="NOT REMOVE=&quot;ALL&quot;" />
+      <Custom Action="CA_RegisterSubAuth" After="CA_RegisterSecurityPackage"
+              Condition="NOT REMOVE=&quot;ALL&quot;" />
+      <Custom Action="CA_SetCopyGatewayData" After="CA_RegisterSubAuth"
+              Condition="NOT REMOVE=&quot;ALL&quot;" />
+      <Custom Action="CA_CopyGatewayConfig" After="CA_SetCopyGatewayData"
+              Condition="NOT REMOVE=&quot;ALL&quot;" />
+
+      <!-- Uninstall actions -->
+      <Custom Action="CA_UnregisterSecurityPackage" Before="RemoveFiles"
+              Condition="REMOVE=&quot;ALL&quot;" />
+      <Custom Action="CA_UnregisterSubAuth" After="CA_UnregisterSecurityPackage"
+              Condition="REMOVE=&quot;ALL&quot;" />
+      <Custom Action="CA_ClearMnsFlags" After="CA_UnregisterSubAuth"
+              Condition="REMOVE=&quot;ALL&quot;" />
+      <Custom Action="CA_RemoveConfig" After="CA_ClearMnsFlags"
+              Condition="REMOVE=&quot;ALL&quot;" />
+      <Custom Action="CA_SetRemoveGatewayData" After="CA_RemoveConfig"
+              Condition="REMOVE=&quot;ALL&quot;" />
+      <Custom Action="CA_RemoveGatewayConfig" After="CA_SetRemoveGatewayData"
+              Condition="REMOVE=&quot;ALL&quot;" />
+
+      <ScheduleReboot After="InstallFinalize" />
+    </InstallExecuteSequence>
+
+  </Package>
+</Wix>

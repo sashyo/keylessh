@@ -8,3 +8,6 @@ EXPORTS
     ValidateConfig
     CopyConfig
     RemoveConfig
+    ValidateGatewayConfig
+    CopyGatewayConfig
+    RemoveGatewayConfig
