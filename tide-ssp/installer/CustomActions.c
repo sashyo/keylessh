@@ -466,6 +466,170 @@ UINT __stdcall CopyConfig(MSIHANDLE hInstall)
     return ERROR_INSTALL_FAILURE;
 }
 
+/* ---------- gateway config actions (for WorkstationProduct) ---------- */
+
+/*
+ * ValidateGatewayConfig — immediate CA.
+ * Opens a file browser for gateway.toml and validates basic structure.
+ * Sets GATEWAY_CONFIG_FILE property.
+ */
+UINT __stdcall ValidateGatewayConfig(MSIHANDLE hInstall)
+{
+    WCHAR filePath[MAX_PATH] = {0};
+    WCHAR buf[4096];
+
+    HWND hwnd = FindWindowW(L"MsiDialogCloseClass", NULL);
+    if (!hwnd) hwnd = FindWindowW(L"MsiDialogNoCloseClass", NULL);
+    if (!hwnd) hwnd = GetForegroundWindow();
+
+    OPENFILENAMEW ofn;
+    ZeroMemory(&ofn, sizeof(ofn));
+    ofn.lStructSize = sizeof(OPENFILENAMEW);
+    ofn.hwndOwner = hwnd;
+    ofn.lpstrFilter = L"TOML Files\0*.toml\0All Files\0*.*\0";
+    ofn.lpstrFile = filePath;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrTitle = L"Select gateway.toml";
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    ofn.lpstrDefExt = L"toml";
+
+    if (!DynGetOpenFileNameW(&ofn)) {
+        return ERROR_INSTALL_FAILURE;
+    }
+
+    MsiSetPropertyW(hInstall, L"GATEWAY_CONFIG_FILE", filePath);
+
+    /* Basic validation: readable and contains expected keys */
+    int wLen = ReadFileToWide(filePath, buf, sizeof(buf) / sizeof(WCHAR));
+    if (wLen == 0) {
+        MessageBoxW(hwnd,
+            L"Cannot read the selected file.",
+            L"TideWorkstation - File Error", MB_OK | MB_ICONERROR);
+        return ERROR_INSTALL_FAILURE;
+    }
+
+    if (!wcsstr(buf, L"stun_server_url") && !wcsstr(buf, L"backends")) {
+        MessageBoxW(hwnd,
+            L"The selected file does not appear to be a valid gateway.toml.\n"
+            L"It should contain at least stun_server_url and backends settings.\n\n"
+            L"Run punchd-bridge-rs once to generate a config via the setup wizard,\n"
+            L"or create gateway.toml manually.",
+            L"TideWorkstation - Invalid Configuration", MB_OK | MB_ICONERROR);
+        return ERROR_INSTALL_FAILURE;
+    }
+
+    return ERROR_SUCCESS;
+}
+
+/*
+ * CopyGatewayConfig — deferred CA.
+ * CustomActionData format: "FILE=<gateway.toml path>|DEST=<install dir>"
+ * Copies gateway.toml to DEST\gateway.toml.
+ * Also copies System32\tidecloak.json to DEST\tidecloak.json.
+ */
+UINT __stdcall CopyGatewayConfig(MSIHANDLE hInstall)
+{
+    WCHAR customData[4096];
+    DWORD dataLen = sizeof(customData) / sizeof(WCHAR);
+
+    if (MsiGetPropertyW(hInstall, L"CustomActionData", customData, &dataLen) != ERROR_SUCCESS
+        || dataLen == 0)
+        return ERROR_INSTALL_FAILURE;
+
+    /* Parse FILE= and DEST= */
+    WCHAR srcPath[MAX_PATH] = {0};
+    WCHAR destDir[MAX_PATH] = {0};
+
+    WCHAR *fileMarker = wcsstr(customData, L"FILE=");
+    WCHAR *destMarker = wcsstr(customData, L"|DEST=");
+
+    if (fileMarker) {
+        fileMarker += 5;
+        WCHAR *pipePos = wcschr(fileMarker, L'|');
+        DWORD pathChars = pipePos ? (DWORD)(pipePos - fileMarker) : (DWORD)wcslen(fileMarker);
+        if (pathChars > 0 && pathChars < MAX_PATH)
+            wcsncpy_s(srcPath, MAX_PATH, fileMarker, pathChars);
+    }
+
+    if (destMarker) {
+        destMarker += 6;
+        DWORD destChars = (DWORD)wcslen(destMarker);
+        if (destChars > 0 && destChars < MAX_PATH)
+            wcsncpy_s(destDir, MAX_PATH, destMarker, destChars);
+    }
+
+    if (srcPath[0] == L'\0' || destDir[0] == L'\0')
+        return ERROR_INSTALL_FAILURE;
+
+    /* Ensure destination directory exists */
+    CreateDirectoryW(destDir, NULL);
+
+    /* Create logs subdirectory */
+    {
+        WCHAR logsDir[MAX_PATH];
+        StringCchCopyW(logsDir, MAX_PATH, destDir);
+        StringCchCatW(logsDir, MAX_PATH, L"logs");
+        CreateDirectoryW(logsDir, NULL);
+    }
+
+    /* Copy gateway.toml */
+    {
+        WCHAR destPath[MAX_PATH];
+        StringCchCopyW(destPath, MAX_PATH, destDir);
+        StringCchCatW(destPath, MAX_PATH, L"gateway.toml");
+        if (!CopyFileW(srcPath, destPath, FALSE))
+            return ERROR_INSTALL_FAILURE;
+    }
+
+    /* Copy System32\tidecloak.json to install dir for portable-mode access */
+    {
+        WCHAR tcSrc[MAX_PATH], tcDest[MAX_PATH];
+        UINT sysLen = GetSystemDirectoryW(tcSrc, MAX_PATH);
+        if (sysLen > 0 && sysLen < MAX_PATH - 20) {
+            wcscat_s(tcSrc, MAX_PATH, L"\\tidecloak.json");
+            StringCchCopyW(tcDest, MAX_PATH, destDir);
+            StringCchCatW(tcDest, MAX_PATH, L"tidecloak.json");
+            CopyFileW(tcSrc, tcDest, FALSE); /* best effort — not fatal if missing */
+        }
+    }
+
+    return ERROR_SUCCESS;
+}
+
+/*
+ * RemoveGatewayConfig — deferred CA.
+ * CustomActionData: install directory path.
+ * Removes gateway.toml, tidecloak.json, and logs from the install dir.
+ */
+UINT __stdcall RemoveGatewayConfig(MSIHANDLE hInstall)
+{
+    WCHAR destDir[MAX_PATH];
+    DWORD dataLen = MAX_PATH;
+
+    if (MsiGetPropertyW(hInstall, L"CustomActionData", destDir, &dataLen) != ERROR_SUCCESS)
+        return ERROR_SUCCESS;
+
+    WCHAR path[MAX_PATH];
+
+    StringCchCopyW(path, MAX_PATH, destDir);
+    StringCchCatW(path, MAX_PATH, L"gateway.toml");
+    DeleteFileW(path);
+
+    StringCchCopyW(path, MAX_PATH, destDir);
+    StringCchCatW(path, MAX_PATH, L"tidecloak.json");
+    DeleteFileW(path);
+
+    StringCchCopyW(path, MAX_PATH, destDir);
+    StringCchCatW(path, MAX_PATH, L"logs\\gateway.log");
+    DeleteFileW(path);
+
+    StringCchCopyW(path, MAX_PATH, destDir);
+    StringCchCatW(path, MAX_PATH, L"logs");
+    RemoveDirectoryW(path);
+
+    return ERROR_SUCCESS;
+}
+
 /* RemoveConfig — delete tidecloak.json from System32 on uninstall */
 UINT __stdcall RemoveConfig(MSIHANDLE hInstall)
 {
