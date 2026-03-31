@@ -34,6 +34,9 @@ export interface TidecloakConfig {
 const filePath = path.join(process.cwd(), "data", "tidecloak.json");
 
 export function GetConfig(): TidecloakConfig {
+  if (process.env.TIDECLOAK_CONFIG) {
+    return JSON.parse(process.env.TIDECLOAK_CONFIG);
+  }
   return JSON.parse(fs.readFileSync(filePath, "utf-8"));
 }
 
