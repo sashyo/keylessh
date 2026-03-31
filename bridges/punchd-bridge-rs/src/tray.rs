@@ -132,7 +132,7 @@ mod win32 {
     const HWND_MESSAGE: HWND = -3isize as HWND;
 
     // ── Win32 FFI ────────────────────────────────────────────
-    extern "system" {
+    unsafe extern "system" {
         fn GetModuleHandleW(name: *const u16) -> HINSTANCE;
         fn RegisterClassExW(wc: *const WNDCLASSEXW) -> ATOM;
         fn CreateWindowExW(
