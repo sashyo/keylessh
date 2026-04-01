@@ -13,6 +13,16 @@ pub fn spawn_tray(_logs_url: String, _gateway_url: String) {
     // No tray on non-Windows — logs available at /logs
 }
 
+/// Register a callback that fires when the VPN toggle is clicked.
+/// The callback receives `true` (enabled) or `false` (disabled).
+#[cfg(target_os = "windows")]
+pub fn set_vpn_callback(cb: impl Fn(bool) + Send + 'static) {
+    unsafe { win32::VPN_CALLBACK = Some(Box::new(cb)); }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn set_vpn_callback(_cb: impl Fn(bool) + Send + 'static) {}
+
 #[cfg(target_os = "windows")]
 mod win32 {
     use std::mem::{size_of, zeroed};
@@ -128,6 +138,10 @@ mod win32 {
     const ID_OPEN_LOGS: usize = 1001;
     const ID_OPEN_GATEWAY: usize = 1002;
     const ID_QUIT: usize = 1003;
+    const ID_TOGGLE_VPN: usize = 1004;
+
+    const MF_CHECKED: u32 = 0x0008;
+    const MF_UNCHECKED: u32 = 0x0000;
 
     const HWND_MESSAGE: HWND = -3isize as HWND;
 
@@ -159,6 +173,8 @@ mod win32 {
     // ── Globals (single tray instance) ───────────────────────
     static mut LOGS_URL: Option<String> = None;
     static mut GATEWAY_URL: Option<String> = None;
+    static mut VPN_ENABLED: bool = false;
+    pub static mut VPN_CALLBACK: Option<Box<dyn Fn(bool) + Send>> = None;
 
     fn to_wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -205,6 +221,12 @@ mod win32 {
                                 shell_open(url);
                             }
                         }
+                        ID_TOGGLE_VPN => {
+                            VPN_ENABLED = !VPN_ENABLED;
+                            if let Some(ref cb) = VPN_CALLBACK {
+                                cb(VPN_ENABLED);
+                            }
+                        }
                         ID_QUIT => {
                             remove_tray_icon(hwnd);
                             PostQuitMessage(0);
@@ -231,6 +253,12 @@ mod win32 {
             let gateway = to_wide("Open Gateway");
             let quit = to_wide("Quit");
 
+            let vpn_label = if VPN_ENABLED { "VPN: ON" } else { "VPN: OFF" };
+            let vpn_text = to_wide(vpn_label);
+            let vpn_flags = MF_STRING | if VPN_ENABLED { MF_CHECKED } else { MF_UNCHECKED };
+
+            AppendMenuW(menu, vpn_flags, ID_TOGGLE_VPN, vpn_text.as_ptr());
+            AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
             AppendMenuW(menu, MF_STRING, ID_OPEN_LOGS, logs.as_ptr());
             AppendMenuW(menu, MF_STRING, ID_OPEN_GATEWAY, gateway.as_ptr());
             AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());

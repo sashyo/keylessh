@@ -11,6 +11,7 @@ mod setup;
 mod stun;
 mod tls;
 mod tray;
+pub mod vpn;
 mod webrtc;
 
 #[tokio::main]
@@ -26,7 +27,7 @@ async fn main() {
         use tracing_subscriber::EnvFilter;
         logstream::init();
         let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            EnvFilter::new("punchd_gateway=info,warn")
+            EnvFilter::new("punchd_bridge_rs=debug,warn")
         });
         tracing_subscriber::registry()
             .with(filter)
@@ -91,6 +92,11 @@ async fn main() {
         .route("/logs/stream", axum::routing::get(serve_logs_stream))
         .route("/logs/buffer", axum::routing::get(serve_logs_buffer));
 
+    // VPN state — always enabled, auto-configures IP forwarding when a client connects
+    let vpn_state = Arc::new(tokio::sync::Mutex::new(
+        vpn::vpn_handler::VpnState::new("10.66.0.0/24", true),
+    ));
+
     // STUN registration
     let local_addr = std::env::var("GATEWAY_ADDRESS").unwrap_or_else(|_| {
         hostname::get()
@@ -141,12 +147,24 @@ async fn main() {
         backends: config.backends.clone(),
         auth: Some(auth.clone()),
         tc_client_id: Some(tc_client_id.clone()),
+        vpn_state: Some(vpn_state.clone()),
     });
 
     // System tray icon
     let logs_url = format!("http://localhost:{}/logs", config.health_port);
     let gateway_url = format!("{scheme}://localhost:{}", config.listen_port);
     tray::spawn_tray(logs_url, gateway_url);
+
+    // VPN toggle callback — enables/disables IP forwarding from the system tray
+    tray::set_vpn_callback(|enabled| {
+        if enabled {
+            tracing::info!("[VPN] VPN enabled via system tray");
+            vpn::vpn_handler::enable_forwarding();
+        } else {
+            tracing::info!("[VPN] VPN disabled via system tray");
+            vpn::vpn_handler::disable_forwarding();
+        }
+    });
 
     // Startup banner
     tracing::info!("Punchd Gateway (local-facing)");
