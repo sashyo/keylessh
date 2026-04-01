@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
 
-  <Package Name="TideWorkstation"
+  <Package Name="PunchdEndpoint"
            Manufacturer="Tide Foundation"
            Version="1.0.0.0"
            UpgradeCode="D4E5F6A7-B8C9-4D0E-1F2A-3B4C5D6E7F8A"
            Scope="perMachine">
 
-    <MajorUpgrade DowngradeErrorMessage="A newer version of TideWorkstation is already installed."
+    <MajorUpgrade DowngradeErrorMessage="A newer version of PunchdEndpoint is already installed."
                   AllowSameVersionUpgrades="yes"
                   Schedule="afterInstallInitialize" />
 
@@ -68,7 +68,7 @@
       </Directory>
     </StandardDirectory>
 
-    <Feature Id="Complete" Title="TideWorkstation" Level="1">
+    <Feature Id="Complete" Title="PunchdEndpoint" Level="1">
       <ComponentRef Id="TideSSP_DLL" />
       <ComponentRef Id="TideSubAuth_DLL" />
       <ComponentRef Id="PunchdGateway_EXE" />
@@ -177,9 +177,9 @@
       <TextStyle Id="BodyFont" FaceName="Tahoma" Size="8" />
       <TextStyle Id="SmallFont" FaceName="Tahoma" Size="7" />
 
-      <Dialog Id="WelcomeDlg" Width="370" Height="270" Title="TideWorkstation Setup">
+      <Dialog Id="WelcomeDlg" Width="370" Height="270" Title="PunchdEndpoint Setup">
         <Control Id="Title" Type="Text" X="20" Y="20" Width="330" Height="20"
-                 Text="{\TitleFont}Welcome to TideWorkstation Setup" />
+                 Text="{\TitleFont}Welcome to PunchdEndpoint Setup" />
         <Control Id="Desc" Type="Text" X="20" Y="50" Width="330" Height="60"
                  Text="{\BodyFont}This will install TideSSP (passwordless Ed25519 RDP authentication) and the Punchd Gateway as a Windows background service. You will need your TideCloak configuration (tidecloak.json) and a gateway configuration (gateway.toml)." />
         <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17"
@@ -192,7 +192,7 @@
         </Control>
       </Dialog>
 
-      <Dialog Id="ConfigDlg" Width="370" Height="240" Title="TideWorkstation Setup">
+      <Dialog Id="ConfigDlg" Width="370" Height="240" Title="PunchdEndpoint Setup">
         <Control Id="Title" Type="Text" X="20" Y="20" Width="330" Height="20"
                  Text="{\TitleFont}TideCloak Configuration" />
         <Control Id="Desc" Type="Text" X="20" Y="50" Width="330" Height="50"
@@ -214,7 +214,7 @@
         </Control>
       </Dialog>
 
-      <Dialog Id="GatewayConfigDlg" Width="370" Height="240" Title="TideWorkstation Setup">
+      <Dialog Id="GatewayConfigDlg" Width="370" Height="240" Title="PunchdEndpoint Setup">
         <Control Id="Title" Type="Text" X="20" Y="20" Width="330" Height="20"
                  Text="{\TitleFont}Gateway Configuration" />
         <Control Id="Desc" Type="Text" X="20" Y="50" Width="330" Height="60"
@@ -249,7 +249,7 @@
         </Control>
       </Dialog>
 
-      <Dialog Id="ExitDlg" Width="370" Height="270" Title="TideWorkstation Setup Complete">
+      <Dialog Id="ExitDlg" Width="370" Height="270" Title="PunchdEndpoint Setup Complete">
         <Control Id="Title" Type="Text" X="20" Y="20" Width="330" Height="20"
                  Text="{\TitleFont}Installation Complete" />
         <Control Id="Desc" Type="Text" X="20" Y="50" Width="330" Height="70"
@@ -260,9 +260,9 @@
         </Control>
       </Dialog>
 
-      <Dialog Id="AlreadyInstalledDlg" Width="370" Height="200" Title="TideWorkstation Setup">
+      <Dialog Id="AlreadyInstalledDlg" Width="370" Height="200" Title="PunchdEndpoint Setup">
         <Control Id="Title" Type="Text" X="20" Y="20" Width="330" Height="20"
-                 Text="{\TitleFont}TideWorkstation is already installed" />
+                 Text="{\TitleFont}PunchdEndpoint is already installed" />
         <Control Id="Desc" Type="Text" X="20" Y="50" Width="330" Height="40"
                  Text="{\BodyFont}Would you like to uninstall? This will remove TideSSP, the Punchd Gateway service, and all configuration. A reboot will be required." />
         <Control Id="Uninstall" Type="PushButton" X="172" Y="170" Width="64" Height="17"
@@ -281,11 +281,11 @@
         </Control>
       </Dialog>
 
-      <Dialog Id="UninstallExitDlg" Width="370" Height="270" Title="TideWorkstation Setup">
+      <Dialog Id="UninstallExitDlg" Width="370" Height="270" Title="PunchdEndpoint Setup">
         <Control Id="Title" Type="Text" X="20" Y="20" Width="330" Height="20"
                  Text="{\TitleFont}Uninstall Complete" />
         <Control Id="Desc" Type="Text" X="20" Y="50" Width="330" Height="50"
-                 Text="{\BodyFont}TideWorkstation has been removed. A reboot is required to fully deactivate the security package." />
+                 Text="{\BodyFont}PunchdEndpoint has been removed. A reboot is required to fully deactivate the security package." />
         <Control Id="Finish" Type="PushButton" X="304" Y="243" Width="56" Height="17"
                  Default="yes" Cancel="yes" Text="Finish">
           <Publish Event="EndDialog" Value="Return" />

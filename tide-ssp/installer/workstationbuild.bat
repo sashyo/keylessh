@@ -2,7 +2,7 @@
 setlocal
 
 REM ---------------------------------------------------------------
-REM  Build TideWorkstation MSI (TideSSP + Punchd Gateway service)
+REM  Build PunchdEndpoint MSI (TideSSP + Punchd Gateway service)
 REM
 REM  Expects the repository root at C:\src:
 REM    C:\src\tide-ssp\                   TideSSP driver
@@ -54,16 +54,16 @@ wix build "%TIDESSP%\installer\WorkstationProduct.wxs" ^
     -bindpath InstallerDir="%TIDESSP%\installer" ^
     -bindpath PunchdDir="%PUNCHD%\target\release" ^
     -bindpath WinSwDir="C:\tools\winsw" ^
-    -o "%OUTDIR%\TideWorkstation.msi"
+    -o "%OUTDIR%\PunchdEndpoint.msi"
 if %errorlevel% neq 0 goto :fail
-if not exist "%OUTDIR%\TideWorkstation.msi" (
+if not exist "%OUTDIR%\PunchdEndpoint.msi" (
     echo ERROR: MSI was not produced.
     goto :fail
 )
 
 echo.
 echo === Success ===
-echo MSI output: %OUTDIR%\TideWorkstation.msi
+echo MSI output: %OUTDIR%\PunchdEndpoint.msi
 goto :eof
 
 :fail

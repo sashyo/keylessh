@@ -81,7 +81,7 @@ RUN > C:\build.cmd echo @echo off `
  && >> C:\build.cmd echo if errorlevel 1 exit /b %%errorlevel%% `
  && >> C:\build.cmd echo endlocal
 
-RUN echo --- workstationbuild.cmd: TideSSP + Punchd Gateway (mount repo root at C:\src) ---
+RUN echo --- workstationbuild.cmd: TideSSP + PunchdEndpoint (mount repo root at C:\src) ---
 RUN > C:\workstationbuild.cmd echo @echo off `
  && >> C:\workstationbuild.cmd echo setlocal `
  && >> C:\workstationbuild.cmd echo call "%%ProgramFiles(x86)%%\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" -arch=amd64 `

@@ -504,7 +504,7 @@ UINT __stdcall ValidateGatewayConfig(MSIHANDLE hInstall)
     if (wLen == 0) {
         MessageBoxW(hwnd,
             L"Cannot read the selected file.",
-            L"TideWorkstation - File Error", MB_OK | MB_ICONERROR);
+            L"PunchdEndpoint - File Error", MB_OK | MB_ICONERROR);
         return ERROR_INSTALL_FAILURE;
     }
 
@@ -514,7 +514,7 @@ UINT __stdcall ValidateGatewayConfig(MSIHANDLE hInstall)
             L"It should contain at least stun_server_url and backends settings.\n\n"
             L"Run punchd-bridge-rs once to generate a config via the setup wizard,\n"
             L"or create gateway.toml manually.",
-            L"TideWorkstation - Invalid Configuration", MB_OK | MB_ICONERROR);
+            L"PunchdEndpoint - Invalid Configuration", MB_OK | MB_ICONERROR);
         return ERROR_INSTALL_FAILURE;
     }
 
