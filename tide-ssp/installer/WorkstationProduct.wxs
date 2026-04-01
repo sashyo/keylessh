@@ -40,6 +40,12 @@
         <Component Id="PunchdGateway_EXE" Guid="E5F6A7B8-C9D0-4E1F-2A3B-4C5D6E7F8A9B">
           <File Id="punchd_bridge_rs.exe" Source="!(bindpath.PunchdDir)\punchd-bridge-rs.exe" KeyPath="yes" />
         </Component>
+        <Component Id="VCRuntime_DLL" Guid="A1B2C3D4-E5F6-4A7B-8C9D-0E1F2A3B4C5D">
+          <File Id="vcruntime140.dll" Source="!(bindpath.PunchdDir)\vcruntime140.dll" KeyPath="yes" />
+        </Component>
+        <Component Id="MSVCP_DLL" Guid="B2C3D4E5-F6A7-4B8C-9D0E-1F2A3B4C5D6E">
+          <File Id="msvcp140.dll" Source="!(bindpath.PunchdDir)\msvcp140.dll" KeyPath="yes" />
+        </Component>
         <Component Id="WinSW_EXE" Guid="F6A7B8C9-D0E1-4F2A-3B4C-5D6E7F8A9B0C">
           <File Id="PunchdGateway.exe" Source="!(bindpath.WinSwDir)\WinSW-x64.exe" Name="PunchdGateway.exe" KeyPath="yes" />
           <ServiceInstall Id="PunchdGatewayService"
@@ -66,6 +72,8 @@
       <ComponentRef Id="TideSSP_DLL" />
       <ComponentRef Id="TideSubAuth_DLL" />
       <ComponentRef Id="PunchdGateway_EXE" />
+      <ComponentRef Id="VCRuntime_DLL" />
+      <ComponentRef Id="MSVCP_DLL" />
       <ComponentRef Id="WinSW_EXE" />
       <ComponentRef Id="PunchdGateway_Config" />
     </Feature>
