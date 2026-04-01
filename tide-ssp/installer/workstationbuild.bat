@@ -40,6 +40,11 @@ if %errorlevel% neq 0 (popd & goto :fail)
 popd
 
 echo.
+echo === Step 2b: Copy VC++ runtime DLLs ===
+copy /Y "%SystemRoot%\System32\vcruntime140.dll" "%PUNCHD%\target\release\"
+copy /Y "%SystemRoot%\System32\msvcp140.dll" "%PUNCHD%\target\release\"
+
+echo.
 echo === Step 3: Build combined MSI ===
 if not exist "%OUTDIR%" mkdir "%OUTDIR%"
 
