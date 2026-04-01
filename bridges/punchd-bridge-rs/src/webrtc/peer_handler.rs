@@ -38,6 +38,7 @@ use webrtc::peer_connection::RTCPeerConnection;
 
 use crate::auth::tidecloak::TidecloakAuth;
 use crate::config::BackendEntry;
+use crate::vpn::vpn_handler::{VpnSession, VpnState};
 
 const MAX_PEERS: usize = 200;
 #[allow(dead_code)]
@@ -47,6 +48,7 @@ const BULK_MAX_BUFFER: usize = 4_194_304; // 4MB for bulk channel
 const COALESCE_TARGET: usize = 65_536; // 64KB target coalesced message size
 const BINARY_WS_MAGIC: u8 = 0x02;
 const TCP_TUNNEL_MAGIC: u8 = 0x03;
+const VPN_TUNNEL_MAGIC: u8 = 0x04;
 const MAX_TCP_PER_DC: usize = 5;
 const MAX_WS_PER_DC: usize = 50;
 const MAX_SINGLE_MSG: usize = 32_000; // 32KB
@@ -57,7 +59,7 @@ const MAX_BUFFERED_RESPONSE: usize = 10 * 1024 * 1024; // 10MB safety limit
 
 const ALLOWED_METHODS: &[&str] = &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
 
-const GATEWAY_FEATURES: &[&str] = &["bulk-channel", "binary-ws", "tcp-tunnel"];
+const GATEWAY_FEATURES: &[&str] = &["bulk-channel", "binary-ws", "tcp-tunnel", "vpn-tunnel"];
 
 /// Hop-by-hop headers to strip from proxied responses.
 const HOP_BY_HOP: &[&str] = &[
@@ -83,6 +85,7 @@ pub struct PeerHandlerOptions {
     pub backends: Vec<BackendEntry>,
     pub auth: Option<Arc<TidecloakAuth>>,
     pub tc_client_id: Option<String>,
+    pub vpn_state: Option<Arc<Mutex<VpnState>>>,
 }
 
 /// Per-WebSocket tunnel state.
@@ -103,6 +106,10 @@ struct PeerState {
     capabilities: HashSet<String>,
     control_dc: Option<Arc<RTCDataChannel>>,
     bulk_dc: Option<Arc<RTCDataChannel>>,
+    vpn_session: Option<VpnSession>,
+    /// Receives VPN packets from the TUN device destined for this peer.
+    #[allow(dead_code)]
+    vpn_route_rx: Option<mpsc::UnboundedReceiver<Vec<u8>>>,
 }
 
 impl PeerState {
@@ -113,6 +120,8 @@ impl PeerState {
             capabilities: HashSet::new(),
             control_dc: None,
             bulk_dc: None,
+            vpn_session: None,
+            vpn_route_rx: None,
         }
     }
 }
@@ -254,6 +263,13 @@ impl PeerHandler {
                     let json_init = c.to_json().ok();
                     let candidate_str = json_init.as_ref().map(|j| j.candidate.clone()).unwrap_or_default();
                     let mid = json_init.as_ref().and_then(|j| j.sdp_mid.clone()).unwrap_or_else(|| "0".to_string());
+
+                    // Filter out VPN TUN subnet candidates (10.66.0.x) to prevent routing loops
+                    if candidate_str.contains(" 10.66.0.") {
+                        tracing::debug!("[WebRTC] Skipping VPN subnet ICE candidate: {}", candidate_str);
+                        return;
+                    }
+
                     tracing::info!("[WebRTC] Local ICE candidate: {} (mid={})", candidate_str, mid);
                     let _ = send_sig.send(json!({
                         "type": "candidate",
@@ -551,6 +567,69 @@ async fn setup_control_channel(
                         tracing::info!("[WebRTC] TCP tunnel closed: {}", id);
                     }
                 }
+                "vpn_open" => {
+                    let vpn_id = parsed["id"].as_str().unwrap_or("").to_string();
+                    if let Some(ref vpn_state) = opts.vpn_state {
+                        match crate::vpn::vpn_handler::handle_vpn_open(vpn_state.clone(), vpn_id.clone()).await {
+                            Ok(mut session) => {
+                                let vs = vpn_state.lock().await;
+                                let response = crate::vpn::vpn_handler::vpn_opened_response(
+                                    &session,
+                                    vs.pool.gateway_ip,
+                                    vs.pool.netmask,
+                                );
+                                drop(vs);
+
+                                // Spawn task: forward TUN -> bulk channel for this peer
+                                if let Some(mut route_rx) = session.route_rx.take() {
+                                    let state_fwd = state.clone();
+                                    tokio::spawn(async move {
+                                        while let Some(frame) = route_rx.recv().await {
+                                            send_bulk(&state_fwd, frame).await;
+                                        }
+                                        tracing::info!("[VPN] Route forwarding task ended");
+                                    });
+                                }
+
+                                let mut s = state.lock().await;
+                                s.vpn_session = Some(session);
+                                drop(s);
+
+                                send_control(&state, response).await;
+                            }
+                            Err(e) => {
+                                send_control(
+                                    &state,
+                                    serde_json::json!({
+                                        "type": "vpn_error",
+                                        "id": vpn_id,
+                                        "message": e,
+                                    }),
+                                )
+                                .await;
+                            }
+                        }
+                    } else {
+                        send_control(
+                            &state,
+                            serde_json::json!({
+                                "type": "vpn_error",
+                                "id": vpn_id,
+                                "message": "VPN not available on this gateway",
+                            }),
+                        )
+                        .await;
+                    }
+                }
+                "vpn_close" => {
+                    let mut s = state.lock().await;
+                    if let Some(mut vpn) = s.vpn_session.take() {
+                        if let Some(shutdown) = vpn.shutdown.take() {
+                            let _ = shutdown.send(());
+                        }
+                        tracing::info!("[WebRTC] VPN session closed: {}", vpn.id);
+                    }
+                }
                 "capabilities" => {
                     let client_features: Vec<String> = parsed["features"]
                         .as_array()
@@ -597,6 +676,12 @@ async fn setup_control_channel(
             for (_, tunnel) in s.tcp_connections.drain() {
                 let _ = tunnel.shutdown.send(());
             }
+            // Close VPN session
+            if let Some(mut vpn) = s.vpn_session.take() {
+                if let Some(shutdown) = vpn.shutdown.take() {
+                    let _ = shutdown.send(());
+                }
+            }
             s.control_dc = None;
         })
     }));
@@ -640,6 +725,19 @@ async fn setup_bulk_channel(
                 let s = state.lock().await;
                 if let Some(tunnel) = s.tcp_connections.get(&tunnel_id) {
                     let _ = tunnel.tx.send(payload);
+                }
+                return;
+            }
+
+            // VPN tunnel fast-path: [0x04][raw IP packet]
+            if buf[0] == VPN_TUNNEL_MAGIC && buf.len() > 1 {
+                let payload = buf[1..].to_vec();
+                tracing::debug!("[VPN] Bulk received {} bytes from client", payload.len());
+                let s = state.lock().await;
+                if let Some(ref vpn) = s.vpn_session {
+                    let _ = vpn.tun_tx.send(payload);
+                } else {
+                    tracing::warn!("[VPN] Received VPN packet but no session active");
                 }
                 return;
             }
