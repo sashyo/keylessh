@@ -6,6 +6,7 @@ This Windows driver will disable your Windows machine's RDP password authenticat
 
 ## How it works
 
+### Distributed (proxiing through a Punchd Gateway)
 
 ```
 Browser -(RDP-over-WebRTC)-> Punchd Gateway -(RDP-over-TCP)-> Windows Machine
@@ -18,6 +19,21 @@ Browser -(RDP-over-WebRTC)-> Punchd Gateway -(RDP-over-TCP)-> Windows Machine
 4. The TideSSP driver on that desktops verifies the JWT's Ed25519 signature against the public key from the TideCloak config
 5. TideSSP extracts the username from the JWT and creates a Windows logon session
 6. The RDP desktop session starts without requiring a password
+
+### Direct (Punchd workstation)
+
+```
+Browser -(RDP-over-WebRTC)-> Windows Machine
+```
+
+1. User initiate a request to RDP from KeyleSSH to an internal RDP endpoint (desktop)
+2. User's browser (KeyleSSH client) establishes a WebRTP connection with that desktop
+3. Desktop verifies KeyleSSH JWT access token and verifies its Ed25519 signature against the public key from the TideCloak config
+4. TideSSP extracts the username from the JWT and creates a Windows logon session
+5. The RDP desktop session starts without requiring a password
+
+
+# Distributed deployment
 
 ## Configuration
 
@@ -99,6 +115,74 @@ To uninstall the driver from the Windows machine, you can use the standard add/r
 
 ```powershell
 $app=Get-ItemProperty "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*","HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*" | Where-Object { $_.DisplayName -eq "TideSSP" } | Select-Object -First 1; if(-not $app){throw "TideSSP is not installed."}; $productCode=if($app.PSChildName -match '^\{[0-9A-Fa-f-]+\}$'){$app.PSChildName}else{([regex]::Match($app.UninstallString,'\{[0-9A-Fa-f-]+\}')).Value}; if(-not $productCode){throw "Could not determine TideSSP product code."}; $p=Start-Process msiexec.exe -ArgumentList "/x $productCode /qn /norestart" -Wait -PassThru; if($p.ExitCode -eq 3010){Write-Host "TideSSP was uninstalled. A reboot is required."}elseif($p.ExitCode -eq 0){Write-Host "TideSSP was uninstalled successfully."}else{throw "Uninstall failed with exit code $($p.ExitCode)."}
+```
+
+# Direct deployment
+
+## Configuration
+
+The TideCloak configuration (`tidecloak.json`) and the KeyleSSH configuration (`gateway.toml`) reside in the Windows service folder (at `"%ProgramFiles%\PunchdGateway"`).
+
+The permanent Ed25519 public key is extracted from `jwk.keys[0].x` in the JSON at startup. If the realm's signing key is ever changed, update the file and reboot.
+
+## Build (using specialized builder docker image)
+
+This describes the process of building the PunchdEndpoint windows service installer from source by first creating a specialized docker image with all the prerequisites, and then using that docker image to build the driver.
+
+Follow the exact same instructions to build the **specialized builder docker** image for the _Distributed deployement_ above.
+
+> [!INFORMATION]
+> If you already built the **specialized builder docker** image for the _Distributed deployement_ earlier, you can use the exact same image. You don't need to build it again.
+
+### Build the PunchdEndpoint installer in the docker
+
+While still in the `keylessh\tide-ssp` directory, run the following:
+
+```bash
+docker run --rm -v "${PWD}\..\:C:\src" --entrypoint cmd tidessp-builder /S /C C:\workstationbuild.cmd
+```
+
+You now have the driver in `./out/PunchdEndpoint.msi`
+
+## Installation / Deployment
+
+To use this driver on any win10+/Server2022+ machine, you need to copy 3 files:
+1. The `PunchdEndpoint.msi` driver
+2. The `tidecloak.json` adapter
+3. A `gateway.toml` config file
+
+For this example, we'll assume you copied those to `c:\tide`. After copying those 3 files, you have 2 options on how to install it: GUI-assisted or CLI. Choose the most appropriate one for you.
+
+### Option 1: Guided installation
+
+Double click (or run `start c:\tide\PunchdEndpoint.msi`) the driver installer and follow prompt.
+
+### Option 2: CLI installation
+
+For quick, no-UI installation (especially on servers without UI), follow these steps using elevated `PowerShell` console:
+
+> [!CAUTION]
+> This is a quiet installation that will immediately restart your machine upon successful installation.
+
+```powershell
+cd c:\tide
+msiexec /i "PunchdEndpoint.msi" /qn TIDE_CONFIG_FILE="C:\tide\tidecloak.json" GATEWAY_CONFIG_FILE="C:\tide\gateway.toml" /L*V "tideEP.log"
+```
+
+A successful installation will copy `TideSSP.dll` and `tidecloak.json` (+few others) to your `System32` folder, and will create a new folder `"%ProgramFiles%\PunchdGateway"`, populate it with binaries and register a windows service named `PunchdGateway` to run automatically when the machine loads.
+
+### Changing the TideCloak adapter
+
+If you need to change the adaptor settings, simple update the `%SystemRoot%\System32\tidecloak.json` file, the `"%ProgramFiles%\PunchdGateway\gateway.toml"`, the `"%ProgramFiles%\PunchdGateway\tidecloak.json"` and restart your Windows machine.
+
+
+
+### Uninstalling the Punchd Endpoint service
+
+To uninstall the driver from the Windows machine, you can use the standard add/remove option in your desktop, or use this direct CLI method:
+
+```powershell
+$app=Get-ItemProperty "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*","HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*" | Where-Object { $_.DisplayName -eq "PunchdEndpoint" } | Select-Object -First 1; if(-not $app){throw "PunchdEndpoint is not installed."}; $productCode=if($app.PSChildName -match '^\{[0-9A-Fa-f-]+\}$'){$app.PSChildName}else{([regex]::Match($app.UninstallString,'\{[0-9A-Fa-f-]+\}')).Value}; if(-not $productCode){throw "Could not determine PunchdEndpoint product code."}; $p=Start-Process msiexec.exe -ArgumentList "/x $productCode /qn /norestart" -Wait -PassThru; if($p.ExitCode -eq 3010){Write-Host "PunchdEndpoint was uninstalled. A reboot is required."}elseif($p.ExitCode -eq 0){Write-Host "PunchdEndpoint was uninstalled successfully."}else{throw "Uninstall failed with exit code $($p.ExitCode)."}
 ```
 
 
