@@ -66,8 +66,6 @@ export interface Registry {
   updateClientConnection(id: string, connectionType: ConnectionType): void;
   getStats(): { gateways: number; clients: number };
   getDetailedStats(): DetailedStats;
-  forceDisconnectClient(clientId: string): boolean;
-  drainGateway(gatewayId: string): boolean;
   getInfoByWs(ws: WebSocket): { type: "gateway" | "client"; id: string } | undefined;
 }
 
@@ -245,27 +243,6 @@ export function createRegistry(): Registry {
           registeredAt: c.registeredAt,
         })),
       };
-    },
-
-    forceDisconnectClient(clientId) {
-      const client = clients.get(clientId);
-      if (!client) return false;
-      client.ws.close(1000, "Disconnected by admin");
-      return true;
-    },
-
-    drainGateway(gatewayId) {
-      const gateway = gateways.get(gatewayId);
-      if (!gateway) return false;
-      for (const clientId of gateway.pairedClients) {
-        const client = clients.get(clientId);
-        if (client) {
-          client.pairedGatewayId = undefined;
-        }
-      }
-      gateway.pairedClients.clear();
-      gateway.ws.close(1000, "Drained by admin");
-      return true;
     },
 
     getInfoByWs(ws) {

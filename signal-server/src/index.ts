@@ -1,9 +1,7 @@
 import { createServer as createHttpServer, request as httpRequest } from "http";
 import { createServer as createHttpsServer, request as httpsRequest } from "https";
 import { WebSocketServer, WebSocket } from "ws";
-import { jwtVerify, createLocalJWKSet, createRemoteJWKSet, JWTPayload } from "jose";
-import { readFileSync, existsSync } from "fs";
-import { join } from "path";
+import { readFileSync } from "fs";
 import { timingSafeEqual, createHmac, randomBytes } from "crypto";
 import { createRegistry, type ConnectionType, type GatewayMetadata } from "./signaling/registry.js";
 import { pairClient, pairClientWithGateway, forwardCandidate, forwardSdp } from "./signaling/pairing.js";
@@ -17,8 +15,6 @@ import { createHttpRelay, handleHttpResponse, handleHttpResponseStart, handleHtt
  *
  * Environment variables:
  * - PORT: Port to listen on (default: 9090)
- * - client_adapter: JSON string of tidecloak.json config (highest priority)
- * - TIDECLOAK_CONFIG_B64: Base64-encoded config
  * - API_SECRET: Shared secret for gateway registration authentication
  * - ICE_SERVERS: Comma-separated STUN server URLs (e.g. "stun:relay.example.com:3478")
  * - TURN_SERVER: TURN server URL for WebRTC relay fallback (e.g. "turn:relay.example.com:3478")
@@ -28,8 +24,6 @@ import { createHttpRelay, handleHttpResponse, handleHttpResponseStart, handleHtt
  */
 
 const PORT = parseInt(process.env.PORT || "9090");
-const CLIENT_ADAPTER = process.env.client_adapter;
-const CONFIG_B64 = process.env.TIDECLOAK_CONFIG_B64;
 const API_SECRET = process.env.API_SECRET || "";
 const ICE_SERVERS = process.env.ICE_SERVERS ? process.env.ICE_SERVERS.split(",") : [];
 const TURN_SERVER = process.env.TURN_SERVER || "";
@@ -44,124 +38,22 @@ const TRUSTED_PROXIES = process.env.TRUSTED_PROXIES
   ? new Set(process.env.TRUSTED_PROXIES.split(",").map(p => p.trim()))
   : null; // null = never trust X-Forwarded-For
 
-// ── TideCloak config + JWKS ──────────────────────────────────────
-
-function resolveConfigPath(): string | null {
-  const candidates = [
-    join(process.cwd(), "data", "tidecloak.json"),
-    join(process.cwd(), "..", "data", "tidecloak.json"),
-  ];
-  for (const p of candidates) {
-    if (existsSync(p)) return p;
-  }
-  return null;
-}
-
-interface TidecloakConfig {
-  realm: string;
-  "auth-server-url": string;
-  resource: string;
-  jwk: {
-    keys: Array<{
-      kid: string;
-      kty: string;
-      alg: string;
-      use: string;
-      crv: string;
-      x: string;
-    }>;
-  };
-}
-
-let tcConfig: TidecloakConfig | null = null;
-let JWKS: ReturnType<typeof createLocalJWKSet> | null = null;
-let remoteJWKS: ReturnType<typeof createRemoteJWKSet> | null = null;
-
-function loadConfig(): boolean {
-  try {
-    let configData: string;
-
-    if (CLIENT_ADAPTER) {
-      configData = CLIENT_ADAPTER;
-      console.log("[Signal] Loading config from client_adapter env variable");
-    } else if (CONFIG_B64) {
-      configData = Buffer.from(CONFIG_B64, "base64").toString("utf-8");
-      console.log("[Signal] Loading config from TIDECLOAK_CONFIG_B64");
-    } else {
-      const configPath = resolveConfigPath();
-      if (!configPath) {
-        console.error("[Signal] No tidecloak.json found in data directory");
-        return false;
-      }
-      configData = readFileSync(configPath, "utf-8");
-      console.log(`[Signal] Loading config from ${configPath}`);
-    }
-
-    tcConfig = JSON.parse(configData) as TidecloakConfig;
-
-    if (!tcConfig.jwk?.keys?.length) {
-      console.error("[Signal] No JWKS keys found in config");
-      return false;
-    }
-
-    JWKS = createLocalJWKSet(tcConfig.jwk);
-    const baseUrl = tcConfig["auth-server-url"].replace(/\/$/, "");
-    const jwksUrl = new URL(`${baseUrl}/realms/${tcConfig.realm}/protocol/openid-connect/certs`);
-    remoteJWKS = createRemoteJWKSet(jwksUrl);
-    console.log("[Signal] JWKS loaded successfully");
-    console.log(`[Signal] Remote JWKS fallback: ${jwksUrl}`);
-    return true;
-  } catch (err) {
-    console.error("[Signal] Failed to load config:", err);
-    return false;
-  }
-}
-
-async function verifyToken(token: string): Promise<JWTPayload | null> {
-  if (!JWKS || !tcConfig) return null;
-
-  try {
-    const issuer = `${tcConfig["auth-server-url"].replace(/\/+$/, "")}/realms/${tcConfig.realm}`;
-
-    // Try local JWKS first, fall back to remote if key not found
-    let payload: JWTPayload;
-    try {
-      ({ payload } = await jwtVerify(token, JWKS, { issuer }));
-    } catch (localErr: any) {
-      if (localErr?.code === "ERR_JWKS_NO_MATCHING_KEY" && remoteJWKS) {
-        ({ payload } = await jwtVerify(token, remoteJWKS, { issuer }));
-      } else {
-        throw localErr;
-      }
-    }
-
-    if (payload.azp !== tcConfig.resource) {
-      console.log(`[Signal] AZP mismatch: expected ${tcConfig.resource}, got ${payload.azp}`);
-      return null;
-    }
-
-    return payload;
-  } catch (err) {
-    console.log("[Signal] JWT verification failed:", err);
-    return null;
-  }
-}
-
-// Load config on startup
-if (!loadConfig()) {
-  console.error("[Signal] Failed to load TideCloak config. Exiting.");
-  process.exit(1);
-}
-
 // ── TideCloak Reverse Proxy (cookie jar) ─────────────────────────
 // Proxies /realms/* and /resources/* to TideCloak, storing TC cookies
 // server-side so the Tide auth flow stays on the signal server's origin.
-// This prevents cookie loss when ork1.tideprotocol.com redirects back.
+// Gateways handle actual JWT verification — the signal server just proxies.
 
-const tcAuthServerUrl = tcConfig!["auth-server-url"].replace(/\/$/, "");
-const tcProxyUrl = new URL(tcAuthServerUrl);
-const tcProxyIsHttps = tcProxyUrl.protocol === "https:";
+const tcAuthServerUrl = (process.env.TIDECLOAK_URL || "").replace(/\/$/, "");
+const tcProxyEnabled = !!tcAuthServerUrl;
+const tcProxyUrl = tcProxyEnabled ? new URL(tcAuthServerUrl) : null!;
+const tcProxyIsHttps = tcProxyEnabled && tcProxyUrl.protocol === "https:";
 const makeTcRequest = tcProxyIsHttps ? httpsRequest : httpRequest;
+
+if (tcProxyEnabled) {
+  console.log(`[Signal] TideCloak proxy: ${tcAuthServerUrl}`);
+} else {
+  console.log("[Signal] TideCloak proxy disabled (no TIDECLOAK_URL set)");
+}
 
 interface TcSession { cookies: Map<string, string>; lastAccess: number; }
 const tcCookieJar = new Map<string, TcSession>();
@@ -242,16 +134,14 @@ function proxyTideCloak(
 ): void {
   const tcSess = getTcSessionId(req.headers.cookie);
 
-  // Build proxy headers — strip forwarding so TC sees plain request
   const proxyHeaders = { ...req.headers } as Record<string, string | string[] | undefined>;
   proxyHeaders.host = tcProxyUrl.host;
   delete proxyHeaders["x-forwarded-proto"];
   delete proxyHeaders["x-forwarded-host"];
   delete proxyHeaders["x-forwarded-for"];
   delete proxyHeaders["x-forwarded-port"];
-  delete proxyHeaders["accept-encoding"]; // so we can rewrite body
+  delete proxyHeaders["accept-encoding"];
 
-  // Inject stored TC cookies
   const jarCookies = getTcCookieHeader(tcSess.id);
   if (jarCookies) {
     const existing = (proxyHeaders.cookie as string) || "";
@@ -265,12 +155,11 @@ function proxyTideCloak(
       path: req.url,
       method: req.method,
       headers: proxyHeaders,
-      rejectUnauthorized: false, // allow self-signed in dev
+      rejectUnauthorized: false,
     },
-    (tcRes) => {
+    (tcRes: import("http").IncomingMessage) => {
       const headers = { ...tcRes.headers } as Record<string, string | string[] | undefined>;
 
-      // Rewrite Location header (plain + URL-encoded versions)
       if (headers.location && typeof headers.location === "string") {
         headers.location = headers.location
           .replaceAll(tcProxyUrl.origin, publicOrigin)
@@ -284,10 +173,8 @@ function proxyTideCloak(
       delete headers["content-security-policy"];
       delete headers["content-security-policy-report-only"];
 
-      // Store TC cookies server-side
       storeTcCookies(tcSess.id, headers["set-cookie"] as string | string[] | undefined);
 
-      // Replace TC's Set-Cookie with our tc_sess cookie
       const tcSessCookie = `tc_sess=${tcSess.id}; HttpOnly; Path=/; Max-Age=${TC_SESS_MAX_AGE}; SameSite=None; Secure`;
       if (headers["set-cookie"] || tcSess.isNew) {
         headers["set-cookie"] = [tcSessCookie];
@@ -304,7 +191,6 @@ function proxyTideCloak(
         tcRes.on("end", () => {
           if (res.headersSent) return;
           let body = Buffer.concat(chunks).toString("utf-8");
-          // Rewrite all TideCloak URLs to signal server origin
           body = body.replaceAll(tcProxyUrl.origin, publicOrigin);
           body = body.replaceAll(
             tcProxyUrl.origin.replaceAll("/", "\\/"),
@@ -314,7 +200,6 @@ function proxyTideCloak(
             encodeURIComponent(tcProxyUrl.origin),
             encodeURIComponent(publicOrigin),
           );
-          // Also rewrite auth-server-url if different from origin
           if (tcAuthServerUrl !== tcProxyUrl.origin) {
             body = body.replaceAll(tcAuthServerUrl, publicOrigin);
             body = body.replaceAll(
@@ -337,7 +222,7 @@ function proxyTideCloak(
     },
   );
 
-  tcReq.on("error", (err) => {
+  tcReq.on("error", (err: Error) => {
     console.error("[Signal] TC proxy error:", err.message);
     if (!res.headersSent) {
       res.writeHead(502, { "Content-Type": "application/json" });
@@ -348,7 +233,7 @@ function proxyTideCloak(
   req.pipe(tcReq);
 }
 
-console.log(`[Signal] TideCloak proxy: ${tcAuthServerUrl}`);
+// ── Cookie helper ────────────────────────────────────────────────
 
 function parseCookie(header: string | undefined, name: string): string | null {
   if (!header) return null;
@@ -527,17 +412,10 @@ const requestHandler = async (req: import("http").IncomingMessage, res: import("
     const cookies: string[] = [
       `gateway_relay=${encodeURIComponent(gatewayId)}; Path=/; HttpOnly; SameSite=None; Secure`,
     ];
-    // If a valid KeyleSSH JWT is provided, set it as gateway_access cookie
-    // so the gateway accepts the user without triggering its own login flow.
+    // Pass token through as cookies — gateway handles verification
     if (token) {
-      const payload = await verifyToken(token);
-      if (payload) {
-        // Token is valid — set as gateway_access (HttpOnly, forwarded by relay)
-        cookies.push(`gateway_access=${token}; Path=/; HttpOnly; SameSite=None; Secure`);
-        // Also set as keylessh_token (readable by JS for browser-side recording)
-        cookies.push(`keylessh_token=${token}; Path=/; SameSite=None; Secure`);
-
-      }
+      cookies.push(`gateway_access=${token}; Path=/; HttpOnly; SameSite=None; Secure`);
+      cookies.push(`keylessh_token=${token}; Path=/; SameSite=None; Secure`);
     }
     const redirect = params.get("redirect");
     const location = redirect
@@ -564,9 +442,8 @@ const requestHandler = async (req: import("http").IncomingMessage, res: import("
   }
 
   // ── TideCloak reverse proxy (/realms/*, /resources/*) ─────────
-  // If a registered gateway serves this realm, relay to it instead of
-  // proxying to the signal server's own TideCloak instance.
-  if (path.startsWith("/realms/") || path.startsWith("/resources/")) {
+  // If a gateway serves this realm, relay to it; otherwise proxy to TideCloak directly.
+  if (tcProxyEnabled && (path.startsWith("/realms/") || path.startsWith("/resources/"))) {
     const realmMatch = path.match(/\/(?:realms|resources)\/([^/]+)\//);
     if (realmMatch) {
       const realmGateway = registry.getGatewayByRealm(realmMatch[1]);
@@ -714,7 +591,7 @@ signalWss.on("connection", (ws: WebSocket, req) => {
         }
         break;
       case "admin_action":
-        handleAdminAction(ws, msg);
+        safeSend(ws, { type: "error", message: "Admin actions not supported" });
         break;
       default:
         safeSend(ws, { type: "error", message: `Unknown message type: ${msg.type}` });
@@ -813,38 +690,6 @@ function handleCandidate(ws: WebSocket, msg: SignalMessage): void {
   forwardCandidate(registry, fromId, msg.targetId, msg.candidate);
 }
 
-async function handleAdminAction(ws: WebSocket, msg: SignalMessage): Promise<void> {
-  // Verify admin JWT
-  if (msg.token) {
-    const payload = await verifyToken(msg.token);
-    if (!payload) {
-      safeSend(ws, { type: "error", message: "Invalid or insufficient permissions" });
-      return;
-    }
-  } else {
-    safeSend(ws, { type: "error", message: "Authentication required" });
-    return;
-  }
-
-  if (!msg.action || !msg.targetId) {
-    safeSend(ws, { type: "error", message: "Missing action or targetId" });
-    return;
-  }
-
-  let success = false;
-  if (msg.action === "disconnect_client") {
-    success = registry.forceDisconnectClient(msg.targetId);
-  } else if (msg.action === "drain_gateway") {
-    success = registry.drainGateway(msg.targetId);
-  }
-
-  safeSend(ws, {
-    type: "admin_result",
-    action: msg.action,
-    targetId: msg.targetId,
-    success,
-  });
-}
 
 function safeSend(ws: WebSocket, data: unknown): void {
   try {

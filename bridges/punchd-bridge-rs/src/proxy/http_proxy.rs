@@ -1056,7 +1056,7 @@ async fn handle_request(
         return make_response(StatusCode::NOT_FOUND, resp_headers, "Not found");
     }
 
-    // RDP client page (embedded)
+    // RDP client page (embedded) — legacy fallback when not using keylessh-hosted page
     if effective_path == "/rdp" {
         resp_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"));
         return make_response(StatusCode::OK, resp_headers, ASSET_RDP_HTML);

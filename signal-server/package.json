@@ -10,7 +10,6 @@
     "dev": "tsx watch src/index.ts"
   },
   "dependencies": {
-    "jose": "^6.1.3",
     "ws": "^8.18.0"
   },
   "devDependencies": {
