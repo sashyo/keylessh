@@ -3879,6 +3879,9 @@ export async function registerRoutes(
             terminalWidth: r.terminalWidth,
             terminalHeight: r.terminalHeight,
             fileSize: r.fileSize,
+            recordingType: r.recordingType || "ssh",
+            backendName: r.backendName || null,
+            gatewayId: r.gatewayId || null,
             // Don't include full data in list response
           })),
           totalCount,
@@ -3918,7 +3921,10 @@ export async function registerRoutes(
           terminalWidth: recording.terminalWidth,
           terminalHeight: recording.terminalHeight,
           fileSize: recording.fileSize,
-          data: recording.data, // Full asciicast data for playback
+          recordingType: recording.recordingType || "ssh",
+          backendName: recording.backendName || null,
+          gatewayId: recording.gatewayId || null,
+          data: recording.data, // Full asciicast/RDP PDU data for playback
         });
       } catch (error) {
         log(`Failed to get recording: ${error}`);
