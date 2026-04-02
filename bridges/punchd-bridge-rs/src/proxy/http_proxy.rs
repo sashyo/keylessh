@@ -822,14 +822,33 @@ pub fn reload_state(
 
 async fn handle_rdcleanpath_ws(
     State(shared): State<SharedState>,
+    headers: HeaderMap,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
     ws: WebSocketUpgrade,
 ) -> Response {
     let state = shared.load_full();
+    // Recording token: prefer query param, then keylessh_token cookie (original myclient token preserved by signal server)
+    let recording_token = params.get("recording_token").cloned()
+        .or_else(|| {
+            headers.get(header::COOKIE)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|cookies| {
+                    cookies.split(';')
+                        .find_map(|c| {
+                            let c = c.trim();
+                            if c.starts_with("keylessh_token=") {
+                                Some(c["keylessh_token=".len()..].to_string())
+                            } else {
+                                None
+                            }
+                        })
+                })
+        });
     ws.protocols(["rdcleanpath"])
-        .on_upgrade(move |socket| handle_rdcleanpath_socket(socket, state))
+        .on_upgrade(move |socket| handle_rdcleanpath_socket(socket, state, recording_token))
 }
 
-async fn handle_rdcleanpath_socket(socket: WebSocket, state: Arc<ProxyState>) {
+async fn handle_rdcleanpath_socket(socket: WebSocket, state: Arc<ProxyState>, recording_token: Option<String>) {
     use futures_util::{SinkExt, StreamExt};
 
     tracing::info!("[RDCleanPath-WS] Handler started");
@@ -868,7 +887,8 @@ async fn handle_rdcleanpath_socket(socket: WebSocket, state: Arc<ProxyState>) {
             gateway_id: state.gateway_id.clone(),
             tc_client_id: Some(state.role_client_id.clone()),
             server_url: state.config.server_url.clone(),
-            recording: None, // Created in run_session when server_url is configured
+            recording: None,
+            recording_token,
         },
     );
 
@@ -1055,6 +1075,22 @@ async fn handle_request(
     // Auth: callback
     if effective_path == "/auth/callback" {
         return handle_auth_callback(&state, &req_headers, &query_string, &host, resp_headers).await;
+    }
+
+    // Auth: silent callback (for iframe PKCE — posts code back to parent)
+    if effective_path == "/auth/silent-callback" {
+        resp_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html"));
+        let html = format!(
+            "<html><body><script>\
+            var params = new URLSearchParams(location.search);\
+            var code = params.get('code');\
+            var error = params.get('error');\
+            if (window.parent !== window) {{\
+                window.parent.postMessage({{type:'silent-auth-callback',code:code,error:error}},'*');\
+            }}\
+            </script></body></html>"
+        );
+        return make_response(StatusCode::OK, resp_headers, &html);
     }
 
     // Auth: session-token
@@ -1650,6 +1686,13 @@ async fn handle_webrtc_config(
         }),
         "targetGatewayId": state.config.gateway_id,
     });
+
+    // Include keylessh client ID and auth info for PKCE recording token
+    if let Some(ref tc_client_id) = state.config.tc_client_id {
+        config["keylesshClientId"] = serde_json::json!(tc_client_id);
+    }
+    config["authServerUrl"] = serde_json::json!(state.tc_config.auth_server_url);
+    config["realm"] = serde_json::json!(state.tc_config.realm);
 
     // Include backendAuth map for eddsa backends (so RDP client auto-connects)
     {

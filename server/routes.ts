@@ -180,7 +180,6 @@ export async function registerRoutes(
       ? path.resolve(_currentDir, "public", "tide_dpop_auth.html")
       : path.resolve(_currentDir, "..", "client", "public", "tide_dpop_auth.html");
     res.sendFile(filePath);
-   
   });
     
   // Health Check (unauthenticated, for load balancers and monitoring)
@@ -1506,7 +1505,9 @@ export async function registerRoutes(
         return config.stunServerUrl === ss.url || config.stunServerUrl === wsUrl;
       });
 
-      const toml = gatewayConfigStorage.toToml(config, matchingSignalServer);
+      // Include the keylessh app client ID so the bridge can do token exchange for recordings
+      const keylesshClientId = GetConfig().resource;
+      const toml = gatewayConfigStorage.toToml(config, matchingSignalServer, keylesshClientId);
       res.setHeader("Content-Type", "application/toml");
       res.setHeader("Content-Disposition", `attachment; filename="gateway.toml"`);
       res.send(toml);

@@ -2926,7 +2926,7 @@ export class GatewayConfigStorage {
   }
 
   /// Generate the TOML config string for a gateway (what the bridge would use)
-  toToml(config: GatewayConfig, signalServer?: SignalServer | null): string {
+  toToml(config: GatewayConfig, signalServer?: SignalServer | null, keylesshClientId?: string | null): string {
     // Merge: gateway config values take priority, fall back to signal server values
     const stunServerUrl = config.stunServerUrl || (signalServer?.url?.replace(/^http/, "ws")) || "";
     const apiSecret = config.apiSecret || (signalServer as any)?.apiSecret || "";
@@ -2959,6 +2959,7 @@ export class GatewayConfigStorage {
     lines.push(`# TideCloak`);
     if (config.tidecloakConfigB64) lines.push(`tidecloak_config_b64 = "${config.tidecloakConfigB64}"`);
     if (config.authServerPublicUrl) lines.push(`auth_server_public_url = "${config.authServerPublicUrl}"`);
+    if (keylesshClientId) lines.push(`keylessh_client_id = "${keylesshClientId}"`);
 
     if (config.serverUrl) {
       lines.push(``);

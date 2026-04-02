@@ -462,6 +462,117 @@
     }
   }
 
+  /**
+   * Get a keylessh app token via silent PKCE + SSO.
+   * Uses a hidden iframe to authenticate with the keylessh client (myclient).
+   * TideCloak SSO means no login prompt — returns instantly.
+   */
+  async function getRecordingToken() {
+    if (!config || !config.keylesshClientId || !config.authServerUrl || !config.realm) {
+      console.log("[RDP] No keylessh client config — recording without app token");
+      return null;
+    }
+
+    try {
+      var clientId = config.keylesshClientId;
+      var authUrl = config.authServerUrl.replace(/\/+$/, "");
+      var realm = config.realm;
+      var authEndpoint = authUrl + "/realms/" + realm + "/protocol/openid-connect/auth";
+      var tokenEndpoint = authUrl + "/realms/" + realm + "/protocol/openid-connect/token";
+      var redirectUri = location.origin + "/auth/silent-callback";
+
+      // PKCE
+      var verifier = generateCodeVerifier();
+      var challenge = await generateCodeChallenge(verifier);
+
+      var params = new URLSearchParams({
+        client_id: clientId,
+        redirect_uri: redirectUri,
+        response_type: "code",
+        scope: "openid",
+        prompt: "none",
+        code_challenge: challenge,
+        code_challenge_method: "S256",
+      });
+
+      // Silent auth via hidden iframe
+      var code = await new Promise(function (resolve, reject) {
+        var iframe = document.createElement("iframe");
+        iframe.style.display = "none";
+        iframe.src = authEndpoint + "?" + params.toString();
+
+        var timeout = setTimeout(function () {
+          cleanup();
+          reject(new Error("Silent auth timeout"));
+        }, 10000);
+
+        function cleanup() {
+          clearTimeout(timeout);
+          clearInterval(poll);
+          window.removeEventListener("message", onMsg);
+          if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
+        }
+
+        function onMsg(e) {
+          if (e.data && e.data.type === "silent-auth-callback") {
+            cleanup();
+            e.data.code ? resolve(e.data.code) : reject(new Error(e.data.error || "No code"));
+          }
+        }
+        window.addEventListener("message", onMsg);
+
+        // Poll iframe location for same-origin redirect
+        var poll = setInterval(function () {
+          try {
+            var loc = iframe.contentWindow.location;
+            if (loc.pathname === "/auth/silent-callback") {
+              cleanup();
+              var p = new URLSearchParams(loc.search);
+              p.get("code") ? resolve(p.get("code")) : reject(new Error("No code"));
+            }
+          } catch (e) { /* cross-origin, keep polling */ }
+        }, 100);
+
+        document.body.appendChild(iframe);
+      });
+
+      // Exchange code for token
+      var res = await fetch(tokenEndpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "authorization_code",
+          client_id: clientId,
+          code: code,
+          redirect_uri: redirectUri,
+          code_verifier: verifier,
+        }),
+      });
+
+      if (res.ok) {
+        var data = await res.json();
+        console.log("[RDP] Recording token obtained via PKCE for " + clientId);
+        return data.access_token;
+      }
+      console.warn("[RDP] Token exchange failed:", res.status);
+      return null;
+    } catch (err) {
+      console.warn("[RDP] Silent PKCE auth failed:", err.message);
+      return null;
+    }
+  }
+
+  function generateCodeVerifier() {
+    var a = new Uint8Array(32);
+    crypto.getRandomValues(a);
+    return btoa(String.fromCharCode.apply(null, a)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/,"");
+  }
+
+  async function generateCodeChallenge(v) {
+    var h = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(v));
+    return btoa(String.fromCharCode.apply(null, new Uint8Array(h))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/,"");
+  }
+
   async function refreshSessionToken() {
     try {
       var res = await fetch(SESSION_TOKEN_ENDPOINT, {
@@ -840,7 +951,10 @@
 
       setStatus("connecting", "Connecting to " + backendName + "...");
 
-      var proxyAddress = "wss://" + location.host + "/ws/rdcleanpath";
+      // Get a keylessh app token via silent PKCE+SSO for recording
+      setStatus("connecting", "Obtaining recording token...");
+      var recordingToken = await getRecordingToken();
+      var proxyAddress = "wss://" + location.host + "/ws/rdcleanpath" + (recordingToken ? "?recording_token=" + encodeURIComponent(recordingToken) : "");
       console.log("[RDP] Proxy address:", proxyAddress);
       console.log("[RDP] Destination:", backendName);
 
