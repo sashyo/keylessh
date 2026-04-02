@@ -2252,10 +2252,10 @@ export class RecordingStorage {
     `).run(eventData, Buffer.byteLength(eventData, 'utf8'), id);
   }
 
-  // Append video data (WebM chunks) for RDP recordings
+  // Store video data (WebM) for RDP recordings
   async appendVideoData(id: string, chunk: Buffer): Promise<void> {
     sqlite.prepare(`
-      UPDATE recordings SET video_data = COALESCE(video_data, X'') || ?, file_size = file_size + ? WHERE id = ?
+      UPDATE recordings SET video_data = ?, file_size = ? WHERE id = ?
     `).run(chunk, chunk.length, id);
   }
 
