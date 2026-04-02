@@ -536,6 +536,18 @@ try {
   // Ignore migration errors
 }
 
+// Migration: Add video_data column for WebM video recordings
+try {
+  const recColumns = sqlite
+    .prepare(`PRAGMA table_info(recordings)`)
+    .all() as Array<{ name: string }>;
+  if (!recColumns.some((c) => c.name === "video_data")) {
+    sqlite.prepare(`ALTER TABLE recordings ADD COLUMN video_data BLOB`).run();
+  }
+} catch {
+  // Ignore migration errors
+}
+
 export class SQLiteStorage implements IStorage {
   async getUser(id: string): Promise<User | undefined> {
     const result = db.select().from(users).where(eq(users.id, id)).get();
@@ -2238,6 +2250,19 @@ export class RecordingStorage {
     sqlite.prepare(`
       UPDATE recordings SET data = data || ?, file_size = file_size + ? WHERE id = ?
     `).run(eventData, Buffer.byteLength(eventData, 'utf8'), id);
+  }
+
+  // Append video data (WebM chunks) for RDP recordings
+  async appendVideoData(id: string, chunk: Buffer): Promise<void> {
+    sqlite.prepare(`
+      UPDATE recordings SET video_data = COALESCE(video_data, X'') || ?, file_size = file_size + ? WHERE id = ?
+    `).run(chunk, chunk.length, id);
+  }
+
+  // Get video data for an RDP recording
+  async getVideoData(id: string): Promise<Buffer | null> {
+    const row = sqlite.prepare(`SELECT video_data FROM recordings WHERE id = ?`).get(id) as any;
+    return row?.video_data || null;
   }
 
   // Append text content for searchability

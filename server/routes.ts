@@ -1,4 +1,4 @@
-import type { Express } from "express";
+import express, { type Express } from "express";
 import type { Server } from "http";
 import { storage, approvalStorage, policyStorage, pendingPolicyStorage, templateStorage, subscriptionStorage, recordingStorage, fileOperationStorage, bridgeStorage, signalServerStorage, gatewayConfigStorage, type ApprovalType } from "./storage";
 import { subscriptionTiers, type SubscriptionTier } from "@shared/schema";
@@ -1061,6 +1061,75 @@ export async function registerRoutes(
       res.status(500).json({ error: "Failed to end recording" });
     }
   });
+
+  // POST /api/bridge/rdp-video-chunk - Upload a WebM video chunk for RDP recording
+  app.post("/api/bridge/rdp-video-chunk",
+    express.raw({ type: "application/octet-stream", limit: "10mb" }),
+    async (req, res) => {
+      setCorsHeaders(res);
+      try {
+        const authHeader = req.headers.authorization;
+        const token = authHeader?.startsWith("Bearer ") ? authHeader.substring(7) : null;
+        const recordingId = req.headers["x-recording-id"] as string;
+        if (!token || !recordingId) {
+          res.status(400).json({ error: "Missing token or recording ID" });
+          return;
+        }
+
+        const payload = await verifyTideCloakToken(token, []);
+        if (!payload) {
+          res.status(401).json({ error: "Invalid token" });
+          return;
+        }
+
+        const chunk = req.body as Buffer;
+        if (!chunk || chunk.length === 0) {
+          res.status(400).json({ error: "Empty body" });
+          return;
+        }
+
+        await recordingStorage.appendVideoData(recordingId, chunk);
+        res.json({ success: true, bytes: chunk.length });
+      } catch (error) {
+        log(`RDP video chunk error: ${error}`);
+        res.status(500).json({ error: "Failed to store video chunk" });
+      }
+    }
+  );
+
+  // GET /api/admin/recordings/:id/video - Stream the recorded WebM video
+  app.get(
+    "/api/admin/recordings/:id/video",
+    async (req, res) => {
+      try {
+        // Allow token via query param (for video src attribute)
+        const token = req.query.token as string
+          || req.headers.authorization?.replace("Bearer ", "");
+        if (!token) {
+          res.status(401).json({ error: "Missing token" });
+          return;
+        }
+        const payload = await verifyTideCloakToken(token, []);
+        if (!payload) {
+          res.status(401).json({ error: "Invalid token" });
+          return;
+        }
+
+        const videoData = await recordingStorage.getVideoData(req.params.id);
+        if (!videoData) {
+          res.status(404).json({ error: "No video data" });
+          return;
+        }
+
+        res.setHeader("Content-Type", "video/webm");
+        res.setHeader("Content-Length", videoData.length.toString());
+        res.send(videoData);
+      } catch (error) {
+        log(`RDP video serve error: ${error}`);
+        res.status(500).json({ error: "Failed to serve video" });
+      }
+    }
+  );
 
   // POST /api/sessions/:id/file-op - Log a file operation
   app.post("/api/sessions/:id/file-op", authenticate, async (req: AuthenticatedRequest, res) => {
