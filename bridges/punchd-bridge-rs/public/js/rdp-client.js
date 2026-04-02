@@ -951,10 +951,19 @@
 
       setStatus("connecting", "Connecting to " + backendName + "...");
 
-      // Get a keylessh app token via silent PKCE+SSO for recording
-      setStatus("connecting", "Obtaining recording token...");
-      var recordingToken = await getRecordingToken();
-      var proxyAddress = "wss://" + location.host + "/ws/rdcleanpath" + (recordingToken ? "?recording_token=" + encodeURIComponent(recordingToken) : "");
+      // Choose connection mode: e2e TLS (trustless) or RDCleanPath (recording)
+      var useDirectTls = config && config.e2eTls;
+
+      var proxyAddress;
+      if (useDirectTls) {
+        proxyAddress = "wss://" + location.host + "/ws/tcp-forward";
+        console.log("[RDP] Using e2e TLS mode (trustless proxy)");
+      } else {
+        // Get a keylessh app token via silent PKCE+SSO for recording
+        setStatus("connecting", "Obtaining recording token...");
+        var recordingToken = await getRecordingToken();
+        proxyAddress = "wss://" + location.host + "/ws/rdcleanpath" + (recordingToken ? "?recording_token=" + encodeURIComponent(recordingToken) : "");
+      }
       console.log("[RDP] Proxy address:", proxyAddress);
       console.log("[RDP] Destination:", backendName);
 
@@ -974,6 +983,9 @@
       builder = builder.authToken(sessionToken);
       builder = builder.renderCanvas(rdpCanvas);
       builder = builder.desktopSize(new wasm.DesktopSize(canvasWidth, canvasHeight));
+      if (useDirectTls) {
+        builder = builder.extension("e2e_tls", true);
+      }
       builder = builder.setCursorStyleCallback(function (kind, data, hotspotX, hotspotY) {
         if (kind === "default") {
           rdpCanvas.style.cursor = "default";
@@ -985,7 +997,7 @@
       });
       builder = builder.setCursorStyleCallbackContext(window);
 
-      console.log("[RDP] Connecting via RDCleanPath...");
+      console.log("[RDP] Connecting via " + (useDirectTls ? "e2e TLS" : "RDCleanPath") + "...");
       rdpSession = await builder.connect();
 
       setStatus("connected", "Connected to " + backendName);
