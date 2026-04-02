@@ -294,7 +294,12 @@ const requestHandler = async (req: import("http").IncomingMessage, res: import("
   }
 
   // ── WebRTC config (STUN/TURN credentials for P2P upgrade) ────
+  // Allow cross-origin — keylessh RDP page fetches this from a different domain
   if (path === "/webrtc-config" && req.method === "GET") {
+    if (origin) {
+      res.setHeader("Access-Control-Allow-Origin", origin);
+      res.setHeader("Access-Control-Allow-Credentials", "true");
+    }
     const host = req.headers.host || "localhost";
     const webrtcConfig: Record<string, unknown> = {
       signalingUrl: `${useTls ? "wss" : "ws"}://${host}`,
