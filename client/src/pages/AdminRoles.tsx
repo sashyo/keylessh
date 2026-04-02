@@ -84,7 +84,6 @@ export default function AdminRoles() {
   const { toast } = useToast();
   const { initializeTideRequest } = useAuth();
   const authConfig = useAuthConfig();
-  const stunServerClientId: string | null = authConfig?.["stun-server-client-id"] || null;
   const [search, setSearch] = useState("");
   const [editingRole, setEditingRole] = useState<AdminRole | null>(null);
   const [creatingRole, setCreatingRole] = useState(false);
@@ -120,8 +119,8 @@ export default function AdminRoles() {
   };
 
   const { data: rolesData, isLoading: rolesLoading, refetch: refetchRoles } = useQuery({
-    queryKey: ["/api/admin/roles", stunServerClientId],
-    queryFn: () => api.admin.roles.listAll(stunServerClientId),
+    queryKey: ["/api/admin/roles"],
+    queryFn: () => api.admin.roles.listAll(),
     staleTime: 30_000,
   });
   const isFetchingRoles = useIsFetching({ queryKey: ["/api/admin/roles"] }) > 0;
@@ -202,11 +201,11 @@ export default function AdminRoles() {
   };
 
   const createMutation = useMutation({
-    mutationFn: (data: { name: string; description?: string; policy?: PolicyConfig; targetClientId?: string }) =>
+    mutationFn: (data: { name: string; description?: string; policy?: PolicyConfig }) =>
       api.admin.roles.create(data),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/admin/roles", stunServerClientId] });
-      void queryClient.refetchQueries({ queryKey: ["/api/admin/roles", stunServerClientId] });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/roles"] });
+      void queryClient.refetchQueries({ queryKey: ["/api/admin/roles"] });
       setCreatingRole(false);
       setFormData({ name: "", description: "" });
       setPolicyConfig(defaultPolicyConfig);
@@ -446,7 +445,7 @@ export default function AdminRoles() {
           const fwRoleName = `vpn:${vpnGatewayId}:${rule.action}:${network}/${prefix}:${ports}`;
           // Create each firewall rule as a separate role
           try {
-            await api.admin.roles.create({ name: fwRoleName, description: `VPN firewall: ${rule.action} ${network}/${prefix} ports ${ports}`, targetClientId: stunServerClientId || undefined });
+            await api.admin.roles.create({ name: fwRoleName, description: `VPN firewall: ${rule.action} ${network}/${prefix} ports ${ports}` });
           } catch {
             // Role may already exist, that's fine
           }
@@ -460,15 +459,11 @@ export default function AdminRoles() {
       return;
     }
 
-    // Determine target client — endpoint and VPN roles go to the stun server client
-    const targetClientId = (roleType === "endpoint" || roleType === "vpn") ? stunServerClientId || undefined : undefined;
-
-    // First create the role
+    // Create the role
     createMutation.mutate({
       name,
       description: formData.description || undefined,
       policy: roleType === "ssh" && policyConfig.enabled ? policyConfig : undefined,
-      targetClientId,
     });
 
     // If policy is enabled, create the PolicySignRequest with Forseti contract
@@ -1039,15 +1034,6 @@ export default function AdminRoles() {
               </div>
             )}
 
-            {/* Warning if stun-server-client-id is not configured */}
-            {(roleType === "endpoint" || roleType === "vpn") && !stunServerClientId && (
-              <div className="p-3 rounded-md bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 text-sm text-amber-800 dark:text-amber-200">
-                <p className="font-medium">Punchd client not configured</p>
-                <p className="text-xs mt-1">
-                  Endpoint and VPN roles require a separate TideCloak client. Add <code className="bg-amber-100 dark:bg-amber-900 px-1 rounded">"stun-server-client-id": "your-client-id"</code> to your <code>tidecloak.json</code> and restart the server.
-                </p>
-              </div>
-            )}
 
             {/* Endpoint Role - Gateway & Backend Dropdowns */}
             {roleType === "endpoint" && (
@@ -1510,8 +1496,7 @@ export default function AdminRoles() {
                   createMutation.isPending ||
                   isCreatingPolicy ||
                   (roleType === "endpoint" && (!selectedGatewayId || !selectedBackendName)) ||
-                  (roleType === "vpn" && !vpnGatewayId) ||
-                  ((roleType === "endpoint" || roleType === "vpn") && !stunServerClientId)
+                  (roleType === "vpn" && !vpnGatewayId)
                 }
               >
                 {createMutation.isPending || isCreatingPolicy ? "Creating..." : "Create Role"}

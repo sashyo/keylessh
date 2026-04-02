@@ -82,38 +82,7 @@ export function VpnPanel() {
       return;
     }
 
-    // Get a token for the stun server client via silent OIDC auth
-    // The user is already SSO'd from the main app login, so TideCloak
-    // returns a token without re-prompting.
-    const stunClientId = authConfig?.["stun-server-client-id"];
-    let vpnToken = token;
-
-    if (stunClientId && stunClientId !== authConfig?.resource) {
-      try {
-        const authUrl = authConfig?.["auth-server-url"]?.replace(/\/+$/, "");
-        const realm = authConfig?.realm;
-        if (authUrl && realm) {
-          const tokenUrl = `${authUrl}/realms/${realm}/protocol/openid-connect/token`;
-          const tokenResp = await fetch(tokenUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/x-www-form-urlencoded" },
-            body: new URLSearchParams({
-              grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
-              client_id: stunClientId,
-              subject_token: token!,
-              requested_token_type: "urn:ietf:params:oauth:token-type:access_token",
-              audience: stunClientId,
-            }),
-          });
-          if (tokenResp.ok) {
-            const tokenData = await tokenResp.json();
-            vpnToken = tokenData.access_token;
-          }
-        }
-      } catch {
-        // Token exchange failed — fall back to original token
-      }
-    }
+    const vpnToken = token;
 
     try {
       const resp = await fetch(`${AGENT_URL}/connect`, {

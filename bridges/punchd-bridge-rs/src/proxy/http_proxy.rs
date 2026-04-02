@@ -677,7 +677,6 @@ pub fn build_proxy_state(
     tc_config: &TidecloakConfig,
     auth: Arc<TidecloakAuth>,
     use_tls: bool,
-    role_client_id: &str,
 ) -> Arc<ProxyState> {
     let base_url = config
         .tc_internal_url
@@ -754,7 +753,7 @@ pub fn build_proxy_state(
         server_endpoints,
         browser_endpoints,
         client_id: tc_config.resource.clone(),
-        role_client_id: role_client_id.to_string(),
+        role_client_id: tc_config.resource.clone(),
         refresh_cache: DashMap::new(),
         refresh_in_flight: DashMap::new(),
         use_tls,
@@ -787,6 +786,7 @@ pub fn build_router(state: Arc<ProxyState>) -> (Router, SharedState) {
 
     let router = Router::new()
         .route("/ws/rdcleanpath", get(handle_rdcleanpath_ws))
+        .route("/ws/tcp-forward", get(handle_tcp_forward_ws))
         .fallback(any(handle_request))
         .with_state(shared.clone());
 
@@ -800,11 +800,10 @@ pub fn reload_state(
     tc_config: &crate::config::TidecloakConfig,
     auth: Arc<crate::auth::tidecloak::TidecloakAuth>,
     use_tls: bool,
-    role_client_id: &str,
 ) {
     let old = shared.load();
 
-    let new_state = build_proxy_state(config, tc_config, auth, use_tls, role_client_id);
+    let new_state = build_proxy_state(config, tc_config, auth, use_tls);
 
     // Preserve session caches from old state
     for entry in old.tc_cookie_jar.iter() {
@@ -885,7 +884,6 @@ async fn handle_rdcleanpath_socket(socket: WebSocket, state: Arc<ProxyState>, re
             backends: state.config.backends.clone(),
             auth: state.auth.clone(),
             gateway_id: state.gateway_id.clone(),
-            tc_client_id: Some(state.role_client_id.clone()),
             server_url: state.config.server_url.clone(),
             recording: None,
             recording_token,
@@ -1687,10 +1685,6 @@ async fn handle_webrtc_config(
         "targetGatewayId": state.config.gateway_id,
     });
 
-    // Include keylessh client ID and auth info for PKCE recording token
-    if let Some(ref tc_client_id) = state.config.tc_client_id {
-        config["keylesshClientId"] = serde_json::json!(tc_client_id);
-    }
     config["authServerUrl"] = serde_json::json!(state.tc_config.auth_server_url);
     config["realm"] = serde_json::json!(state.tc_config.realm);
 
