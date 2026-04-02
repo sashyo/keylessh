@@ -14,6 +14,7 @@ use tokio_native_tls::TlsStream;
 
 use crate::auth::tidecloak::{JwtPayload, TidecloakAuth};
 use crate::config::{BackendAuth, BackendEntry};
+use crate::recording::RecordingHandle;
 
 use super::rdcleanpath::{
     build_error, build_response, parse_request, RDCleanPathError, RDCleanPathResponse,
@@ -30,6 +31,8 @@ pub struct RDCleanPathSessionOptions {
     pub auth: Arc<TidecloakAuth>,
     pub gateway_id: Option<String>,
     pub tc_client_id: Option<String>,
+    pub server_url: Option<String>,
+    pub recording: Option<RecordingHandle>,
 }
 
 pub struct RDCleanPathSession {
@@ -67,7 +70,7 @@ impl RDCleanPathSession {
 // ---------------------------------------------------------------------------
 
 async fn run_session(
-    opts: RDCleanPathSessionOptions,
+    mut opts: RDCleanPathSessionOptions,
     mut rx: mpsc::UnboundedReceiver<Vec<u8>>,
 ) -> Result<(), String> {
     let send_binary = opts.send_binary.clone();
@@ -138,6 +141,35 @@ async fn run_session(
                 return Err("Access denied".into());
             }
         };
+
+        // Start recording — derive server_url from auth server or explicit config
+        if opts.recording.is_none() {
+            let server_url = opts.server_url.clone()
+                .or_else(|| {
+                    // Derive from auth server URL: https://login.example.com -> https://demo.example.com
+                    // Or just use the auth server directly if no explicit server_url
+                    None
+                });
+            if let Some(ref server_url) = server_url {
+                let user_email = payload.extra.get("email")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                let session_id = uuid::Uuid::new_v4().to_string();
+                opts.recording = Some(crate::recording::start_recording(
+                    crate::recording::RecordingMeta {
+                        server_url: server_url.clone(),
+                        token: req.proxy_auth.clone(),
+                        session_id,
+                        server_id: req.destination.clone(),
+                        backend_name: req.destination.clone(),
+                        gateway_id: opts.gateway_id.clone().unwrap_or_default(),
+                        user_email,
+                    },
+                ));
+                tracing::info!("[Recording] RDP recording started for user {:?}", payload.sub);
+            }
+        }
     }
 
     // ------------------------------------------------------------------
@@ -264,6 +296,7 @@ async fn run_session(
 
     // Task: client -> RDP server
     let _send_close_c2s = send_close.clone();
+    let rec_c2s = opts.recording.clone();
     let c2s = tokio::spawn(async move {
         let mut first_msg = true;
         let mut mcs_proto = mcs_patch_protocol;
@@ -276,6 +309,10 @@ async fn run_session(
             } else {
                 first_msg = false;
             }
+            // Record PDU before writing
+            if let Some(ref rec) = rec_c2s {
+                rec.record_c2s(&data);
+            }
             if let Err(e) = tls_write.write_all(&data).await {
                 tracing::error!("Relay c2s write error: {e}");
                 break;
@@ -287,12 +324,17 @@ async fn run_session(
     // Task: RDP server -> client
     let send_binary_s2c = send_binary.clone();
     let send_close_s2c = send_close.clone();
+    let rec_s2c = opts.recording.clone();
     let s2c = tokio::spawn(async move {
         let mut buf = vec![0u8; 65536];
         loop {
             match tls_read.read(&mut buf).await {
                 Ok(0) => break,
                 Ok(n) => {
+                    // Record PDU before sending to client
+                    if let Some(ref rec) = rec_s2c {
+                        rec.record_s2c(&buf[..n]);
+                    }
                     (send_binary_s2c)(buf[..n].to_vec());
                 }
                 Err(e) => {

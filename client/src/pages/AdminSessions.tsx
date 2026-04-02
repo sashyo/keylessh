@@ -44,6 +44,10 @@ import {
   Lock,
   FolderOpen,
   FileText,
+  Monitor,
+  Terminal,
+  Wifi,
+  Globe,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ActiveSession } from "@shared/schema";
@@ -294,8 +298,9 @@ export function AdminActiveSessionsContent({ embedded = false }: { embedded?: bo
               <TableHeader>
                 <TableRow>
                   <TableHead>Server</TableHead>
+                  <TableHead>Type</TableHead>
                   <TableHead className="hidden sm:table-cell">User</TableHead>
-                  <TableHead className="hidden md:table-cell">SSH User</TableHead>
+                  <TableHead className="hidden md:table-cell">Session User</TableHead>
                   <TableHead className="hidden lg:table-cell">Started</TableHead>
                   <TableHead className="hidden md:table-cell">Duration</TableHead>
                   <TableHead>Status</TableHead>
@@ -317,6 +322,17 @@ export function AdminActiveSessionsContent({ embedded = false }: { embedded?: bo
                           </p>
                         </div>
                       </div>
+                    </TableCell>
+                    <TableCell>
+                      {(() => {
+                        const type = (session as any).sessionType || "ssh";
+                        switch (type) {
+                          case "rdp": return <Badge variant="outline" className="gap-1 bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950/30 dark:text-blue-400"><Monitor className="h-3 w-3" />RDP</Badge>;
+                          case "vpn": return <Badge variant="outline" className="gap-1 bg-purple-50 text-purple-700 border-purple-200 dark:bg-purple-950/30 dark:text-purple-400"><Wifi className="h-3 w-3" />VPN</Badge>;
+                          case "endpoint": return <Badge variant="outline" className="gap-1"><Globe className="h-3 w-3" />Endpoint</Badge>;
+                          default: return <Badge variant="outline" className="gap-1"><Terminal className="h-3 w-3" />SSH</Badge>;
+                        }
+                      })()}
                     </TableCell>
                     <TableCell className="hidden sm:table-cell">
                       <div className="space-y-0.5">
@@ -562,8 +578,9 @@ export function AdminSessionHistoryContent({ embedded = false }: { embedded?: bo
                   <TableRow>
                     <TableHead className="w-[40px]"></TableHead>
                     <TableHead>Server</TableHead>
+                    <TableHead>Type</TableHead>
                     <TableHead className="hidden sm:table-cell">User</TableHead>
-                    <TableHead className="hidden md:table-cell">SSH User</TableHead>
+                    <TableHead className="hidden md:table-cell">Session User</TableHead>
                     <TableHead className="hidden lg:table-cell">Started</TableHead>
                     <TableHead className="hidden lg:table-cell">Ended</TableHead>
                     <TableHead className="hidden md:table-cell">Duration</TableHead>
@@ -610,6 +627,17 @@ export function AdminSessionHistoryContent({ embedded = false }: { embedded?: bo
                                 </p>
                               </div>
                             </div>
+                          </TableCell>
+                          <TableCell>
+                            {(() => {
+                              const type = (session as any).sessionType || "ssh";
+                              switch (type) {
+                                case "rdp": return <Badge variant="outline" className="gap-1 bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950/30 dark:text-blue-400"><Monitor className="h-3 w-3" />RDP</Badge>;
+                                case "vpn": return <Badge variant="outline" className="gap-1 bg-purple-50 text-purple-700 border-purple-200 dark:bg-purple-950/30 dark:text-purple-400"><Wifi className="h-3 w-3" />VPN</Badge>;
+                                case "endpoint": return <Badge variant="outline" className="gap-1"><Globe className="h-3 w-3" />Endpoint</Badge>;
+                                default: return <Badge variant="outline" className="gap-1"><Terminal className="h-3 w-3" />SSH</Badge>;
+                              }
+                            })()}
                           </TableCell>
                           <TableCell className="hidden sm:table-cell">
                             <div className="space-y-0.5">

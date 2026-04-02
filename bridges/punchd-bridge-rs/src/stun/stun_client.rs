@@ -17,6 +17,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::auth::tidecloak::TidecloakAuth;
 use crate::config::BackendEntry;
+use crate::vpn::vpn_handler::VpnState;
 use crate::webrtc::peer_handler::{PeerHandler, PeerHandlerOptions};
 
 const ALLOWED_METHODS: &[&str] = &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
@@ -41,6 +42,7 @@ pub struct StunRegistrationOptions {
     pub backends: Vec<BackendEntry>,
     pub auth: Option<Arc<TidecloakAuth>>,
     pub tc_client_id: Option<String>,
+    pub vpn_state: Option<Arc<Mutex<VpnState>>>,
 }
 
 #[allow(dead_code)]
@@ -179,6 +181,7 @@ async fn connect_and_run(
             backends: options.backends.clone(),
             auth: options.auth.clone(),
             tc_client_id: options.tc_client_id.clone(),
+            vpn_state: options.vpn_state.clone(),
         });
         tracing::info!("[STUN-Reg] WebRTC peer handler ready");
         Some(Arc::new(ph))

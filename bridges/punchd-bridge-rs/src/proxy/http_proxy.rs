@@ -31,6 +31,7 @@ use axum::http::{Method, Request, StatusCode};
 use axum::response::Response;
 use axum::routing::{any, get};
 use axum::Router;
+use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use regex::Regex;
 use tokio::sync::Notify;
@@ -45,11 +46,13 @@ use crate::config::{ServerConfig, TidecloakConfig};
 
 // ── Session types ────────────────────────────────────────────────
 
+#[derive(Clone)]
 pub struct TcSession {
     pub cookies: HashMap<String, String>,
     pub last_access: u64,
 }
 
+#[derive(Clone)]
 pub struct BackendSession {
     pub cookies: HashMap<String, String>,
     pub last_access: u64,
@@ -766,29 +769,62 @@ pub fn build_proxy_state(
 
 // ── Router builder ───────────────────────────────────────────────
 
-pub fn build_router(state: Arc<ProxyState>) -> Router {
+/// Shared handle for hot-reloading ProxyState.
+pub type SharedState = Arc<ArcSwap<ProxyState>>;
+
+pub fn build_router(state: Arc<ProxyState>) -> (Router, SharedState) {
+    let shared = Arc::new(ArcSwap::new(state));
+
     // Spawn periodic session eviction (every 10 minutes)
-    let evict_state = state.clone();
+    let evict_state = shared.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(600));
         loop {
             interval.tick().await;
-            evict_state.evict_stale_sessions();
+            evict_state.load().evict_stale_sessions();
         }
     });
 
-    Router::new()
+    let router = Router::new()
         .route("/ws/rdcleanpath", get(handle_rdcleanpath_ws))
         .fallback(any(handle_request))
-        .with_state(state)
+        .with_state(shared.clone());
+
+    (router, shared)
+}
+
+/// Reload the proxy state from disk. Preserves session caches.
+pub fn reload_state(
+    shared: &SharedState,
+    config: &crate::config::ServerConfig,
+    tc_config: &crate::config::TidecloakConfig,
+    auth: Arc<crate::auth::tidecloak::TidecloakAuth>,
+    use_tls: bool,
+    role_client_id: &str,
+) {
+    let old = shared.load();
+
+    let new_state = build_proxy_state(config, tc_config, auth, use_tls, role_client_id);
+
+    // Preserve session caches from old state
+    for entry in old.tc_cookie_jar.iter() {
+        new_state.tc_cookie_jar.insert(entry.key().clone(), (*entry.value()).clone());
+    }
+    for entry in old.backend_cookie_jar.iter() {
+        new_state.backend_cookie_jar.insert(entry.key().clone(), (*entry.value()).clone());
+    }
+
+    shared.store(new_state);
+    tracing::info!("[Config] ProxyState hot-reloaded (backends, auth, VPN settings updated)");
 }
 
 // ── RDCleanPath WebSocket handler ────────────────────────────────
 
 async fn handle_rdcleanpath_ws(
-    State(state): State<Arc<ProxyState>>,
+    State(shared): State<SharedState>,
     ws: WebSocketUpgrade,
 ) -> Response {
+    let state = shared.load_full();
     ws.protocols(["rdcleanpath"])
         .on_upgrade(move |socket| handle_rdcleanpath_socket(socket, state))
 }
@@ -831,6 +867,8 @@ async fn handle_rdcleanpath_socket(socket: WebSocket, state: Arc<ProxyState>) {
             auth: state.auth.clone(),
             gateway_id: state.gateway_id.clone(),
             tc_client_id: Some(state.role_client_id.clone()),
+            server_url: state.config.server_url.clone(),
+            recording: None, // Created in run_session when server_url is configured
         },
     );
 
@@ -885,9 +923,10 @@ async fn handle_rdcleanpath_socket(socket: WebSocket, state: Arc<ProxyState>) {
 // ── Main request handler ─────────────────────────────────────────
 
 async fn handle_request(
-    State(state): State<Arc<ProxyState>>,
+    State(shared): State<SharedState>,
     req: Request<Body>,
 ) -> Response {
+    let state = shared.load_full();
     let mut resp_headers = HeaderMap::new();
     security_headers(&mut resp_headers, state.use_tls);
 

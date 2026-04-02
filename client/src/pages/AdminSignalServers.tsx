@@ -8,6 +8,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
+import { Separator } from "@/components/ui/separator";
 import {
   Dialog,
   DialogContent,
@@ -38,6 +39,10 @@ interface SignalServerFormData {
   url: string;
   description: string;
   enabled: boolean;
+  apiSecret: string;
+  iceServers: string;
+  turnServer: string;
+  turnSecret: string;
 }
 
 const defaultFormData: SignalServerFormData = {
@@ -45,6 +50,10 @@ const defaultFormData: SignalServerFormData = {
   url: "",
   description: "",
   enabled: true,
+  apiSecret: "",
+  iceServers: "",
+  turnServer: "",
+  turnSecret: "",
 };
 
 function SignalServerForm({
@@ -165,6 +174,53 @@ function SignalServerForm({
           rows={2}
         />
       </div>
+
+      <Separator />
+
+      <div className="space-y-2">
+        <Label htmlFor="apiSecret">API Secret</Label>
+        <Input
+          id="apiSecret"
+          type="password"
+          value={formData.apiSecret}
+          onChange={(e) => setFormData({ ...formData, apiSecret: e.target.value })}
+          placeholder="Shared secret for gateway registration"
+        />
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-2">
+          <Label htmlFor="iceServers">ICE/STUN Server</Label>
+          <Input
+            id="iceServers"
+            value={formData.iceServers}
+            onChange={(e) => setFormData({ ...formData, iceServers: e.target.value })}
+            placeholder="stun:1.2.3.4:3478"
+          />
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="turnServer">TURN Server</Label>
+          <Input
+            id="turnServer"
+            value={formData.turnServer}
+            onChange={(e) => setFormData({ ...formData, turnServer: e.target.value })}
+            placeholder="turn:1.2.3.4:3478"
+          />
+        </div>
+      </div>
+
+      <div className="space-y-2">
+        <Label htmlFor="turnSecret">TURN Secret</Label>
+        <Input
+          id="turnSecret"
+          type="password"
+          value={formData.turnSecret}
+          onChange={(e) => setFormData({ ...formData, turnSecret: e.target.value })}
+          placeholder="TURN credential secret"
+        />
+      </div>
+
+      <Separator />
 
       <div className="flex items-center justify-between">
         <div>
@@ -314,6 +370,10 @@ export default function AdminSignalServers() {
                         url: editingServer.url,
                         description: editingServer.description || "",
                         enabled: editingServer.enabled,
+                        apiSecret: (editingServer as any).apiSecret || "",
+                        iceServers: (editingServer as any).iceServers || "",
+                        turnServer: (editingServer as any).turnServer || "",
+                        turnSecret: (editingServer as any).turnSecret || "",
                       }
                     : undefined
                 }

@@ -29,6 +29,10 @@ export const signalServers = sqliteTable("signal_servers", {
   description: text("description"),
   enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+  apiSecret: text("api_secret"),
+  iceServers: text("ice_servers"),        // e.g. stun:1.2.3.4:3478
+  turnServer: text("turn_server"),        // e.g. turn:1.2.3.4:3478
+  turnSecret: text("turn_secret"),
 });
 
 export const servers = sqliteTable("servers", {
@@ -58,6 +62,9 @@ export const sessions = sqliteTable("sessions", {
   startedAt: integer("started_at", { mode: "timestamp" }).notNull(),
   endedAt: integer("ended_at", { mode: "timestamp" }),
   recordingId: text("recording_id"), // Link to recording if session was recorded
+  sessionType: text("session_type").notNull().default("ssh"), // "ssh" | "rdp" | "endpoint" | "vpn"
+  gatewayId: text("gateway_id"), // Which gateway/bridge handled this session
+  backendName: text("backend_name"), // RDP backend or VPN gateway name
 });
 
 // File operations log - tracks SFTP/SCP file transfers
