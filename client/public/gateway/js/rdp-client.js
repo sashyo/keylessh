@@ -498,6 +498,16 @@
   }
 
   async function refreshSessionToken() {
+    // When served from keylessh, token is in localStorage — no cross-origin fetch needed
+    if (SIGNAL_BASE) {
+      var stored = localStorage.getItem("access_token");
+      if (stored) {
+        sessionToken = stored;
+        console.log("[RDP] Session token refreshed from localStorage");
+        return;
+      }
+      throw new Error("Auth refresh failed: no token in localStorage — please log in again");
+    }
     try {
       var res = await fetch(SESSION_TOKEN_ENDPOINT, {
         credentials: "same-origin",
