@@ -123,12 +123,11 @@
       var self = this;
       this.mediaRecorder.ondataavailable = function (e) {
         if (e.data && e.data.size > 0) {
+          console.log("[Recording] Chunk captured:", (e.data.size / 1024).toFixed(1), "KB");
           self.uploadQueue.push(e.data);
-          self._drainQueue();
         }
       };
-      // timeslice=5000: MediaRecorder emits raw WebM bytes every 5s
-      // These are sequential chunks of the same stream — safe to concatenate
+      // timeslice=5000: emit chunks every 5s for long sessions
       this.mediaRecorder.start(5000);
       console.log("[Recording] MediaRecorder started:", mimeType);
     } catch (err) {
@@ -136,31 +135,8 @@
     }
   };
 
-  // Upload queued chunks sequentially (preserves byte order)
-  RdpRecorder.prototype._drainQueue = async function () {
-    if (this.uploading || !this.recordingId) return;
-    this.uploading = true;
-    while (this.uploadQueue.length > 0) {
-      var chunk = this.uploadQueue.shift();
-      try {
-        var arrayBuf = await chunk.arrayBuffer();
-        await fetch(this.serverUrl + "/api/bridge/rdp-video-chunk", {
-          method: "POST",
-          headers: {
-            "Authorization": "Bearer " + this.token,
-            "Content-Type": "application/octet-stream",
-            "X-Recording-Id": this.recordingId,
-          },
-          body: arrayBuf,
-        });
-      } catch (err) {
-        console.warn("[Recording] Chunk upload error:", err);
-      }
-    }
-    this.uploading = false;
-  };
-
   RdpRecorder.prototype.stop = async function () {
+    // Stop MediaRecorder — triggers final ondataavailable then onstop
     if (this.mediaRecorder && this.mediaRecorder.state !== "inactive") {
       var self = this;
       await new Promise(function (resolve) {
@@ -168,8 +144,35 @@
         self.mediaRecorder.stop();
       });
     }
-    // Upload any remaining chunks
-    await this._drainQueue();
+
+    if (!this.recordingId || this.uploadQueue.length === 0) {
+      console.warn("[Recording] No chunks to upload");
+      return;
+    }
+
+    // Combine all chunks into one blob and upload
+    var blob = new Blob(this.uploadQueue, { type: "video/webm" });
+    console.log("[Recording] Uploading video:", (blob.size / 1024).toFixed(1), "KB,", this.uploadQueue.length, "chunks");
+    this.uploadQueue = [];
+
+    try {
+      var arrayBuf = await blob.arrayBuffer();
+      var res = await fetch(this.serverUrl + "/api/bridge/rdp-video-chunk", {
+        method: "POST",
+        headers: {
+          "Authorization": "Bearer " + this.token,
+          "Content-Type": "application/octet-stream",
+          "X-Recording-Id": this.recordingId,
+        },
+        body: arrayBuf,
+      });
+      if (!res.ok) {
+        console.warn("[Recording] Upload failed:", res.status);
+      }
+    } catch (err) {
+      console.warn("[Recording] Upload error:", err);
+    }
+
     if (!this.recordingId) return;
 
     // Finalize the recording
