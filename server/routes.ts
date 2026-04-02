@@ -915,14 +915,30 @@ export async function registerRoutes(
     }
   });
 
-  // ── Bridge RDP recording endpoints ─────────────────────────────────
-  // These are called by the punchd-bridge gateway, not by browser clients.
-  // The bridge passes the user's JWT token in the body for verification.
+  // ── RDP recording endpoints ─────────────────────────────────────
+  // Called by browser (Authorization header, cross-origin) or bridge (token in body).
+
+  // CORS preflight for recording endpoints
+  app.options("/api/bridge/:path", (_req, res) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    res.status(204).end();
+  });
+
+  // CORS helper for recording responses
+  function setCorsHeaders(res: any) {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  }
 
   // POST /api/bridge/start-rdp-recording
   app.post("/api/bridge/start-rdp-recording", async (req, res) => {
+    setCorsHeaders(res);
     try {
-      const { token, sessionId, serverId, backendName, gatewayId, userEmail, timestamp } = req.body;
+      const { token: bodyToken, sessionId, serverId, backendName, gatewayId, userEmail, timestamp } = req.body;
+      const authHeader = req.headers.authorization;
+      const token = (authHeader?.startsWith("Bearer ") ? authHeader.substring(7) : null) || bodyToken;
       if (!token || !sessionId || !backendName) {
         res.status(400).json({ error: "Missing required fields" });
         return;
@@ -988,8 +1004,11 @@ export async function registerRoutes(
 
   // POST /api/bridge/rdp-record - Append RDP PDU events
   app.post("/api/bridge/rdp-record", async (req, res) => {
+    setCorsHeaders(res);
     try {
-      const { token, sessionId, recordingId, events } = req.body;
+      const { token: bodyToken, sessionId, recordingId, events } = req.body;
+      const authHeader = req.headers.authorization;
+      const token = (authHeader?.startsWith("Bearer ") ? authHeader.substring(7) : null) || bodyToken;
       if (!token || !recordingId || !events) {
         res.status(400).json({ error: "Missing required fields" });
         return;
@@ -1018,8 +1037,11 @@ export async function registerRoutes(
 
   // POST /api/bridge/end-rdp-recording - Finalize RDP recording
   app.post("/api/bridge/end-rdp-recording", async (req, res) => {
+    setCorsHeaders(res);
     try {
-      const { token, sessionId, recordingId } = req.body;
+      const { token: bodyToken, sessionId, recordingId } = req.body;
+      const authHeader = req.headers.authorization;
+      const token = (authHeader?.startsWith("Bearer ") ? authHeader.substring(7) : null) || bodyToken;
       if (!token || !recordingId) {
         res.status(400).json({ error: "Missing required fields" });
         return;

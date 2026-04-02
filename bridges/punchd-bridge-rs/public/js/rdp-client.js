@@ -44,6 +44,148 @@
   var reconnectMessage = document.getElementById("reconnect-message");
   var reconnectBtn = document.getElementById("reconnect-btn");
 
+  // ── Helpers ───────────────────────────────────────────────────
+
+  function getCookie(name) {
+    var match = document.cookie.match(new RegExp("(?:^|; )" + name + "=([^;]*)"));
+    return match ? decodeURIComponent(match[1]) : null;
+  }
+
+  // ── RDP Recording (browser-side PDU capture) ──────────────────
+
+  var recorder = null;
+
+  function RdpRecorder(serverUrl, token, refreshToken, tokenEndpoint, clientId, backendName, gatewayId) {
+    this.serverUrl = serverUrl.replace(/\/+$/, "");
+    this.token = token;
+    this.refreshToken = refreshToken;
+    this.tokenEndpoint = tokenEndpoint;
+    this.clientId = clientId;
+    this.backendName = backendName;
+    this.gatewayId = gatewayId;
+    this.recordingId = null;
+    this.sessionId = crypto.randomUUID ? crypto.randomUUID() : "rec-" + Date.now();
+    this.buffer = [];
+    this.startTime = Date.now();
+    this.totalEvents = 0;
+    this.flushTimer = null;
+  }
+
+  RdpRecorder.prototype.start = async function () {
+    try {
+      var res = await fetch(this.serverUrl + "/api/bridge/start-rdp-recording", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": "Bearer " + this.token },
+        body: JSON.stringify({
+          token: this.token,
+          sessionId: this.sessionId,
+          serverId: this.backendName,
+          backendName: this.backendName,
+          gatewayId: this.gatewayId,
+          userEmail: "",
+          timestamp: Math.floor(Date.now() / 1000),
+        }),
+      });
+      if (res.ok) {
+        var data = await res.json();
+        this.recordingId = data.recordingId;
+        console.log("[Recording] Started:", this.recordingId);
+        this.flushTimer = setInterval(this.flush.bind(this), 2000);
+      } else {
+        console.warn("[Recording] Start failed:", res.status);
+      }
+    } catch (err) {
+      console.warn("[Recording] Start error:", err);
+    }
+  };
+
+  RdpRecorder.prototype.refreshTokenIfNeeded = async function () {
+    if (!this.refreshToken || !this.tokenEndpoint || !this.clientId) return;
+    // Refresh 60 seconds before expiry
+    try {
+      var parts = this.token.split(".");
+      if (parts.length === 3) {
+        var payload = JSON.parse(atob(parts[1]));
+        if (payload.exp && (payload.exp - 60) < Date.now() / 1000) {
+          var res = await fetch(this.tokenEndpoint, {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({
+              grant_type: "refresh_token",
+              client_id: this.clientId,
+              refresh_token: this.refreshToken,
+            }),
+          });
+          if (res.ok) {
+            var data = await res.json();
+            this.token = data.access_token;
+            if (data.refresh_token) this.refreshToken = data.refresh_token;
+            console.log("[Recording] Token refreshed");
+          }
+        }
+      }
+    } catch (err) {
+      console.warn("[Recording] Token refresh failed:", err);
+    }
+  };
+
+  RdpRecorder.prototype.recordC2S = function (data) {
+    if (!this.recordingId) return;
+    var offset = (Date.now() - this.startTime) / 1000;
+    this.buffer.push([offset, "c2s", bufToBase64(new Uint8Array(data))]);
+    this.totalEvents++;
+    if (this.buffer.length >= 100) this.flush();
+  };
+
+  RdpRecorder.prototype.recordS2C = function (data) {
+    if (!this.recordingId) return;
+    var offset = (Date.now() - this.startTime) / 1000;
+    this.buffer.push([offset, "s2c", bufToBase64(new Uint8Array(data))]);
+    this.totalEvents++;
+    if (this.buffer.length >= 100) this.flush();
+  };
+
+  RdpRecorder.prototype.flush = async function () {
+    if (!this.recordingId || this.buffer.length === 0) return;
+    await this.refreshTokenIfNeeded();
+    var events = this.buffer;
+    this.buffer = [];
+    try {
+      await fetch(this.serverUrl + "/api/bridge/rdp-record", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": "Bearer " + this.token },
+        body: JSON.stringify({
+          token: this.token,
+          sessionId: this.sessionId,
+          recordingId: this.recordingId,
+          events: events,
+        }),
+      });
+    } catch (err) {
+      console.warn("[Recording] Flush error:", err);
+    }
+  };
+
+  RdpRecorder.prototype.stop = async function () {
+    if (this.flushTimer) clearInterval(this.flushTimer);
+    await this.flush();
+    if (!this.recordingId) return;
+    try {
+      await fetch(this.serverUrl + "/api/bridge/end-rdp-recording", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": "Bearer " + this.token },
+        body: JSON.stringify({
+          token: this.token,
+          sessionId: this.sessionId,
+          recordingId: this.recordingId,
+        }),
+      });
+      console.log("[Recording] Ended:", this.recordingId, "(" + this.totalEvents + " events)");
+    } catch (err) {
+      console.warn("[Recording] End error:", err);
+    }
+  };
+
   // ── State ─────────────────────────────────────────────────────
 
   var config = null;
@@ -161,7 +303,9 @@
 
   DCWebSocket.prototype.send = function (data) {
     if (this.readyState !== 1) throw new DOMException("WebSocket not open", "InvalidStateError");
-    console.log("[RDP] DCWebSocket send, id:", this._id, "type:", typeof data, "isArrayBuffer:", data instanceof ArrayBuffer, "isView:", ArrayBuffer.isView(data), "size:", data.byteLength || data.length || 0);
+    // Record c2s PDU
+    if (recorder && data instanceof ArrayBuffer) { recorder.recordC2S(data); }
+    else if (recorder && ArrayBuffer.isView(data)) { recorder.recordC2S(data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)); }
     if (typeof data === "string") {
       controlChannel.send(JSON.stringify({ type: "ws_message", id: this._id, data: data, binary: false }));
     } else if (bulkEnabled && bulkChannel && bulkChannel.readyState === "open") {
@@ -222,7 +366,8 @@
   };
 
   DCWebSocket.prototype._fireMessageBinary = function (arrayBuffer) {
-    console.log("[RDP] DCWebSocket _fireMessageBinary, id:", this._id, "bytes:", arrayBuffer.byteLength);
+    // Record s2c PDU
+    if (recorder) recorder.recordS2C(arrayBuffer);
     var payload = this.binaryType === "arraybuffer" ? arrayBuffer : new Blob([arrayBuffer]);
     this._dispatch("message", new MessageEvent("message", { data: payload }));
   };
@@ -848,12 +993,30 @@
       disconnectBtn.classList.remove("hidden");
       console.log("[RDP] RDP session connected");
 
+      // Start recording if keylessh token is available
+      var keylesshToken = getCookie("keylessh_token");
+      var keylesshUrl = document.referrer ? new URL(document.referrer).origin : null;
+      if (keylesshToken && keylesshUrl) {
+        var authServerUrl = config.authServerUrl || "";
+        var realm = config.realm || "";
+        var tokenEndpoint = authServerUrl && realm ? authServerUrl.replace(/\/+$/, "") + "/realms/" + realm + "/protocol/openid-connect/token" : null;
+        var clientId = config.keylesshClientId || null;
+        recorder = new RdpRecorder(keylesshUrl, keylesshToken, null, tokenEndpoint, clientId, backendName, config.targetGatewayId || "");
+        recorder.start();
+        console.log("[Recording] Browser-side recording started, server:", keylesshUrl);
+      } else {
+        console.log("[Recording] No keylessh token or referrer — skipping recording");
+      }
+
       // Set up input handling
       setupInputHandlers();
 
       // Run the session (blocks until session ends)
       var termInfo = await rdpSession.run();
       console.log("[RDP] Session ended:", termInfo ? termInfo.reason() : "unknown");
+
+      // Stop recording
+      if (recorder) { await recorder.stop(); recorder = null; }
 
       rdpSession = null;
       setStatus("error", "Session ended");
