@@ -143,48 +143,17 @@ async fn run_session(
             }
         };
 
-        // Start recording — derive server_url from auth server or explicit config
-        if opts.recording.is_none() {
-            let server_url = opts.server_url.clone()
-                .or_else(|| {
-                    // Derive from auth server URL: https://login.example.com -> https://demo.example.com
-                    // Or just use the auth server directly if no explicit server_url
-                    None
-                });
-            if let Some(ref server_url) = server_url {
-                let user_email = payload.extra.get("email")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown")
-                    .to_string();
-                let session_id = uuid::Uuid::new_v4().to_string();
-                // Use the pre-obtained keylessh app token (from browser PKCE+SSO) for recording,
-                // falling back to the stun client token if not available
-                let rec_token = opts.recording_token.clone().unwrap_or_else(|| req.proxy_auth.clone());
-
-                // Create audit session on keylessh
-                let sess_server_url = server_url.clone();
-                let sess_token = rec_token.clone();
-                let sess_backend = req.destination.clone();
-                let sess_gateway = opts.gateway_id.clone().unwrap_or_default();
-                tokio::spawn(async move {
-                    crate::recording::create_session(
-                        &sess_server_url, &sess_token, "rdp", &sess_backend, &sess_gateway,
-                    ).await;
-                });
-
-                opts.recording = Some(crate::recording::start_recording(
-                    crate::recording::RecordingMeta {
-                        server_url: server_url.clone(),
-                        token: rec_token,
-                        session_id,
-                        server_id: req.destination.clone(),
-                        backend_name: req.destination.clone(),
-                        gateway_id: opts.gateway_id.clone().unwrap_or_default(),
-                        user_email,
-                    },
-                ));
-                tracing::info!("[Recording] RDP recording started for user {:?}", payload.sub);
-            }
+        // Create audit session on keylessh (browser handles PDU recording)
+        if let Some(ref server_url) = opts.server_url {
+            let sess_server_url = server_url.clone();
+            let sess_token = opts.recording_token.clone().unwrap_or_else(|| req.proxy_auth.clone());
+            let sess_backend = req.destination.clone();
+            let sess_gateway = opts.gateway_id.clone().unwrap_or_default();
+            tokio::spawn(async move {
+                crate::recording::create_session(
+                    &sess_server_url, &sess_token, "rdp", &sess_backend, &sess_gateway,
+                ).await;
+            });
         }
     }
 
@@ -364,11 +333,12 @@ async fn run_session(
 
     // Wait for either direction to finish, then abort the other
     tokio::select! {
-        _ = &mut c2s => { s2c.abort(); },
-        _ = &mut s2c => { c2s.abort(); },
+        _ = &mut c2s => { s2c.abort(); let _ = s2c.await; },
+        _ = &mut s2c => { c2s.abort(); let _ = c2s.await; },
     }
 
-    // Drop all recording handles so the uploader channel closes and end-recording fires
+    // All relay task handles dropped — rec_c2s/rec_s2c clones are gone.
+    // Drop the last recording handle so the uploader channel closes and end-recording fires.
     drop(opts.recording);
 
     Ok(())
