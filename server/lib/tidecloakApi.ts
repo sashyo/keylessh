@@ -6,12 +6,23 @@ import {
   UserRepresentation,
 } from "./auth/keycloakTypes";
 import { Roles } from "@shared/config/roles";
-import { getAuthOverrideUrl, getRealm, getResource } from "./auth/tidecloakConfig";
+import { getAuthOverrideUrl, getRealm, getResource, getStunServerClientId } from "./auth/tidecloakConfig";
 
 // Lazy-evaluated getters to avoid calling config functions at module load time
 const getKeycloakAuthServer = () => getAuthOverrideUrl();
 const getRealm_ = () => getRealm();
 const getClient = () => getResource();
+const getStunClient = () => getStunServerClientId();
+
+/// Determine which TideCloak client a role belongs to based on its prefix.
+function getClientForRole(roleName: string): string {
+  if (roleName === Roles.Admin) return REALM_MGMT;
+  // dest: and vpn: roles live on the stun server client
+  if (/^(dest|vpn)[:\-]/i.test(roleName)) {
+    return getStunClient() || getClient();
+  }
+  return getClient();
+}
 
 const getTcUrl = () => `${getKeycloakAuthServer()}/admin/realms/${getRealm_()}`;
 const getNonAdminTcUrl = () => `${getKeycloakAuthServer()}/realms/${getRealm_()}`;
@@ -384,13 +395,11 @@ export const GrantUserRole = async (
   roleName: string,
   token: string
 ): Promise<void> => {
-  const client =
-    roleName === Roles.Admin
-      ? await getClientByClientId(REALM_MGMT, token)
-      : await getClientByClientId(getClient(), token);
+  const targetClientId = getClientForRole(roleName);
+  const client = await getClientByClientId(targetClientId, token);
 
   if (client === null || client?.id === undefined) {
-    throw new Error(`Could not grant user role, client ${getClient()} does not exist`);
+    throw new Error(`Could not grant user role, client ${targetClientId} does not exist`);
   }
 
   const role =
@@ -588,13 +597,11 @@ export const RemoveUserRole = async (
   roleName: string,
   token: string
 ): Promise<void> => {
-  const client =
-    roleName === Roles.Admin
-      ? await getClientByClientId(REALM_MGMT, token)
-      : await getClientByClientId(getClient(), token);
+  const targetClientId = getClientForRole(roleName);
+  const client = await getClientByClientId(targetClientId, token);
 
   if (client === null || client?.id === undefined) {
-    throw new Error(`Could not remove user role, client ${getClient()} does not exist`);
+    throw new Error(`Could not remove user role, client ${targetClientId} does not exist`);
   }
 
   const role =
@@ -690,16 +697,35 @@ export const GetTideLinkUrl = async (
 export const GetAllRoles = async (
   token: string
 ): Promise<RoleRepresentation[]> => {
-  // Get client roles
+  // Get main client roles
   const clientRoles = await getClientRoles(token);
+
+  // Get stun server client roles
+  let stunRoles: RoleRepresentation[] = [];
+  const stunClientId = getStunClient();
+  if (stunClientId && stunClientId !== getClient()) {
+    try {
+      const stunClient = await getClientByClientId(stunClientId, token);
+      if (stunClient?.id) {
+        const response = await fetch(`${getTcUrl()}/clients/${stunClient.id}/roles`, {
+          method: "GET",
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (response.ok) {
+          stunRoles = await response.json();
+        }
+      }
+    } catch {
+      // Stun client may not exist yet
+    }
+  }
 
   // Get admin role
   try {
     const adminRole = await getTideRealmAdminRole(token);
-    return [...clientRoles, adminRole];
+    return [...clientRoles, ...stunRoles, adminRole];
   } catch {
-    // If admin role fetch fails, just return client roles
-    return clientRoles;
+    return [...clientRoles, ...stunRoles];
   }
 };
 

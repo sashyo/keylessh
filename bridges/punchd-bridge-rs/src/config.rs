@@ -51,6 +51,8 @@ struct GatewayToml {
     strip_auth_header: Option<bool>,
     #[serde(default)]
     tc_client_id: Option<String>,
+    #[serde(default)]
+    server_url: Option<String>,
 }
 
 // ── Public types ────────────────────────────────────────────────
@@ -91,6 +93,7 @@ pub struct ServerConfig {
     pub tls_hostname: String,
     pub tc_internal_url: Option<String>,
     pub tc_client_id: Option<String>,
+    pub server_url: Option<String>,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -151,6 +154,106 @@ pub fn config_dir() -> PathBuf {
         .ok()
         .and_then(|p| p.parent().map(|p| p.to_path_buf()))
         .unwrap_or_else(|| PathBuf::from("."))
+}
+
+static ON_CONFIG_CHANGE: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>> = std::sync::OnceLock::new();
+
+/// Register a callback that fires when config files change.
+pub fn on_config_change(cb: impl Fn() + Send + Sync + 'static) {
+    let _ = ON_CONFIG_CHANGE.set(Box::new(cb));
+}
+
+/// Watch gateway.toml and tidecloak config for changes using OS-native file notifications
+/// (inotify on Linux, ReadDirectoryChangesW on Windows, FSEvents on macOS).
+/// On change, gracefully exits so the process manager restarts with new config.
+pub fn watch_config_and_restart() {
+    use notify::{Watcher, RecursiveMode, Event, EventKind};
+
+    let gw_path = config_file_path();
+    let tc_path = {
+        let toml = load_toml();
+        get_val(&toml.tidecloak_config_path, "TIDECLOAK_CONFIG_PATH")
+            .map(|p| {
+                if std::path::Path::new(&p).is_absolute() {
+                    std::path::PathBuf::from(p)
+                } else {
+                    config_dir().join(p)
+                }
+            })
+    };
+
+    let paths_to_watch: Vec<std::path::PathBuf> = std::iter::once(gw_path.clone())
+        .chain(tc_path.iter().cloned())
+        .collect();
+
+    std::thread::Builder::new()
+        .name("config-watcher".into())
+        .spawn(move || {
+            // Debounce: ignore events within 2 seconds of startup
+            std::thread::sleep(std::time::Duration::from_secs(5));
+
+            let (tx, rx) = std::sync::mpsc::channel();
+
+            let mut watcher = match notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
+                if let Ok(event) = res {
+                    match event.kind {
+                        EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_) => {
+                            let _ = tx.send(event);
+                        }
+                        _ => {}
+                    }
+                }
+            }) {
+                Ok(w) => w,
+                Err(e) => {
+                    tracing::warn!("[Config] File watcher unavailable: {e}. Config changes require manual restart.");
+                    return;
+                }
+            };
+
+            for path in &paths_to_watch {
+                if path.exists() {
+                    if let Err(e) = watcher.watch(path, RecursiveMode::NonRecursive) {
+                        tracing::warn!("[Config] Cannot watch {}: {e}", path.display());
+                    } else {
+                        tracing::info!("[Config] Watching {} for changes", path.display());
+                    }
+                }
+            }
+
+            // Wait for a file change event
+            let mut debounce_deadline: Option<std::time::Instant> = None;
+
+            loop {
+                let timeout = debounce_deadline
+                    .map(|d| d.saturating_duration_since(std::time::Instant::now()))
+                    .unwrap_or(std::time::Duration::from_secs(3600));
+
+                match rx.recv_timeout(timeout) {
+                    Ok(event) => {
+                        let changed_file = event.paths.first()
+                            .and_then(|p| p.file_name())
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "config".into());
+                        tracing::info!("[Config] Change detected: {changed_file}");
+                        // Debounce: wait 2 seconds for writes to settle
+                        debounce_deadline = Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        if debounce_deadline.is_some() {
+                            debounce_deadline = None;
+                            tracing::info!("[Config] Config changed — reloading...");
+                            // Notify via callback
+                            if let Some(ref cb) = ON_CONFIG_CHANGE.get() {
+                                cb();
+                            }
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+        })
+        .ok();
 }
 
 pub fn config_file_path() -> PathBuf {
@@ -237,9 +340,8 @@ pub fn load_config() -> ServerConfig {
         .unwrap_or_default();
 
     let backend_url = backends.first().map(|b| b.url.clone()).unwrap_or_default();
-    if backend_url.is_empty() {
-        tracing::error!("No backends configured (set backends in gateway.toml or BACKENDS env)");
-        std::process::exit(1);
+    if backends.is_empty() {
+        tracing::info!("No backends configured — custom IP connections only");
     }
 
     let gateway_id = get_val(&toml_cfg.gateway_id, "GATEWAY_ID")
@@ -281,6 +383,7 @@ pub fn load_config() -> ServerConfig {
         tls_hostname: get_val_or(&toml_cfg.tls_hostname, "TLS_HOSTNAME", "localhost"),
         tc_internal_url: get_val(&toml_cfg.tc_internal_url, "TC_INTERNAL_URL"),
         tc_client_id: get_val(&toml_cfg.tc_client_id, "TC_CLIENT_ID"),
+        server_url: get_val(&toml_cfg.server_url, "SERVER_URL"),
     }
 }
 
@@ -291,10 +394,28 @@ pub fn load_tidecloak_config() -> TidecloakConfig {
 
     let config_data = if let Some(b64) = get_val(&toml_cfg.tidecloak_config_b64, "TIDECLOAK_CONFIG_B64") {
         tracing::info!("Loading JWKS from base64 config");
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(&b64)
-            .expect("Invalid base64 in TideCloak config");
-        String::from_utf8(bytes).expect("Invalid UTF-8 in TideCloak config")
+        // Try standard base64, then URL-safe, then raw JSON (in case it was pasted directly)
+        let b64_trimmed = b64.trim();
+        let bytes = if b64_trimmed.starts_with('{') {
+            // Raw JSON pasted directly
+            tracing::info!("Detected raw JSON in tidecloak_config_b64 field");
+            b64_trimmed.as_bytes().to_vec()
+        } else {
+            base64::engine::general_purpose::STANDARD
+                .decode(b64_trimmed)
+                .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(b64_trimmed))
+                .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(b64_trimmed))
+                .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(b64_trimmed))
+                .unwrap_or_else(|e| {
+                    tracing::error!("Invalid base64 in TideCloak config: {e}");
+                    tracing::error!("First 50 chars: {}...", &b64_trimmed[..50.min(b64_trimmed.len())]);
+                    std::process::exit(1);
+                })
+        };
+        String::from_utf8(bytes).unwrap_or_else(|e| {
+            tracing::error!("Invalid UTF-8 in TideCloak config: {e}");
+            std::process::exit(1);
+        })
     } else {
         let path = get_val(&toml_cfg.tidecloak_config_path, "TIDECLOAK_CONFIG_PATH")
             .map(|p| {

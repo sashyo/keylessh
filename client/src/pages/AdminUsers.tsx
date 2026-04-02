@@ -39,7 +39,8 @@ import { useToast } from "@/hooks/use-toast";
 import { queryClient } from "@/lib/queryClient";
 import { api } from "@/lib/api";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
-import { Users, Pencil, Search, User as UserIcon, Plus, Trash2, X, Link, Unlink, Copy, Check, AlertCircle, Clock, ChevronLeft, ChevronRight } from "lucide-react";
+import { Users, Pencil, Search, User as UserIcon, Plus, Trash2, X, Link, Unlink, Copy, Check, AlertCircle, Clock, ChevronLeft, ChevronRight, Wifi, KeyRound, Globe, Shield, Loader2 } from "lucide-react";
+import { useAuthConfig } from "@/contexts/AuthContext";
 import type { AdminUser } from "@shared/schema";
 import type { AccessApproval } from "@/lib/api";
 import { UpgradeBanner } from "@/components/UpgradeBanner";
@@ -55,6 +56,7 @@ interface EditFormData {
 
 export default function AdminUsers() {
   const { toast } = useToast();
+  const authConfig = useAuthConfig();
   const [search, setSearch] = useState("");
   const [editingUser, setEditingUser] = useState<AdminUser | null>(null);
   const [creatingUser, setCreatingUser] = useState(false);
@@ -98,9 +100,11 @@ export default function AdminUsers() {
     isBlocked: isFetchingUsers,
   });
 
-  const { data: rolesData } = useQuery({
-    queryKey: ["/api/admin/roles/all"],
-    queryFn: api.admin.roles.listAll,
+  const stunServerClientId: string | null = authConfig?.["stun-server-client-id"] || null;
+
+  const { data: rolesData, isLoading: rolesLoading } = useQuery({
+    queryKey: ["/api/admin/roles/all", stunServerClientId],
+    queryFn: () => api.admin.roles.listAll(stunServerClientId),
     enabled: !!editingUser,
     staleTime: 60_000,
   });
@@ -452,7 +456,15 @@ export default function AdminUsers() {
                             <UserIcon className="h-4 w-4 text-primary" />
                           </div>
                           <div>
-                            <p className="font-medium">{user.firstName} {user.lastName}</p>
+                            <p className="font-medium flex items-center gap-1.5">
+                              {user.firstName} {user.lastName}
+                              {user.isAdmin && (
+                                <Badge variant="outline" className="text-[10px] px-1.5 py-0 bg-purple-50 text-purple-700 border-purple-200 dark:bg-purple-950/30 dark:text-purple-400 dark:border-purple-800">
+                                  <Shield className="h-2.5 w-2.5 mr-0.5" />
+                                  Admin
+                                </Badge>
+                              )}
+                            </p>
                             <p className="text-xs text-muted-foreground">{user.email}</p>
                           </div>
                         </div>
@@ -471,17 +483,50 @@ export default function AdminUsers() {
                         )}
                       </TableCell>
                       <TableCell className="hidden lg:table-cell">
-                        <div className="flex items-center gap-2">
-                          <Switch
-                            checked={user.enabled}
-                            onCheckedChange={(enabled) =>
-                              setEnabledMutation.mutate({ userId: user.id, enabled })
-                            }
-                            disabled={setEnabledMutation.isPending}
-                          />
-                          <span className={`text-xs ${user.enabled ? "text-green-600 dark:text-green-400" : "text-muted-foreground"}`}>
-                            {user.enabled ? "Enabled" : "Disabled"}
-                          </span>
+                        <div className="flex flex-col gap-1.5">
+                          <div className="flex items-center gap-2">
+                            <Switch
+                              checked={user.enabled}
+                              onCheckedChange={(enabled) =>
+                                setEnabledMutation.mutate({ userId: user.id, enabled })
+                              }
+                              disabled={setEnabledMutation.isPending}
+                            />
+                            <span className={`text-xs ${user.enabled ? "text-green-600 dark:text-green-400" : "text-muted-foreground"}`}>
+                              {user.enabled ? "Enabled" : "Disabled"}
+                            </span>
+                          </div>
+                          {user.role && user.role.length > 0 && (
+                            <div className="flex flex-wrap gap-1">
+                              {(() => {
+                                const sshRoles = user.role.filter((r) => /^ssh[:\-]/i.test(r));
+                                const vpnRoles = user.role.filter((r) => /^vpn[:\-]/i.test(r));
+                                const destRoles = user.role.filter((r) => /^dest[:\-]/i.test(r));
+                                return (
+                                  <>
+                                    {sshRoles.length > 0 && (
+                                      <Badge variant="outline" className="text-[10px] px-1.5 py-0 gap-1">
+                                        <KeyRound className="h-2.5 w-2.5" />
+                                        SSH ({sshRoles.length})
+                                      </Badge>
+                                    )}
+                                    {vpnRoles.length > 0 && (
+                                      <Badge variant="outline" className="text-[10px] px-1.5 py-0 gap-1 bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950/30 dark:text-blue-400 dark:border-blue-800">
+                                        <Wifi className="h-2.5 w-2.5" />
+                                        VPN ({vpnRoles.filter((r) => !r.includes(":allow:") && !r.includes(":deny:")).length})
+                                      </Badge>
+                                    )}
+                                    {destRoles.length > 0 && (
+                                      <Badge variant="outline" className="text-[10px] px-1.5 py-0 gap-1">
+                                        <Globe className="h-2.5 w-2.5" />
+                                        Endpoint ({destRoles.length})
+                                      </Badge>
+                                    )}
+                                  </>
+                                );
+                              })()}
+                            </div>
+                          )}
                         </div>
                       </TableCell>
                       <TableCell className="text-right">
@@ -592,7 +637,19 @@ export default function AdminUsers() {
                           key={roleName}
                           className="flex items-center justify-between p-2 rounded-md text-sm bg-green-50 dark:bg-green-950/30"
                         >
-                          <span className="text-green-700 dark:text-green-400">{roleName}</span>
+                          <div className="flex items-center gap-1.5 text-green-700 dark:text-green-400">
+                            {/^vpn[:\-]/i.test(roleName) && <Wifi className="h-3 w-3 shrink-0" />}
+                            {/^ssh[:\-]/i.test(roleName) && <KeyRound className="h-3 w-3 shrink-0" />}
+                            {/^dest[:\-]/i.test(roleName) && <Globe className="h-3 w-3 shrink-0" />}
+                            <span className="truncate" title={roleName}>
+                              {/^vpn:[^:]+:(allow|deny):/.test(roleName)
+                                ? (() => {
+                                    const parts = roleName.split(":");
+                                    return `${parts[2]} ${parts[3]} ports:${parts[4] || "*"}`;
+                                  })()
+                                : roleName}
+                            </span>
+                          </div>
                           <Button
                             type="button"
                             size="icon"
@@ -643,7 +700,12 @@ export default function AdminUsers() {
                   </div>
                   <ScrollArea className="h-32">
                     <div className="p-2 space-y-1">
-                      {availableRoles.length > 0 ? (
+                      {rolesLoading ? (
+                        <div className="flex items-center justify-center py-4 gap-2 text-muted-foreground">
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                          <span className="text-sm">Loading roles...</span>
+                        </div>
+                      ) : availableRoles.length > 0 ? (
                         availableRoles.map((roleName) => (
                           <div
                             key={roleName}

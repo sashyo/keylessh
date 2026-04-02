@@ -50,7 +50,7 @@ import { api, type PolicyTemplate, type TemplateParameter, type GatewayEndpoint 
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 import { RefreshButton } from "@/components/RefreshButton";
 import { useAuth, useAuthConfig } from "@/contexts/AuthContext";
-import { KeyRound, Pencil, Plus, Trash2, Search, Shield, FileCode, Globe, ChevronLeft, ChevronRight } from "lucide-react";
+import { KeyRound, Pencil, Plus, Trash2, Search, Shield, FileCode, Globe, ChevronLeft, ChevronRight, Wifi } from "lucide-react";
 import type { AdminRole } from "@shared/schema";
 import { ADMIN_ROLE_SET } from "@shared/config/roles";
 import { createSshPolicyRequest, createSshPolicyRequestWithCode, bytesToBase64, SSH_MODEL_IDS, SSH_FORSETI_CONTRACT } from "@/lib/sshPolicy";
@@ -84,11 +84,12 @@ export default function AdminRoles() {
   const { toast } = useToast();
   const { initializeTideRequest } = useAuth();
   const authConfig = useAuthConfig();
+  const stunServerClientId: string | null = authConfig?.["stun-server-client-id"] || null;
   const [search, setSearch] = useState("");
   const [editingRole, setEditingRole] = useState<AdminRole | null>(null);
   const [creatingRole, setCreatingRole] = useState(false);
   const [deletingRole, setDeletingRole] = useState<AdminRole | null>(null);
-  const [roleType, setRoleType] = useState<"ssh" | "endpoint" | "custom">("ssh");
+  const [roleType, setRoleType] = useState<"ssh" | "endpoint" | "vpn" | "custom">("ssh");
   const [isCreatingPolicy, setIsCreatingPolicy] = useState(false);
   const [formData, setFormData] = useState<{ name: string; description: string }>({
     name: "",
@@ -102,6 +103,15 @@ export default function AdminRoles() {
   const [selectedBackendName, setSelectedBackendName] = useState<string>("");
   const [selectedRdpUsername, setSelectedRdpUsername] = useState<string>("");
 
+  // VPN role state
+  const [vpnGatewayId, setVpnGatewayId] = useState<string>("");
+  const [vpnFirewallRules, setVpnFirewallRules] = useState<Array<{
+    action: "allow" | "deny";
+    network: string;
+    prefix: string;
+    ports: string;
+  }>>([]);
+
   const normalizeSshRoleName = (value: string) => {
     const trimmed = value.trim();
     if (!trimmed) return "";
@@ -110,8 +120,8 @@ export default function AdminRoles() {
   };
 
   const { data: rolesData, isLoading: rolesLoading, refetch: refetchRoles } = useQuery({
-    queryKey: ["/api/admin/roles"],
-    queryFn: api.admin.roles.list,
+    queryKey: ["/api/admin/roles", stunServerClientId],
+    queryFn: () => api.admin.roles.listAll(stunServerClientId),
     staleTime: 30_000,
   });
   const isFetchingRoles = useIsFetching({ queryKey: ["/api/admin/roles"] }) > 0;
@@ -192,11 +202,11 @@ export default function AdminRoles() {
   };
 
   const createMutation = useMutation({
-    mutationFn: (data: { name: string; description?: string; policy?: PolicyConfig }) =>
+    mutationFn: (data: { name: string; description?: string; policy?: PolicyConfig; targetClientId?: string }) =>
       api.admin.roles.create(data),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/admin/roles"] });
-      void queryClient.refetchQueries({ queryKey: ["/api/admin/roles"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/roles", stunServerClientId] });
+      void queryClient.refetchQueries({ queryKey: ["/api/admin/roles", stunServerClientId] });
       setCreatingRole(false);
       setFormData({ name: "", description: "" });
       setPolicyConfig(defaultPolicyConfig);
@@ -416,6 +426,32 @@ export default function AdminRoles() {
       } else {
         name = `dest:${selectedGatewayId}:${selectedBackendName}`;
       }
+    } else if (roleType === "vpn") {
+      if (!vpnGatewayId) {
+        toast({ title: "Please select a gateway", variant: "destructive" });
+        return;
+      }
+      if (vpnFirewallRules.length === 0) {
+        // Basic VPN access, no firewall rules
+        name = `vpn:${vpnGatewayId}`;
+      } else {
+        // Create the base role + firewall rules as separate roles
+        // First role is the base access role
+        name = `vpn:${vpnGatewayId}`;
+        // Create additional firewall rule roles
+        for (const rule of vpnFirewallRules) {
+          const network = rule.network.trim() || "0.0.0.0";
+          const prefix = rule.prefix.trim() || "0";
+          const ports = rule.ports.trim() || "*";
+          const fwRoleName = `vpn:${vpnGatewayId}:${rule.action}:${network}/${prefix}:${ports}`;
+          // Create each firewall rule as a separate role
+          try {
+            await api.admin.roles.create({ name: fwRoleName, description: `VPN firewall: ${rule.action} ${network}/${prefix} ports ${ports}`, targetClientId: stunServerClientId || undefined });
+          } catch {
+            // Role may already exist, that's fine
+          }
+        }
+      }
     } else {
       name = formData.name.trim();
     }
@@ -424,11 +460,15 @@ export default function AdminRoles() {
       return;
     }
 
+    // Determine target client — endpoint and VPN roles go to the stun server client
+    const targetClientId = (roleType === "endpoint" || roleType === "vpn") ? stunServerClientId || undefined : undefined;
+
     // First create the role
     createMutation.mutate({
       name,
       description: formData.description || undefined,
       policy: roleType === "ssh" && policyConfig.enabled ? policyConfig : undefined,
+      targetClientId,
     });
 
     // If policy is enabled, create the PolicySignRequest with Forseti contract
@@ -536,6 +576,11 @@ export default function AdminRoles() {
     [roles]
   );
 
+  const vpnRoleCount = useMemo(
+    () => roles.filter((r) => /^vpn[:\-]/i.test(r.name)).length,
+    [roles]
+  );
+
   return (
     <div className="p-4 sm:p-6 space-y-4 sm:space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -549,7 +594,8 @@ export default function AdminRoles() {
           </p>
           <p className="text-xs text-muted-foreground">
             <span className="font-mono">ssh:&lt;username&gt;</span> for SSH access ({sshRoleCount}),{" "}
-            <span className="font-mono">dest:&lt;gateway&gt;:&lt;backend&gt;</span> for endpoint access ({destRoleCount}).
+            <span className="font-mono">dest:&lt;gateway&gt;:&lt;backend&gt;</span> for endpoint access ({destRoleCount}),{" "}
+            <span className="font-mono">vpn:&lt;gateway&gt;</span> for VPN access ({vpnRoleCount}).
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -957,6 +1003,14 @@ export default function AdminRoles() {
                 </button>
                 <button
                   type="button"
+                  className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${roleType === "vpn" ? "bg-background shadow-sm" : "text-muted-foreground hover:text-foreground"}`}
+                  onClick={() => { setRoleType("vpn"); setFormData({ ...formData, name: "" }); setVpnGatewayId(""); setVpnFirewallRules([]); }}
+                >
+                  <Wifi className="h-3.5 w-3.5" />
+                  VPN
+                </button>
+                <button
+                  type="button"
                   className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${roleType === "custom" ? "bg-background shadow-sm" : "text-muted-foreground hover:text-foreground"}`}
                   onClick={() => { setRoleType("custom"); setFormData({ ...formData, name: "" }); }}
                 >
@@ -981,6 +1035,16 @@ export default function AdminRoles() {
                 />
                 <p className="text-xs text-muted-foreground">
                   Creates role <span className="font-mono">ssh:{formData.name.replace(/^ssh[:\-]/i, "") || "username"}</span> — grants SSH access as this user.
+                </p>
+              </div>
+            )}
+
+            {/* Warning if stun-server-client-id is not configured */}
+            {(roleType === "endpoint" || roleType === "vpn") && !stunServerClientId && (
+              <div className="p-3 rounded-md bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 text-sm text-amber-800 dark:text-amber-200">
+                <p className="font-medium">Punchd client not configured</p>
+                <p className="text-xs mt-1">
+                  Endpoint and VPN roles require a separate TideCloak client. Add <code className="bg-amber-100 dark:bg-amber-900 px-1 rounded">"stun-server-client-id": "your-client-id"</code> to your <code>tidecloak.json</code> and restart the server.
                 </p>
               </div>
             )}
@@ -1065,6 +1129,127 @@ export default function AdminRoles() {
                   <p className="text-xs text-amber-600 dark:text-amber-400">
                     No gateways are currently online. You can still create the role manually using "Custom" type.
                   </p>
+                )}
+              </div>
+            )}
+
+            {/* VPN Role - Gateway & Firewall Rules */}
+            {roleType === "vpn" && (
+              <div className="space-y-3">
+                <div className="space-y-2">
+                  <Label>Gateway</Label>
+                  <Select
+                    value={vpnGatewayId}
+                    onValueChange={(v) => setVpnGatewayId(v)}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select a gateway..." />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {(gatewayEndpoints || []).map((gw) => (
+                        <SelectItem key={gw.id} value={gw.id}>
+                          {gw.displayName || gw.id}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                {vpnGatewayId && (
+                  <>
+                    <p className="text-xs text-muted-foreground">
+                      Creates role <span className="font-mono">vpn:{vpnGatewayId}</span> — grants VPN access to this gateway's network.
+                    </p>
+
+                    <Separator />
+
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <Label>Firewall Rules</Label>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() => setVpnFirewallRules([...vpnFirewallRules, { action: "allow", network: "", prefix: "24", ports: "*" }])}
+                        >
+                          <Plus className="h-3 w-3 mr-1" /> Add Rule
+                        </Button>
+                      </div>
+
+                      {vpnFirewallRules.length === 0 && (
+                        <p className="text-xs text-muted-foreground">
+                          No firewall rules — user will have unrestricted access to the gateway's network. Add rules to restrict access to specific subnets and ports.
+                        </p>
+                      )}
+
+                      {vpnFirewallRules.map((rule, idx) => (
+                        <div key={idx} className="flex items-center gap-2 p-2 border rounded-md bg-muted/30">
+                          <Select
+                            value={rule.action}
+                            onValueChange={(v) => {
+                              const updated = [...vpnFirewallRules];
+                              updated[idx] = { ...rule, action: v as "allow" | "deny" };
+                              setVpnFirewallRules(updated);
+                            }}
+                          >
+                            <SelectTrigger className="w-24">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="allow">Allow</SelectItem>
+                              <SelectItem value="deny">Deny</SelectItem>
+                            </SelectContent>
+                          </Select>
+                          <Input
+                            className="flex-1"
+                            placeholder="Network (e.g. 192.168.0.0)"
+                            value={rule.network}
+                            onChange={(e) => {
+                              const updated = [...vpnFirewallRules];
+                              updated[idx] = { ...rule, network: e.target.value };
+                              setVpnFirewallRules(updated);
+                            }}
+                          />
+                          <span className="text-muted-foreground">/</span>
+                          <Input
+                            className="w-16"
+                            placeholder="24"
+                            value={rule.prefix}
+                            onChange={(e) => {
+                              const updated = [...vpnFirewallRules];
+                              updated[idx] = { ...rule, prefix: e.target.value };
+                              setVpnFirewallRules(updated);
+                            }}
+                          />
+                          <Input
+                            className="w-28"
+                            placeholder="Ports (* or 80,443)"
+                            value={rule.ports}
+                            onChange={(e) => {
+                              const updated = [...vpnFirewallRules];
+                              updated[idx] = { ...rule, ports: e.target.value };
+                              setVpnFirewallRules(updated);
+                            }}
+                          />
+                          <Button
+                            type="button"
+                            size="icon"
+                            variant="ghost"
+                            className="h-8 w-8 shrink-0"
+                            onClick={() => setVpnFirewallRules(vpnFirewallRules.filter((_, i) => i !== idx))}
+                          >
+                            <Trash2 className="h-3 w-3" />
+                          </Button>
+                        </div>
+                      ))}
+
+                      {vpnFirewallRules.length > 0 && (
+                        <p className="text-xs text-muted-foreground">
+                          Deny rules are checked first. If any rules exist, traffic not matching an allow rule is blocked by default.
+                        </p>
+                      )}
+                    </div>
+                  </>
                 )}
               </div>
             )}
@@ -1324,7 +1509,9 @@ export default function AdminRoles() {
                 disabled={
                   createMutation.isPending ||
                   isCreatingPolicy ||
-                  (roleType === "endpoint" && (!selectedGatewayId || !selectedBackendName))
+                  (roleType === "endpoint" && (!selectedGatewayId || !selectedBackendName)) ||
+                  (roleType === "vpn" && !vpnGatewayId) ||
+                  ((roleType === "endpoint" || roleType === "vpn") && !stunServerClientId)
                 }
               >
                 {createMutation.isPending || isCreatingPolicy ? "Creating..." : "Create Role"}

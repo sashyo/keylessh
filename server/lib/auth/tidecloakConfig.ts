@@ -34,6 +34,9 @@ export interface TidecloakConfig {
 const filePath = path.join(process.cwd(), "data", "tidecloak.json");
 
 export function GetConfig(): TidecloakConfig {
+  if (process.env.TIDECLOAK_CONFIG) {
+    return JSON.parse(process.env.TIDECLOAK_CONFIG);
+  }
   return JSON.parse(fs.readFileSync(filePath, "utf-8"));
 }
 
@@ -104,6 +107,10 @@ export function getResource(): string {
 
 export function getHomeOrkUrl(): string {
   return typedTcData()["homeOrkUrl"] || "";
+}
+
+export function getStunServerClientId(): string | null {
+  return typedTcData()["stun-server-client-id"] || null;
 }
 
 export function getJWK(): JSONWebKeySet | null {

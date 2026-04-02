@@ -327,6 +327,33 @@ sqlite.exec(`
     created_at INTEGER NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_signal_servers_enabled ON signal_servers(enabled);
+
+  -- Gateway configuration table (managed from UI, pushed to bridges)
+  CREATE TABLE IF NOT EXISTS gateway_configs (
+    id TEXT PRIMARY KEY,
+    gateway_id TEXT NOT NULL UNIQUE,
+    display_name TEXT,
+    stun_server_url TEXT,
+    api_secret TEXT,
+    ice_servers TEXT,
+    turn_server TEXT,
+    turn_secret TEXT,
+    backends TEXT,
+    tidecloak_config_b64 TEXT,
+    auth_server_public_url TEXT,
+    server_url TEXT,
+    vpn_enabled INTEGER NOT NULL DEFAULT 0,
+    vpn_subnet TEXT DEFAULT '10.66.0.0/24',
+    listen_port INTEGER DEFAULT 7891,
+    health_port INTEGER DEFAULT 7892,
+    https INTEGER NOT NULL DEFAULT 1,
+    tls_hostname TEXT DEFAULT 'localhost',
+    extra_config TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_gateway_configs_gw_id ON gateway_configs(gateway_id);
 `);
 
 // Lightweight migrations for existing DBs (CREATE TABLE IF NOT EXISTS doesn't alter).
@@ -452,6 +479,63 @@ try {
   console.error(`[Storage] Failed to seed default bridge: ${err}`);
 }
 
+// Migration: Add session_type, gateway_id, backend_name to sessions for RDP/VPN/endpoint tracking
+try {
+  const sessColumns = sqlite
+    .prepare(`PRAGMA table_info(sessions)`)
+    .all() as Array<{ name: string }>;
+  if (!sessColumns.some((c) => c.name === "session_type")) {
+    sqlite.prepare(`ALTER TABLE sessions ADD COLUMN session_type TEXT NOT NULL DEFAULT 'ssh'`).run();
+  }
+  if (!sessColumns.some((c) => c.name === "gateway_id")) {
+    sqlite.prepare(`ALTER TABLE sessions ADD COLUMN gateway_id TEXT`).run();
+  }
+  if (!sessColumns.some((c) => c.name === "backend_name")) {
+    sqlite.prepare(`ALTER TABLE sessions ADD COLUMN backend_name TEXT`).run();
+  }
+} catch {
+  // Ignore migration errors
+}
+
+// Migration: Add STUN/TURN fields to signal_servers
+try {
+  const ssColumns = sqlite
+    .prepare(`PRAGMA table_info(signal_servers)`)
+    .all() as Array<{ name: string }>;
+  if (!ssColumns.some((c) => c.name === "api_secret")) {
+    sqlite.prepare(`ALTER TABLE signal_servers ADD COLUMN api_secret TEXT`).run();
+  }
+  if (!ssColumns.some((c) => c.name === "ice_servers")) {
+    sqlite.prepare(`ALTER TABLE signal_servers ADD COLUMN ice_servers TEXT`).run();
+  }
+  if (!ssColumns.some((c) => c.name === "turn_server")) {
+    sqlite.prepare(`ALTER TABLE signal_servers ADD COLUMN turn_server TEXT`).run();
+  }
+  if (!ssColumns.some((c) => c.name === "turn_secret")) {
+    sqlite.prepare(`ALTER TABLE signal_servers ADD COLUMN turn_secret TEXT`).run();
+  }
+} catch {
+  // Ignore migration errors
+}
+
+// Migration: Add recording_type, backend_name, gateway_id to recordings for RDP session recording
+try {
+  const recColumns = sqlite
+    .prepare(`PRAGMA table_info(recordings)`)
+    .all() as Array<{ name: string }>;
+  if (!recColumns.some((c) => c.name === "recording_type")) {
+    sqlite.prepare(`ALTER TABLE recordings ADD COLUMN recording_type TEXT NOT NULL DEFAULT 'ssh'`).run();
+  }
+  if (!recColumns.some((c) => c.name === "backend_name")) {
+    sqlite.prepare(`ALTER TABLE recordings ADD COLUMN backend_name TEXT`).run();
+  }
+  if (!recColumns.some((c) => c.name === "gateway_id")) {
+    sqlite.prepare(`ALTER TABLE recordings ADD COLUMN gateway_id TEXT`).run();
+  }
+} catch {
+  // Ignore migration errors
+}
+
 export class SQLiteStorage implements IStorage {
   async getUser(id: string): Promise<User | undefined> {
     const result = db.select().from(users).where(eq(users.id, id)).get();
@@ -567,6 +651,9 @@ export class SQLiteStorage implements IStorage {
       startedAt: new Date(),
       endedAt: null,
       recordingId: insertSession.recordingId ?? null,
+      sessionType: insertSession.sessionType ?? "ssh",
+      gatewayId: insertSession.gatewayId ?? null,
+      backendName: insertSession.backendName ?? null,
     };
     db.insert(sessions).values(session).run();
     return session;
@@ -2079,6 +2166,9 @@ export interface Recording {
   data: string;
   textContent: string;
   fileSize: number;
+  recordingType: "ssh" | "rdp";
+  backendName?: string | null;
+  gatewayId?: string | null;
 }
 
 export interface InsertRecording {
@@ -2090,6 +2180,9 @@ export interface InsertRecording {
   sshUser: string;
   terminalWidth?: number;
   terminalHeight?: number;
+  recordingType?: "ssh" | "rdp";
+  backendName?: string;
+  gatewayId?: string;
 }
 
 // Recording storage class for session recordings
@@ -2100,8 +2193,8 @@ export class RecordingStorage {
     const now = Math.floor(Date.now() / 1000);
 
     sqlite.prepare(`
-      INSERT INTO recordings (id, session_id, server_id, server_name, user_id, user_email, ssh_user, started_at, terminal_width, terminal_height)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO recordings (id, session_id, server_id, server_name, user_id, user_email, ssh_user, started_at, terminal_width, terminal_height, recording_type, backend_name, gateway_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       data.sessionId,
@@ -2112,7 +2205,10 @@ export class RecordingStorage {
       data.sshUser,
       now,
       data.terminalWidth || 80,
-      data.terminalHeight || 24
+      data.terminalHeight || 24,
+      data.recordingType || "ssh",
+      data.backendName || null,
+      data.gatewayId || null,
     );
 
     return {
@@ -2131,6 +2227,9 @@ export class RecordingStorage {
       data: "",
       textContent: "",
       fileSize: 0,
+      recordingType: data.recordingType || "ssh",
+      backendName: data.backendName || null,
+      gatewayId: data.gatewayId || null,
     };
   }
 
@@ -2274,6 +2373,9 @@ export class RecordingStorage {
       data: row.data,
       textContent: row.text_content,
       fileSize: row.file_size,
+      recordingType: row.recording_type || "ssh",
+      backendName: row.backend_name || null,
+      gatewayId: row.gateway_id || null,
     };
   }
 }
@@ -2563,15 +2665,19 @@ export class SignalServerStorage {
     const now = Math.floor(Date.now() / 1000);
 
     sqlite.prepare(`
-      INSERT INTO signal_servers (id, name, url, description, enabled, created_at)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO signal_servers (id, name, url, description, enabled, created_at, api_secret, ice_servers, turn_server, turn_secret)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       data.name,
       data.url,
       data.description || null,
       data.enabled !== false ? 1 : 0,
-      now
+      now,
+      (data as any).apiSecret || null,
+      (data as any).iceServers || null,
+      (data as any).turnServer || null,
+      (data as any).turnSecret || null,
     );
 
     return {
@@ -2581,6 +2687,10 @@ export class SignalServerStorage {
       description: data.description || null,
       enabled: data.enabled !== false,
       createdAt: new Date(now * 1000),
+      apiSecret: (data as any).apiSecret || null,
+      iceServers: (data as any).iceServers || null,
+      turnServer: (data as any).turnServer || null,
+      turnSecret: (data as any).turnSecret || null,
     };
   }
 
@@ -2632,6 +2742,22 @@ export class SignalServerStorage {
       updates.push('enabled = ?');
       values.push(data.enabled ? 1 : 0);
     }
+    if ((data as any).apiSecret !== undefined) {
+      updates.push('api_secret = ?');
+      values.push((data as any).apiSecret || null);
+    }
+    if ((data as any).iceServers !== undefined) {
+      updates.push('ice_servers = ?');
+      values.push((data as any).iceServers || null);
+    }
+    if ((data as any).turnServer !== undefined) {
+      updates.push('turn_server = ?');
+      values.push((data as any).turnServer || null);
+    }
+    if ((data as any).turnSecret !== undefined) {
+      updates.push('turn_secret = ?');
+      values.push((data as any).turnSecret || null);
+    }
 
     if (updates.length > 0) {
       values.push(id);
@@ -2658,6 +2784,221 @@ export class SignalServerStorage {
       description: row.description,
       enabled: !!row.enabled,
       createdAt: new Date(row.created_at * 1000),
+      apiSecret: row.api_secret || null,
+      iceServers: row.ice_servers || null,
+      turnServer: row.turn_server || null,
+      turnSecret: row.turn_secret || null,
+    };
+  }
+}
+
+// Gateway configuration storage
+export interface GatewayConfig {
+  id: string;
+  gatewayId: string;
+  displayName: string | null;
+  stunServerUrl: string | null;
+  apiSecret: string | null;
+  iceServers: string | null;
+  turnServer: string | null;
+  turnSecret: string | null;
+  backends: string | null;
+  tidecloakConfigB64: string | null;
+  authServerPublicUrl: string | null;
+  serverUrl: string | null;
+  vpnEnabled: boolean;
+  vpnSubnet: string;
+  listenPort: number;
+  healthPort: number;
+  https: boolean;
+  tlsHostname: string;
+  extraConfig: string | null;
+  enabled: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface InsertGatewayConfig {
+  gatewayId: string;
+  displayName?: string;
+  stunServerUrl?: string;
+  apiSecret?: string;
+  iceServers?: string;
+  turnServer?: string;
+  turnSecret?: string;
+  backends?: string;
+  tidecloakConfigB64?: string;
+  authServerPublicUrl?: string;
+  serverUrl?: string;
+  vpnEnabled?: boolean;
+  vpnSubnet?: string;
+  listenPort?: number;
+  healthPort?: number;
+  https?: boolean;
+  tlsHostname?: string;
+  extraConfig?: string;
+}
+
+export class GatewayConfigStorage {
+  async create(data: InsertGatewayConfig): Promise<GatewayConfig> {
+    const id = randomUUID();
+    const now = Math.floor(Date.now() / 1000);
+
+    sqlite.prepare(`
+      INSERT INTO gateway_configs (id, gateway_id, display_name, stun_server_url, api_secret, ice_servers, turn_server, turn_secret, backends, tidecloak_config_b64, auth_server_public_url, server_url, vpn_enabled, vpn_subnet, listen_port, health_port, https, tls_hostname, extra_config, enabled, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+    `).run(
+      id, data.gatewayId, data.displayName || null,
+      data.stunServerUrl || null, data.apiSecret || null,
+      data.iceServers || null, data.turnServer || null, data.turnSecret || null,
+      data.backends || null, data.tidecloakConfigB64 || null,
+      data.authServerPublicUrl || null, data.serverUrl || null,
+      data.vpnEnabled ? 1 : 0, data.vpnSubnet || "10.66.0.0/24",
+      data.listenPort || 7891, data.healthPort || 7892,
+      data.https !== false ? 1 : 0, data.tlsHostname || "localhost",
+      data.extraConfig || null, now, now,
+    );
+
+    return this.getById(id) as Promise<GatewayConfig>;
+  }
+
+  async getById(id: string): Promise<GatewayConfig | undefined> {
+    const row = sqlite.prepare(`SELECT * FROM gateway_configs WHERE id = ?`).get(id) as any;
+    return row ? this.mapRow(row) : undefined;
+  }
+
+  async getByGatewayId(gatewayId: string): Promise<GatewayConfig | undefined> {
+    const row = sqlite.prepare(`SELECT * FROM gateway_configs WHERE gateway_id = ?`).get(gatewayId) as any;
+    return row ? this.mapRow(row) : undefined;
+  }
+
+  async list(): Promise<GatewayConfig[]> {
+    const rows = sqlite.prepare(`SELECT * FROM gateway_configs ORDER BY gateway_id`).all() as any[];
+    return rows.map((r) => this.mapRow(r));
+  }
+
+  async update(id: string, data: Partial<InsertGatewayConfig> & { enabled?: boolean }): Promise<GatewayConfig | undefined> {
+    const fields: string[] = [];
+    const values: any[] = [];
+
+    const mapping: Record<string, string> = {
+      gatewayId: "gateway_id", displayName: "display_name",
+      stunServerUrl: "stun_server_url", apiSecret: "api_secret",
+      iceServers: "ice_servers", turnServer: "turn_server", turnSecret: "turn_secret",
+      backends: "backends", tidecloakConfigB64: "tidecloak_config_b64",
+      authServerPublicUrl: "auth_server_public_url", serverUrl: "server_url",
+      vpnSubnet: "vpn_subnet", listenPort: "listen_port", healthPort: "health_port",
+      tlsHostname: "tls_hostname", extraConfig: "extra_config",
+    };
+
+    for (const [key, col] of Object.entries(mapping)) {
+      if ((data as any)[key] !== undefined) {
+        fields.push(`${col} = ?`);
+        values.push((data as any)[key]);
+      }
+    }
+    if (data.vpnEnabled !== undefined) {
+      fields.push("vpn_enabled = ?");
+      values.push(data.vpnEnabled ? 1 : 0);
+    }
+    if (data.https !== undefined) {
+      fields.push("https = ?");
+      values.push(data.https ? 1 : 0);
+    }
+    if (data.enabled !== undefined) {
+      fields.push("enabled = ?");
+      values.push(data.enabled ? 1 : 0);
+    }
+
+    if (fields.length > 0) {
+      fields.push("updated_at = ?");
+      values.push(Math.floor(Date.now() / 1000));
+      values.push(id);
+      sqlite.prepare(`UPDATE gateway_configs SET ${fields.join(", ")} WHERE id = ?`).run(...values);
+    }
+
+    return this.getById(id);
+  }
+
+  async delete(id: string): Promise<boolean> {
+    const result = sqlite.prepare(`DELETE FROM gateway_configs WHERE id = ?`).run(id);
+    return result.changes > 0;
+  }
+
+  /// Generate the TOML config string for a gateway (what the bridge would use)
+  toToml(config: GatewayConfig, signalServer?: SignalServer | null): string {
+    // Merge: gateway config values take priority, fall back to signal server values
+    const stunServerUrl = config.stunServerUrl || (signalServer?.url?.replace(/^http/, "ws")) || "";
+    const apiSecret = config.apiSecret || (signalServer as any)?.apiSecret || "";
+    const iceServers = config.iceServers || (signalServer as any)?.iceServers || "";
+    const turnServer = config.turnServer || (signalServer as any)?.turnServer || "";
+    const turnSecret = config.turnSecret || (signalServer as any)?.turnSecret || "";
+
+    const lines: string[] = [
+      `# Punchd Gateway Config`,
+      `# Gateway: ${config.gatewayId}${config.displayName ? ` (${config.displayName})` : ""}`,
+      `# Generated: ${new Date().toISOString()}`,
+      ``,
+      `gateway_id = "${config.gatewayId}"`,
+      ``,
+      `# Signal Server`,
+      `stun_server_url = "${stunServerUrl}"`,
+      `api_secret = "${apiSecret}"`,
+    ];
+    if (iceServers) lines.push(`ice_servers = "${iceServers}"`);
+    if (turnServer) lines.push(`turn_server = "${turnServer}"`);
+    if (turnSecret) lines.push(`turn_secret = "${turnSecret}"`);
+
+    lines.push(``);
+    if (config.backends) {
+      lines.push(`# Backends`);
+      lines.push(`backends = "${config.backends}"`);
+    }
+
+    lines.push(``);
+    lines.push(`# TideCloak`);
+    if (config.tidecloakConfigB64) lines.push(`tidecloak_config_b64 = "${config.tidecloakConfigB64}"`);
+    if (config.authServerPublicUrl) lines.push(`auth_server_public_url = "${config.authServerPublicUrl}"`);
+
+    if (config.serverUrl) {
+      lines.push(``);
+      lines.push(`# Server`);
+      lines.push(`server_url = "${config.serverUrl}"`);
+    }
+
+    lines.push(``);
+    lines.push(`# Network`);
+    lines.push(`listen_port = ${config.listenPort}`);
+    lines.push(`health_port = ${config.healthPort}`);
+    lines.push(`https = ${config.https}`);
+    lines.push(`tls_hostname = "${config.tlsHostname}"`);
+    return lines.join("\n") + "\n";
+  }
+
+  private mapRow(row: any): GatewayConfig {
+    return {
+      id: row.id,
+      gatewayId: row.gateway_id,
+      displayName: row.display_name,
+      stunServerUrl: row.stun_server_url,
+      apiSecret: row.api_secret,
+      iceServers: row.ice_servers,
+      turnServer: row.turn_server,
+      turnSecret: row.turn_secret,
+      backends: row.backends,
+      tidecloakConfigB64: row.tidecloak_config_b64,
+      authServerPublicUrl: row.auth_server_public_url,
+      serverUrl: row.server_url,
+      vpnEnabled: !!row.vpn_enabled,
+      vpnSubnet: row.vpn_subnet || "10.66.0.0/24",
+      listenPort: row.listen_port || 7891,
+      healthPort: row.health_port || 7892,
+      https: !!row.https,
+      tlsHostname: row.tls_hostname || "localhost",
+      extraConfig: row.extra_config,
+      enabled: !!row.enabled,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
     };
   }
 }
@@ -2672,3 +3013,4 @@ export const recordingStorage = new RecordingStorage();
 export const fileOperationStorage = new FileOperationStorage();
 export const bridgeStorage = new BridgeStorage();
 export const signalServerStorage = new SignalServerStorage();
+export const gatewayConfigStorage = new GatewayConfigStorage();

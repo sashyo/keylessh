@@ -7,12 +7,15 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Server, Terminal, Clock, Activity, ArrowRight, HelpCircle, AlertCircle, X, Globe, ExternalLink, Search, LayoutGrid, List, Monitor } from "lucide-react";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Label } from "@/components/ui/label";
+import { Server, Terminal, Clock, Activity, ArrowRight, HelpCircle, AlertCircle, X, Globe, ExternalLink, Search, LayoutGrid, List, Monitor, Network } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
 import { Input } from "@/components/ui/input";
 import type { ServerWithAccess, ActiveSession } from "@shared/schema";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 import { RefreshButton } from "@/components/RefreshButton";
+import { VpnPanel } from "@/components/VpnPanel";
 import { IAMService } from "@tidecloak/js";
 import { appFetch } from "@/lib/appFetch";
 import { api, type GatewayEndpoint } from "@/lib/api";
@@ -20,7 +23,8 @@ import { api, type GatewayEndpoint } from "@/lib/api";
 type ServiceItem =
   | { kind: "ssh"; server: ServerWithAccess }
   | { kind: "web"; endpoint: GatewayEndpoint; backend: { name: string; protocol?: string; auth?: string; rdpUsernames?: string[]; accessible?: boolean } }
-  | { kind: "rdp"; endpoint: GatewayEndpoint; backend: { name: string; protocol?: string; auth?: string; rdpUsernames?: string[]; accessible?: boolean } };
+  | { kind: "rdp"; endpoint: GatewayEndpoint; backend: { name: string; protocol?: string; auth?: string; rdpUsernames?: string[]; accessible?: boolean } }
+  | { kind: "custom"; endpoint: GatewayEndpoint };
 
 function ServerCard({ server, sshBlocked }: { server: ServerWithAccess; sshBlocked?: boolean }) {
   const [selectedUser, setSelectedUser] = useState<string>(server.allowedSshUsers[0] || "");
@@ -327,6 +331,172 @@ function RdpEndpointCard({ endpoint, backend }: { endpoint: GatewayEndpoint; bac
   );
 }
 
+function CustomConnectionCard({ endpoint }: { endpoint: GatewayEndpoint }) {
+  const [open, setOpen] = useState(false);
+  const [protocol, setProtocol] = useState<"rdp" | "web">("rdp");
+  const [host, setHost] = useState("");
+  const [port, setPort] = useState(protocol === "rdp" ? "3389" : "443");
+  const [noAuth, setNoAuth] = useState(false);
+  const [eddsa, setEddsa] = useState(false);
+  const [stripAuth, setStripAuth] = useState(false);
+
+  const handleConnect = () => {
+    if (!host.trim()) return;
+    const url = endpoint.signalServerUrl.replace(/\/$/, "");
+    const token = localStorage.getItem("access_token") || "";
+    const target = `${host.trim()}:${port || (protocol === "rdp" ? "3389" : "443")}`;
+    const flags = [
+      noAuth ? "noauth" : "",
+      eddsa ? "eddsa" : "",
+      stripAuth ? "stripauth" : "",
+    ].filter(Boolean).join(";");
+
+    const params = new URLSearchParams({
+      gateway: endpoint.id,
+      backend: "__custom__",
+      customTarget: target,
+      customProtocol: protocol,
+    });
+    if (flags) params.set("customFlags", flags);
+    if (token) params.set("token", token);
+
+    if (protocol === "rdp") {
+      window.open(`${url}/api/select?${params.toString()}&redirect=${encodeURIComponent(`/rdp?host=${encodeURIComponent(target)}`)}`, "_blank");
+    } else {
+      window.open(`${url}/api/select?${params.toString()}`, "_blank");
+    }
+    setOpen(false);
+  };
+
+  return (
+    <>
+      <Card className="group cyber-card hover-neon-glow border-dashed">
+        <CardHeader className="pb-3">
+          <div className="flex items-start justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-muted/50 border border-dashed border-muted-foreground/30 group-hover:border-muted-foreground/50 transition-colors">
+                <Network className="h-5 w-5 text-muted-foreground" />
+              </div>
+              <div>
+                <CardTitle className="text-base">Custom Connection</CardTitle>
+                <CardDescription className="text-xs">
+                  {endpoint.displayName} &middot; Connect to any IP
+                </CardDescription>
+              </div>
+            </div>
+            {endpoint.online && (
+              <Badge variant="outline" className="gap-1.5 label-success">
+                <span className="h-2 w-2 rounded-full bg-[hsl(var(--neon-green))] animate-pulse" />
+                Online
+              </Badge>
+            )}
+          </div>
+        </CardHeader>
+        <CardContent>
+          <Button
+            className="w-full gap-2"
+            variant="outline"
+            disabled={!endpoint.online}
+            onClick={() => setOpen(true)}
+          >
+            <Network className="h-4 w-4" />
+            Connect to IP
+            <ArrowRight className="h-4 w-4" />
+          </Button>
+        </CardContent>
+      </Card>
+
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Custom Connection</DialogTitle>
+            <DialogDescription>
+              Connect to a device on {endpoint.displayName}'s network
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label>Protocol</Label>
+              <Select value={protocol} onValueChange={(v) => {
+                const p = v as "rdp" | "web";
+                setProtocol(p);
+                setPort(p === "rdp" ? "3389" : "443");
+              }}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="rdp">
+                    <div className="flex items-center gap-2">
+                      <Monitor className="h-3.5 w-3.5" /> Remote Desktop (RDP)
+                    </div>
+                  </SelectItem>
+                  <SelectItem value="web">
+                    <div className="flex items-center gap-2">
+                      <Globe className="h-3.5 w-3.5" /> Web / HTTP
+                    </div>
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="grid grid-cols-3 gap-3">
+              <div className="col-span-2 space-y-2">
+                <Label>Host / IP Address</Label>
+                <Input
+                  value={host}
+                  onChange={(e) => setHost(e.target.value)}
+                  placeholder="192.168.0.5"
+                  autoFocus
+                  onKeyDown={(e) => e.key === "Enter" && handleConnect()}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Port</Label>
+                <Input
+                  value={port}
+                  onChange={(e) => setPort(e.target.value)}
+                  placeholder={protocol === "rdp" ? "3389" : "443"}
+                />
+              </div>
+            </div>
+          </div>
+
+          {protocol === "rdp" && (
+            <div className="space-y-2">
+              <Label className="text-xs text-muted-foreground">Connection Options</Label>
+              <div className="flex flex-wrap gap-4">
+                <label className="flex items-center gap-2 text-sm cursor-pointer">
+                  <input type="checkbox" checked={eddsa} onChange={(e) => setEddsa(e.target.checked)} className="rounded" />
+                  Passwordless (EdDSA)
+                </label>
+                <label className="flex items-center gap-2 text-sm cursor-pointer">
+                  <input type="checkbox" checked={noAuth} onChange={(e) => setNoAuth(e.target.checked)} className="rounded" />
+                  No Auth
+                </label>
+                <label className="flex items-center gap-2 text-sm cursor-pointer">
+                  <input type="checkbox" checked={stripAuth} onChange={(e) => setStripAuth(e.target.checked)} className="rounded" />
+                  Strip Auth
+                </label>
+              </div>
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
+            <Button onClick={handleConnect} disabled={!host.trim()}>
+              {protocol === "rdp" ? (
+                <><Monitor className="h-4 w-4 mr-2" /> Connect RDP</>
+              ) : (
+                <><Globe className="h-4 w-4 mr-2" /> Connect</>
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
 function ServiceListItem({ item, sshBlocked }: { item: ServiceItem; sshBlocked?: boolean }) {
   const [selectedUser, setSelectedUser] = useState<string>(
     item.kind === "ssh" ? item.server.allowedSshUsers[0] || "" : ""
@@ -393,6 +563,24 @@ function ServiceListItem({ item, sshBlocked }: { item: ServiceItem; sshBlocked?:
             </Link>
           )}
         </div>
+      </div>
+    );
+  }
+
+  // Custom connection — render inline with just gateway name
+  if (item.kind === "custom") {
+    return (
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 py-3 px-4 hover-elevate rounded-md group">
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-muted/50 border border-dashed border-muted-foreground/30">
+            <Network className="h-5 w-5 text-muted-foreground" />
+          </div>
+          <div className="min-w-0">
+            <p className="text-sm font-medium truncate">Custom Connection</p>
+            <p className="text-xs text-muted-foreground truncate">{item.endpoint.displayName} &middot; Connect to any IP</p>
+          </div>
+        </div>
+        <CustomConnectionCard endpoint={item.endpoint} />
       </div>
     );
   }
@@ -585,16 +773,19 @@ export default function Dashboard() {
           ? { kind: "rdp", endpoint, backend }
           : { kind: "web", endpoint, backend });
       }
+      // Add a "Custom Connection" card for each online gateway
+      if (endpoint.online) {
+        items.push({ kind: "custom", endpoint });
+      }
     }
-    // Sort: accessible/connectable items first
+    // Sort: accessible/connectable items first, custom cards last
     items.sort((a, b) => {
-      const aOk = a.kind === "ssh"
-        ? (a.server.allowedSshUsers.length > 0 && a.server.status === "online") ? 0 : 1
-        : (a.backend.accessible !== false ? 0 : 1);
-      const bOk = b.kind === "ssh"
-        ? (b.server.allowedSshUsers.length > 0 && b.server.status === "online") ? 0 : 1
-        : (b.backend.accessible !== false ? 0 : 1);
-      return aOk - bOk;
+      const rank = (item: ServiceItem) => {
+        if (item.kind === "custom") return 2; // custom cards at end
+        if (item.kind === "ssh") return (item.server.allowedSshUsers.length > 0 && item.server.status === "online") ? 0 : 1;
+        return item.backend.accessible !== false ? 0 : 1;
+      };
+      return rank(a) - rank(b);
     });
     return items;
   }, [servers, gatewayEndpoints]);
@@ -606,7 +797,7 @@ export default function Dashboard() {
   const filteredServices = useMemo(() => {
     let list = allServices;
     if (typeFilter !== "all") {
-      list = list.filter((item) => item.kind === typeFilter);
+      list = list.filter((item) => item.kind === typeFilter || item.kind === "custom");
     }
     if (search.trim()) {
       const q = search.toLowerCase();
@@ -617,6 +808,11 @@ export default function Dashboard() {
             || s.host.toLowerCase().includes(q)
             || s.environment.toLowerCase().includes(q)
             || s.tags?.some((t) => t.toLowerCase().includes(q));
+        }
+        if (item.kind === "custom") {
+          return "custom".includes(q)
+            || item.endpoint.displayName.toLowerCase().includes(q)
+            || item.endpoint.signalServerName.toLowerCase().includes(q);
         }
         const { endpoint, backend } = item;
         return endpoint.displayName.toLowerCase().includes(q)
@@ -658,6 +854,9 @@ export default function Dashboard() {
           </AlertDescription>
         </Alert>
       )}
+
+      {/* VPN Control Panel */}
+      <VpnPanel />
 
       {activeSessions.length > 0 && (
         <div className="space-y-4">
@@ -784,6 +983,8 @@ export default function Dashboard() {
                   <ServerCard key={item.server.id} server={item.server} sshBlocked={isSshBlocked} />
                 ) : item.kind === "rdp" ? (
                   <RdpEndpointCard key={`${item.endpoint.signalServerId}-${item.endpoint.id}-${item.backend.name}`} endpoint={item.endpoint} backend={item.backend} />
+                ) : item.kind === "custom" ? (
+                  <CustomConnectionCard key={`custom-${item.endpoint.id}`} endpoint={item.endpoint} />
                 ) : (
                   <GatewayEndpointCard key={`${item.endpoint.signalServerId}-${item.endpoint.id}-${item.backend.name}`} endpoint={item.endpoint} backend={item.backend} />
                 )
@@ -793,7 +994,7 @@ export default function Dashboard() {
             <Card>
               <CardContent className="p-0 divide-y divide-border">
                 {filteredServices.map((item) => (
-                  <ServiceListItem key={item.kind === "ssh" ? item.server.id : `${item.endpoint.signalServerId}-${item.endpoint.id}-${item.backend.name}`} item={item} sshBlocked={isSshBlocked} />
+                  <ServiceListItem key={item.kind === "ssh" ? item.server.id : item.kind === "custom" ? `custom-${item.endpoint.id}` : `${item.endpoint.signalServerId}-${item.endpoint.id}-${item.backend.name}`} item={item} sshBlocked={isSshBlocked} />
                 ))}
               </CardContent>
             </Card>

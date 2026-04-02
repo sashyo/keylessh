@@ -6,11 +6,13 @@ mod auth;
 mod config;
 mod logstream;
 mod proxy;
+pub mod recording;
 mod rdcleanpath;
 mod setup;
 mod stun;
 mod tls;
 mod tray;
+pub mod vpn;
 mod webrtc;
 
 #[tokio::main]
@@ -26,7 +28,7 @@ async fn main() {
         use tracing_subscriber::EnvFilter;
         logstream::init();
         let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            EnvFilter::new("punchd_gateway=info,warn")
+            EnvFilter::new("punchd_bridge_rs=debug,warn")
         });
         tracing_subscriber::registry()
             .with(filter)
@@ -74,7 +76,7 @@ async fn main() {
         tls_cert.is_some(),
         &tc_client_id,
     );
-    let app = proxy::http_proxy::build_router(proxy_state.clone());
+    let (app, shared_state) = proxy::http_proxy::build_router(proxy_state.clone());
 
     // Bind HTTP(S) server
     let addr = format!("0.0.0.0:{}", config.listen_port);
@@ -90,6 +92,11 @@ async fn main() {
         .route("/logs", axum::routing::get(serve_logs_page))
         .route("/logs/stream", axum::routing::get(serve_logs_stream))
         .route("/logs/buffer", axum::routing::get(serve_logs_buffer));
+
+    // VPN state — always enabled, auto-configures IP forwarding when a client connects
+    let vpn_state = Arc::new(tokio::sync::Mutex::new(
+        vpn::vpn_handler::VpnState::new("10.66.0.0/24", true),
+    ));
 
     // STUN registration
     let local_addr = std::env::var("GATEWAY_ADDRESS").unwrap_or_else(|_| {
@@ -141,12 +148,43 @@ async fn main() {
         backends: config.backends.clone(),
         auth: Some(auth.clone()),
         tc_client_id: Some(tc_client_id.clone()),
+        vpn_state: Some(vpn_state.clone()),
     });
+
+    // Watch config files for changes — hot-reload backends, auth, VPN settings
+    {
+        let shared = shared_state.clone();
+        let use_tls = tls_cert.is_some();
+        let tc_client_id = tc_client_id.clone();
+        config::on_config_change(move || {
+            tracing::info!("[Config] Hot-reloading config...");
+            let new_config = config::load_config();
+            let new_tc_config = config::load_tidecloak_config();
+            let new_extra_issuers: Vec<String> = new_config.auth_server_public_url.iter()
+                .chain(new_config.tc_internal_url.iter())
+                .cloned().collect();
+            let new_auth = Arc::new(auth::tidecloak::TidecloakAuth::new(&new_tc_config, &new_extra_issuers));
+
+            proxy::http_proxy::reload_state(&shared, &new_config, &new_tc_config, new_auth, use_tls, &tc_client_id);
+        });
+    }
+    config::watch_config_and_restart();
 
     // System tray icon
     let logs_url = format!("http://localhost:{}/logs", config.health_port);
     let gateway_url = format!("{scheme}://localhost:{}", config.listen_port);
     tray::spawn_tray(logs_url, gateway_url);
+
+    // VPN toggle callback — enables/disables IP forwarding from the system tray
+    tray::set_vpn_callback(|enabled| {
+        if enabled {
+            tracing::info!("[VPN] VPN enabled via system tray");
+            vpn::vpn_handler::enable_forwarding();
+        } else {
+            tracing::info!("[VPN] VPN disabled via system tray");
+            vpn::vpn_handler::disable_forwarding();
+        }
+    });
 
     // Startup banner
     tracing::info!("Punchd Gateway (local-facing)");
