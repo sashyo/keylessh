@@ -129,7 +129,7 @@ async fn run_session(
         }
         tracing::info!("destination: {}", req.destination);
 
-        _rdp_username = match check_dest_roles(&payload, &req.destination, Some(&payload.azp.clone().unwrap_or_default())) {
+        _rdp_username = match check_dest_roles(&payload, &req.destination, payload.azp.as_deref().unwrap_or("")) {
             Some(u) => u,
             None => {
                 tracing::error!(
@@ -414,7 +414,7 @@ fn extract_peer_cert_chain(tls_stream: &TlsStream<TcpStream>) -> Vec<Vec<u8>> {
 }
 
 /// Check whether the JWT payload has a matching "dest:" role for the given destination.
-/// Looks in both realm_access.roles and resource_access[tc_client_id].roles.
+/// Searches realm_access.roles and resource_access[client_id].roles.
 ///
 /// Accepted role formats:
 ///   - "dest:<endpoint>"                          (simple)
@@ -423,7 +423,7 @@ fn extract_peer_cert_chain(tls_stream: &TlsStream<TcpStream>) -> Vec<Vec<u8>> {
 ///
 /// Returns Some(username) if a role with an explicit username is found,
 /// or Some("") if access is granted but no username is embedded.
-fn check_dest_roles(payload: &JwtPayload, destination: &str, tc_client_id: Option<&str>) -> Option<String> {
+pub fn check_dest_roles(payload: &JwtPayload, destination: &str, client_id: &str) -> Option<String> {
     let check_roles = |roles: &[String]| -> Option<String> {
         let mut granted = false;
         let mut username: Option<String> = None;
@@ -463,9 +463,8 @@ fn check_dest_roles(payload: &JwtPayload, destination: &str, tc_client_id: Optio
         }
     }
 
-    // Check resource_access[tc_client_id].roles
-    if let (Some(resource_access), Some(client_id)) = (&payload.resource_access, tc_client_id)
-    {
+    // Check resource_access[client_id].roles
+    if let Some(ref resource_access) = payload.resource_access {
         if let Some(client_obj) = resource_access.get(client_id) {
             if let Some(roles) = client_obj.get("roles").and_then(|v| v.as_array()) {
                 let role_strs: Vec<String> = roles
