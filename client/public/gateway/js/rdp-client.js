@@ -885,7 +885,15 @@
 
       setStatus("connecting", "Connecting to " + backendName + "...");
 
-      var proxyAddress = "wss://" + location.host + "/ws/rdcleanpath";
+      // Choose connection mode: e2e TLS (trustless) or RDCleanPath (recording)
+      var useE2eTls = config && config.e2eTls;
+      var proxyAddress;
+      if (useE2eTls) {
+        proxyAddress = "wss://" + location.host + "/ws/tcp-forward";
+        console.log("[RDP] Using e2e TLS mode (trustless proxy)");
+      } else {
+        proxyAddress = "wss://" + location.host + "/ws/rdcleanpath";
+      }
       console.log("[RDP] Proxy address:", proxyAddress);
       console.log("[RDP] Destination:", backendName);
 
@@ -916,7 +924,11 @@
       });
       builder = builder.setCursorStyleCallbackContext(window);
 
-      console.log("[RDP] Connecting via RDCleanPath...");
+      if (useE2eTls) {
+        builder = builder.extension("e2e_tls", true);
+      }
+
+      console.log("[RDP] Connecting via " + (useE2eTls ? "e2e TLS" : "RDCleanPath") + "...");
       rdpSession = await builder.connect();
 
       setStatus("connected", "Connected to " + backendName);

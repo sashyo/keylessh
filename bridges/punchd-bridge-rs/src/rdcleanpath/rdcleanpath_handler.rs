@@ -313,7 +313,7 @@ async fn run_session(
     // Task: client -> RDP server
     let _send_close_c2s = send_close.clone();
     let rec_c2s = opts.recording.clone();
-    let c2s = tokio::spawn(async move {
+    let mut c2s = tokio::spawn(async move {
         let mut first_msg = true;
         let mut mcs_proto = mcs_patch_protocol;
         while let Some(mut data) = rx.recv().await {
@@ -341,7 +341,7 @@ async fn run_session(
     let send_binary_s2c = send_binary.clone();
     let send_close_s2c = send_close.clone();
     let rec_s2c = opts.recording.clone();
-    let s2c = tokio::spawn(async move {
+    let mut s2c = tokio::spawn(async move {
         let mut buf = vec![0u8; 65536];
         loop {
             match tls_read.read(&mut buf).await {
@@ -362,11 +362,14 @@ async fn run_session(
         (send_close_s2c)(1000, "RDP session ended".into());
     });
 
-    // Wait for either direction to finish
+    // Wait for either direction to finish, then abort the other
     tokio::select! {
-        _ = c2s => {},
-        _ = s2c => {},
+        _ = &mut c2s => { s2c.abort(); },
+        _ = &mut s2c => { c2s.abort(); },
     }
+
+    // Drop all recording handles so the uploader channel closes and end-recording fires
+    drop(opts.recording);
 
     Ok(())
 }
