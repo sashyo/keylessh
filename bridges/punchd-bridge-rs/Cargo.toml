@@ -44,6 +44,8 @@ serde_urlencoded = "0.7"
 aes = "0.8"
 aes-gcm = "0.10"
 clap = { version = "4", features = ["derive"] }
+notify = { version = "7", default-features = false, features = ["macos_fsevent"] }
+arc-swap = "1"
 ipnet = "2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -59,6 +61,7 @@ path = "src/main.rs"
 [[bin]]
 name = "punchd-vpn"
 path = "src/bin/punchd_vpn.rs"
+
 
 [build-dependencies]
 winresource = "0.1"

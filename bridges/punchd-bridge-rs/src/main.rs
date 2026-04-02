@@ -6,6 +6,7 @@ mod auth;
 mod config;
 mod logstream;
 mod proxy;
+pub mod recording;
 mod rdcleanpath;
 mod setup;
 mod stun;
@@ -75,7 +76,7 @@ async fn main() {
         tls_cert.is_some(),
         &tc_client_id,
     );
-    let app = proxy::http_proxy::build_router(proxy_state.clone());
+    let (app, shared_state) = proxy::http_proxy::build_router(proxy_state.clone());
 
     // Bind HTTP(S) server
     let addr = format!("0.0.0.0:{}", config.listen_port);
@@ -149,6 +150,25 @@ async fn main() {
         tc_client_id: Some(tc_client_id.clone()),
         vpn_state: Some(vpn_state.clone()),
     });
+
+    // Watch config files for changes — hot-reload backends, auth, VPN settings
+    {
+        let shared = shared_state.clone();
+        let use_tls = tls_cert.is_some();
+        let tc_client_id = tc_client_id.clone();
+        config::on_config_change(move || {
+            tracing::info!("[Config] Hot-reloading config...");
+            let new_config = config::load_config();
+            let new_tc_config = config::load_tidecloak_config();
+            let new_extra_issuers: Vec<String> = new_config.auth_server_public_url.iter()
+                .chain(new_config.tc_internal_url.iter())
+                .cloned().collect();
+            let new_auth = Arc::new(auth::tidecloak::TidecloakAuth::new(&new_tc_config, &new_extra_issuers));
+
+            proxy::http_proxy::reload_state(&shared, &new_config, &new_tc_config, new_auth, use_tls, &tc_client_id);
+        });
+    }
+    config::watch_config_and_restart();
 
     // System tray icon
     let logs_url = format!("http://localhost:{}/logs", config.health_port);

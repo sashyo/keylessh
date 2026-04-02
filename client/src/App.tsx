@@ -23,6 +23,7 @@ import AdminLicense from "@/pages/AdminLicense";
 import AdminRecordings from "@/pages/AdminRecordings";
 import AdminBridges from "@/pages/AdminBridges";
 import AdminSignalServers from "@/pages/AdminSignalServers";
+import AdminGateways from "@/pages/AdminGateways";
 import NotFound from "@/pages/not-found";
 import { Loader2, Terminal } from "lucide-react";
 
@@ -149,6 +150,9 @@ function AuthenticatedApp() {
           </Route>
           <Route path="/admin/signal-servers">
             {isAdmin ? <AdminSignalServers /> : <Redirect to="/app" />}
+          </Route>
+          <Route path="/admin/gateways">
+            {isAdmin ? <AdminGateways /> : <Redirect to="/app" />}
           </Route>
           <Route path="/admin/users">
             {isAdmin ? <AdminUsers /> : <Redirect to="/app" />}

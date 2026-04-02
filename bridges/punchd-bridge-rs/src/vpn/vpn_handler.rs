@@ -11,10 +11,174 @@ use std::sync::Arc;
 use serde_json::json;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
+use crate::auth::tidecloak::TidecloakAuth;
 use super::tun_device::{TunConfig, TunDevice};
 
 const VPN_TUNNEL_MAGIC: u8 = 0x04;
 const VPN_MTU: u16 = 1400;
+
+/// A firewall rule parsed from a VPN role.
+/// Format: `vpn:<gateway>:<allow|deny>:<network>/<prefix>:<ports>`
+#[derive(Clone, Debug)]
+pub struct FirewallRule {
+    pub action: FirewallAction,
+    pub network: Ipv4Addr,
+    pub prefix: u8,
+    pub ports: PortMatch,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum FirewallAction {
+    Allow,
+    Deny,
+}
+
+#[derive(Clone, Debug)]
+pub enum PortMatch {
+    Any,
+    Specific(Vec<u16>),
+}
+
+impl FirewallRule {
+    /// Parse from role string: `vpn:GatewayId:allow:192.168.0.0/24:80,443`
+    pub fn parse(role: &str, gateway_id: &str) -> Option<Self> {
+        let prefix_str = format!("vpn:{gateway_id}:");
+        if !role.starts_with(&prefix_str) {
+            return None;
+        }
+        let rest = &role[prefix_str.len()..];
+        let parts: Vec<&str> = rest.splitn(3, ':').collect();
+        if parts.len() < 2 {
+            return None;
+        }
+
+        let action = match parts[0] {
+            "allow" => FirewallAction::Allow,
+            "deny" => FirewallAction::Deny,
+            _ => return None,
+        };
+
+        // Parse network/prefix
+        let net_parts: Vec<&str> = parts[1].split('/').collect();
+        let network: Ipv4Addr = net_parts[0].parse().ok()?;
+        let prefix: u8 = net_parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(32);
+
+        // Parse ports
+        let ports = if parts.len() < 3 || parts[2] == "*" {
+            PortMatch::Any
+        } else {
+            let port_list: Vec<u16> = parts[2]
+                .split(',')
+                .filter_map(|p| p.trim().parse().ok())
+                .collect();
+            if port_list.is_empty() {
+                PortMatch::Any
+            } else {
+                PortMatch::Specific(port_list)
+            }
+        };
+
+        Some(FirewallRule {
+            action,
+            network,
+            prefix,
+            ports,
+        })
+    }
+
+    /// Check if a destination IP and port match this rule.
+    pub fn matches(&self, dst_ip: Ipv4Addr, dst_port: u16) -> bool {
+        let mask = if self.prefix == 0 { 0u32 } else { !0u32 << (32 - self.prefix) };
+        let net = u32::from(self.network) & mask;
+        let dst = u32::from(dst_ip) & mask;
+        if net != dst {
+            return false;
+        }
+        match &self.ports {
+            PortMatch::Any => true,
+            PortMatch::Specific(ports) => ports.contains(&dst_port),
+        }
+    }
+}
+
+/// Per-session firewall: list of rules extracted from the user's roles.
+/// If no rules are present (just `vpn:GatewayId`), all traffic is allowed.
+/// If rules exist, default is deny — only explicitly allowed traffic passes.
+#[derive(Clone, Debug)]
+pub struct SessionFirewall {
+    pub rules: Vec<FirewallRule>,
+    /// Tracks recently blocked destinations to avoid spamming notifications.
+    blocked_cache: std::collections::HashSet<String>,
+    /// Channel to send block notifications to the client via control channel.
+    pub block_notify_tx: Option<mpsc::UnboundedSender<(Ipv4Addr, u16)>>,
+}
+
+impl SessionFirewall {
+    pub fn new(rules: Vec<FirewallRule>) -> Self {
+        Self {
+            rules,
+            blocked_cache: std::collections::HashSet::new(),
+            block_notify_tx: None,
+        }
+    }
+
+    /// Check if a packet to dst_ip:dst_port is allowed.
+    pub fn is_allowed(&self, dst_ip: Ipv4Addr, dst_port: u16) -> bool {
+        if self.rules.is_empty() {
+            return true; // No rules = allow all
+        }
+
+        // Check deny rules first
+        for rule in &self.rules {
+            if rule.action == FirewallAction::Deny && rule.matches(dst_ip, dst_port) {
+                return false;
+            }
+        }
+
+        // Check allow rules
+        for rule in &self.rules {
+            if rule.action == FirewallAction::Allow && rule.matches(dst_ip, dst_port) {
+                return true;
+            }
+        }
+
+        // Default deny if rules exist but none matched
+        false
+    }
+
+    /// Log a blocked packet, rate-limited per destination.
+    /// Sends a notification to the client on first block per destination.
+    pub fn log_blocked(&mut self, dst_ip: Ipv4Addr, dst_port: u16) {
+        let key = format!("{}:{}", dst_ip, dst_port);
+        if self.blocked_cache.insert(key) {
+            // First time seeing this destination — log and notify
+            tracing::warn!("[VPN] BLOCKED: -> {}:{} (firewall policy)", dst_ip, dst_port);
+            if let Some(ref tx) = self.block_notify_tx {
+                let _ = tx.send((dst_ip, dst_port));
+            }
+        }
+    }
+}
+
+/// Extract destination port from an IPv4 packet (TCP or UDP).
+pub fn extract_dst_port(packet: &[u8]) -> u16 {
+    if packet.len() < 24 {
+        return 0;
+    }
+    let proto = packet[9];
+    let ihl = ((packet[0] & 0x0F) as usize) * 4;
+    if packet.len() < ihl + 4 {
+        return 0;
+    }
+    match proto {
+        6 | 17 => {
+            // TCP or UDP: dst port at offset ihl+2..ihl+4
+            u16::from_be_bytes([packet[ihl + 2], packet[ihl + 3]])
+        }
+        1 => 0, // ICMP has no port — always match
+        _ => 0,
+    }
+}
 
 /// A single VPN session associated with a peer.
 pub struct VpnSession {
@@ -26,6 +190,10 @@ pub struct VpnSession {
     pub route_rx: Option<mpsc::UnboundedReceiver<Vec<u8>>>,
     /// Signal shutdown of the TUN read/write tasks.
     pub shutdown: Option<oneshot::Sender<()>>,
+    /// Per-session firewall rules from the user's roles.
+    pub firewall: SessionFirewall,
+    /// Receives block notifications to send to the client.
+    pub block_rx: Option<mpsc::UnboundedReceiver<(Ipv4Addr, u16)>>,
 }
 
 /// Simple IP address pool for VPN clients.
@@ -111,7 +279,78 @@ impl VpnState {
 pub async fn handle_vpn_open(
     vpn_state: Arc<Mutex<VpnState>>,
     id: String,
+    token: Option<&str>,
+    auth: Option<&Arc<TidecloakAuth>>,
+    gateway_id: &str,
 ) -> Result<VpnSession, String> {
+    // Verify JWT token and check role
+    let required_role = format!("vpn:{gateway_id}");
+    let mut firewall_rules: Vec<FirewallRule> = Vec::new();
+
+    match (token, auth) {
+        (Some(tok), Some(auth)) => {
+            match auth.verify_token(tok).await {
+                Some(payload) => {
+                    let user = payload.sub.as_deref().unwrap_or("unknown");
+
+                    // Collect all roles: realm_access.roles + resource_access.*.roles
+                    let mut all_roles: Vec<String> = Vec::new();
+                    if let Some(ref ra) = payload.realm_access {
+                        all_roles.extend(ra.roles.clone());
+                    }
+                    if let Some(ref ra) = payload.resource_access {
+                        if let Some(obj) = ra.as_object() {
+                            for (_client, access) in obj {
+                                if let Some(roles) = access.get("roles").and_then(|r| r.as_array()) {
+                                    for role in roles {
+                                        if let Some(r) = role.as_str() {
+                                            all_roles.push(r.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if !all_roles.iter().any(|r| r == &required_role || r.starts_with(&format!("{required_role}:"))) {
+                        tracing::warn!(
+                            "[VPN] User {} lacks role '{}'. Has: {:?}",
+                            user, required_role, all_roles
+                        );
+                        return Err(format!("Access denied: role '{}' required", required_role));
+                    }
+
+                    // Parse firewall rules from roles
+                    let fw_rules: Vec<FirewallRule> = all_roles
+                        .iter()
+                        .filter_map(|r| FirewallRule::parse(r, gateway_id))
+                        .collect();
+
+                    if fw_rules.is_empty() {
+                        tracing::info!("[VPN] Token verified for user: {} (role: {}, no firewall rules — allow all)", user, required_role);
+                    } else {
+                        tracing::info!("[VPN] Token verified for user: {} (role: {}, {} firewall rules)", user, required_role, fw_rules.len());
+                        for rule in &fw_rules {
+                            tracing::info!("[VPN]   {:?} {}/{} ports:{:?}", rule.action, rule.network, rule.prefix, rule.ports);
+                        }
+                    }
+
+                    // Store firewall for the session
+                    firewall_rules = fw_rules;
+                }
+                None => {
+                    return Err("Invalid or expired token".into());
+                }
+            }
+        }
+        (None, Some(_)) => {
+            return Err("Token required for VPN access".into());
+        }
+        _ => {
+            tracing::warn!("[VPN] No auth configured, allowing VPN without token");
+        }
+    }
+
     let mut vs = vpn_state.lock().await;
 
     if !vs.enabled {
@@ -152,6 +391,9 @@ pub async fn handle_vpn_open(
     // The TUN writer reads from tun_rx and routes to the shared TUN device
     let vpn_state_write = vpn_state.clone();
     let cip = client_ip;
+    let (block_tx, block_rx) = mpsc::unbounded_channel::<(Ipv4Addr, u16)>();
+    let mut firewall = SessionFirewall::new(firewall_rules.clone());
+    firewall.block_notify_tx = Some(block_tx);
     tokio::spawn(async move {
         let mut shutdown = shutdown_rx;
         loop {
@@ -164,9 +406,17 @@ pub async fn handle_vpn_open(
                                 continue;
                             }
                             if data.len() >= 20 {
-                                let src = Ipv4Addr::new(data[12], data[13], data[14], data[15]);
                                 let dst = Ipv4Addr::new(data[16], data[17], data[18], data[19]);
-                                tracing::debug!("[VPN] client->TUN: {} -> {} ({} bytes)", src, dst, data.len());
+                                let dst_port = extract_dst_port(&data);
+
+                                // Enforce per-session firewall
+                                if !firewall.is_allowed(dst, dst_port) {
+                                    firewall.log_blocked(dst, dst_port);
+                                    continue;
+                                }
+
+                                let src = Ipv4Addr::new(data[12], data[13], data[14], data[15]);
+                                tracing::debug!("[VPN] client->TUN: {} -> {}:{} ({} bytes)", src, dst, dst_port, data.len());
                             }
                             match TUN_WRITE_TX.get() {
                                 Some(tx) => { let _ = tx.send(data); }
@@ -201,6 +451,8 @@ pub async fn handle_vpn_open(
         tun_tx,
         route_rx: Some(route_rx),
         shutdown: Some(shutdown_tx),
+        firewall: SessionFirewall::new(firewall_rules),
+        block_rx: Some(block_rx),
     })
 }
 

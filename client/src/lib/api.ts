@@ -221,20 +221,20 @@ export const api = {
         const roles = await tc.getClientRoles();
         return { roles: roles as unknown as AdminRole[] };
       },
-      listAll: async () => {
-        const roles = await tc.getAllRoles();
+      listAll: async (stunServerClientId?: string | null) => {
+        const roles = await tc.getAllRoles(stunServerClientId);
         return { roles: roles as unknown as AdminRole[] };
       },
-      create: async (data: { name: string; description?: string; policy?: SshPolicyConfig }) => {
-        await tc.createRole({ name: data.name, description: data.description });
+      create: async (data: { name: string; description?: string; policy?: SshPolicyConfig; targetClientId?: string }) => {
+        await tc.createRole({ name: data.name, description: data.description }, data.targetClientId);
         return { success: "Role created" };
       },
-      update: async (data: { name: string; description?: string }) => {
-        await tc.updateRole(data);
+      update: async (data: { name: string; description?: string; targetClientId?: string }) => {
+        await tc.updateRole(data, data.targetClientId);
         return { success: "Role updated" };
       },
-      delete: async (roleName: string) => {
-        const result = await tc.deleteRole(roleName);
+      delete: async (roleName: string, targetClientId?: string) => {
+        const result = await tc.deleteRole(roleName, targetClientId);
         return { success: "Role deleted", approvalCreated: result.approvalCreated };
       },
       policies: {
@@ -526,8 +526,43 @@ export const api = {
           body: JSON.stringify(params),
         }),
     },
+    gatewayConfigs: {
+      list: () => apiRequest<GatewayConfigSummary[]>("/api/admin/gateway-configs"),
+      get: (id: string) => apiRequest<GatewayConfigSummary>(`/api/admin/gateway-configs/${id}`),
+      create: (data: any) => apiRequest<GatewayConfigSummary>("/api/admin/gateway-configs", { method: "POST", body: JSON.stringify(data) }),
+      update: (id: string, data: any) => apiRequest<GatewayConfigSummary>(`/api/admin/gateway-configs/${id}`, { method: "PUT", body: JSON.stringify(data) }),
+      delete: (id: string) => apiRequest<void>(`/api/admin/gateway-configs/${id}`, { method: "DELETE" }),
+      downloadUrl: (id: string) => `/api/admin/gateway-configs/${id}/download`,
+      vpnConfigUrl: (id: string) => `/api/admin/gateway-configs/${id}/vpn-config`,
+    },
   },
 };
+
+// Gateway config (managed from admin UI)
+export interface GatewayConfigSummary {
+  id: string;
+  gatewayId: string;
+  displayName: string | null;
+  stunServerUrl: string | null;
+  apiSecret: string | null;
+  iceServers: string | null;
+  turnServer: string | null;
+  turnSecret: string | null;
+  backends: string | null;
+  tidecloakConfigB64: string | null;
+  authServerPublicUrl: string | null;
+  serverUrl: string | null;
+  vpnEnabled: boolean;
+  vpnSubnet: string;
+  listenPort: number;
+  healthPort: number;
+  https: boolean;
+  tlsHostname: string;
+  extraConfig: string | null;
+  enabled: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
 
 // Gateway endpoint from signal server aggregation
 export interface GatewayEndpoint {
@@ -795,10 +830,13 @@ export interface RecordingSummary {
   terminalWidth: number;
   terminalHeight: number;
   fileSize: number;
+  recordingType?: "ssh" | "rdp";
+  backendName?: string | null;
+  gatewayId?: string | null;
 }
 
 export interface RecordingDetails extends RecordingSummary {
-  data: string; // Full asciicast data for playback
+  data: string; // Full recording data (asciicast for SSH, PDU JSON lines for RDP)
 }
 
 export interface RecordingsListResponse {

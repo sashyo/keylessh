@@ -569,8 +569,15 @@ async fn setup_control_channel(
                 }
                 "vpn_open" => {
                     let vpn_id = parsed["id"].as_str().unwrap_or("").to_string();
+                    let vpn_token = parsed["token"].as_str();
                     if let Some(ref vpn_state) = opts.vpn_state {
-                        match crate::vpn::vpn_handler::handle_vpn_open(vpn_state.clone(), vpn_id.clone()).await {
+                        match crate::vpn::vpn_handler::handle_vpn_open(
+                            vpn_state.clone(),
+                            vpn_id.clone(),
+                            vpn_token,
+                            opts.auth.as_ref(),
+                            &opts.gateway_id,
+                        ).await {
                             Ok(mut session) => {
                                 let vs = vpn_state.lock().await;
                                 let response = crate::vpn::vpn_handler::vpn_opened_response(
@@ -588,6 +595,25 @@ async fn setup_control_channel(
                                             send_bulk(&state_fwd, frame).await;
                                         }
                                         tracing::info!("[VPN] Route forwarding task ended");
+                                    });
+                                }
+
+                                // Spawn task: send firewall block notifications to client
+                                if let Some(mut block_rx) = session.block_rx.take() {
+                                    let state_block = state.clone();
+                                    tokio::spawn(async move {
+                                        while let Some((dst_ip, dst_port)) = block_rx.recv().await {
+                                            send_control(
+                                                &state_block,
+                                                json!({
+                                                    "type": "vpn_blocked",
+                                                    "destination": dst_ip.to_string(),
+                                                    "port": dst_port,
+                                                    "message": format!("Access denied to {}:{} by firewall policy", dst_ip, dst_port),
+                                                }),
+                                            )
+                                            .await;
+                                        }
                                     });
                                 }
 

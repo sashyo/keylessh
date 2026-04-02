@@ -375,9 +375,9 @@ export async function getTideLinkUrl(userId: string, redirectUri?: string): Prom
 
 // --- Role Management ---
 
-export async function listClientRoles(): Promise<AdminRole[]> {
-  const appClientId = getClientIdFromToken();
-  const client = await getClientByClientId(appClientId);
+/** List roles for a specific TideCloak client (by clientId string, not UUID) */
+export async function listRolesForClient(clientIdStr: string): Promise<AdminRole[]> {
+  const client = await getClientByClientId(clientIdStr);
   if (!client?.id) return [];
 
   const roleRes = await tcFetch<RoleRepresentation[]>(`/clients/${client.id}/roles`).catch(() => []);
@@ -390,7 +390,7 @@ export async function listClientRoles(): Promise<AdminRole[]> {
         name: full.name!,
         description: full.description ?? "",
         clientRole: true,
-        clientId: appClientId,
+        clientId: clientIdStr,
       };
       return role;
     })
@@ -399,8 +399,19 @@ export async function listClientRoles(): Promise<AdminRole[]> {
   return roles;
 }
 
-export async function listAllRoles(): Promise<AdminRole[]> {
+export async function listClientRoles(): Promise<AdminRole[]> {
+  return listRolesForClient(getClientIdFromToken());
+}
+
+/** List roles from both the app client and stun server client */
+export async function listAllRoles(stunServerClientId?: string | null): Promise<AdminRole[]> {
   const clientRoles = await listClientRoles();
+
+  // Also fetch roles from the stun server client
+  let stunRoles: AdminRole[] = [];
+  if (stunServerClientId) {
+    stunRoles = await listRolesForClient(stunServerClientId);
+  }
 
   try {
     const adminRole = await getTideRealmAdminRole();
@@ -412,16 +423,17 @@ export async function listAllRoles(): Promise<AdminRole[]> {
       clientRole: true,
       clientId: adminClient?.clientId,
     };
-    return [...clientRoles, formatted];
+    return [...clientRoles, ...stunRoles, formatted];
   } catch {
-    return clientRoles;
+    return [...clientRoles, ...stunRoles];
   }
 }
 
-export async function createRole(data: { name: string; description?: string }): Promise<void> {
-  const appClientId = getClientIdFromToken();
-  const client = await getClientByClientId(appClientId);
-  if (!client?.id) throw new Error("Client not found");
+/** Create a role on a specific client. If targetClientId is provided, uses that; otherwise uses the app client. */
+export async function createRole(data: { name: string; description?: string }, targetClientId?: string): Promise<void> {
+  const clientIdStr = targetClientId || getClientIdFromToken();
+  const client = await getClientByClientId(clientIdStr);
+  if (!client?.id) throw new Error(`Client '${clientIdStr}' not found`);
 
   await tcFetch(`/clients/${client.id}/roles`, {
     method: "POST",
@@ -430,10 +442,10 @@ export async function createRole(data: { name: string; description?: string }): 
   });
 }
 
-export async function updateRole(data: { name: string; description?: string }): Promise<void> {
-  const appClientId = getClientIdFromToken();
-  const client = await getClientByClientId(appClientId);
-  if (!client?.id) throw new Error("Client not found");
+export async function updateRole(data: { name: string; description?: string }, targetClientId?: string): Promise<void> {
+  const clientIdStr = targetClientId || getClientIdFromToken();
+  const client = await getClientByClientId(clientIdStr);
+  if (!client?.id) throw new Error(`Client '${clientIdStr}' not found`);
 
   await tcFetch(`/clients/${client.id}/roles/${data.name}`, {
     method: "PUT",
@@ -442,10 +454,10 @@ export async function updateRole(data: { name: string; description?: string }): 
   });
 }
 
-export async function deleteRole(roleName: string): Promise<{ approvalCreated: boolean }> {
-  const appClientId = getClientIdFromToken();
-  const client = await getClientByClientId(appClientId);
-  if (!client?.id) throw new Error("Client not found");
+export async function deleteRole(roleName: string, targetClientId?: string): Promise<{ approvalCreated: boolean }> {
+  const clientIdStr = targetClientId || getClientIdFromToken();
+  const client = await getClientByClientId(clientIdStr);
+  if (!client?.id) throw new Error(`Client '${clientIdStr}' not found`);
 
   await tcFetch(`/clients/${client.id}/roles/${roleName}`, { method: "DELETE" });
 

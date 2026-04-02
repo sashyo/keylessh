@@ -140,15 +140,34 @@ mod platform {
                 .args(["interface", "ipv4", "set", "subinterface", &config.name, &format!("mtu={mtu_str}"), "store=active"])
                 .status();
 
-            // Set network profile to Private + add firewall rules
+            // Wait for Windows to register the adapter before configuring it
+            std::thread::sleep(std::time::Duration::from_secs(2));
+
+            // Set network profile to Private (retry once if adapter not ready)
             let _ = std::process::Command::new("powershell")
-                .args(["-c", &format!("Set-NetConnectionProfile -InterfaceAlias '{}' -NetworkCategory Private", config.name)])
+                .args(["-c", &format!(
+                    "try {{ Set-NetConnectionProfile -InterfaceAlias '{}' -NetworkCategory Private }} catch {{ Start-Sleep 2; Set-NetConnectionProfile -InterfaceAlias '{}' -NetworkCategory Private }}",
+                    config.name, config.name
+                )])
                 .status();
 
-            // Enable forwarding on this interface
-            let _ = std::process::Command::new("netsh")
-                .args(["interface", "ipv4", "set", "interface", &config.name, "forwarding=enabled"])
-                .status();
+            // Enable forwarding on all interfaces (VPN + LAN)
+            let iface_output = std::process::Command::new("netsh")
+                .args(["interface", "ipv4", "show", "interfaces"])
+                .output();
+            if let Ok(out) = iface_output {
+                let text = String::from_utf8_lossy(&out.stdout);
+                for line in text.lines().skip(3) {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    // Format: Idx  Met  MTU  State  Name
+                    if parts.len() >= 5 && parts[3] == "connected" {
+                        let iface_name = parts[4..].join(" ");
+                        let _ = std::process::Command::new("netsh")
+                            .args(["interface", "ipv4", "set", "interface", &iface_name, "forwarding=enabled"])
+                            .status();
+                    }
+                }
+            }
 
             // Firewall rules for VPN subnet (idempotent — netsh ignores duplicates)
             let subnet = format!("{}/{}", {
