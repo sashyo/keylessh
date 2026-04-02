@@ -34,6 +34,7 @@ use axum::Router;
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use regex::Regex;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Notify;
 
 use crate::auth::dpop::{extract_cnf_jkt, DPoPVerifier};
@@ -938,6 +939,185 @@ async fn handle_rdcleanpath_socket(socket: WebSocket, state: Arc<ProxyState>, re
     tracing::info!("[RDCleanPath-WS] Handler exiting");
 }
 
+// ── TCP-forward WebSocket handler (trustless/blind proxy) ────────
+
+async fn handle_tcp_forward_ws(
+    State(shared): State<SharedState>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let state = shared.load_full();
+    ws.on_upgrade(move |socket| handle_tcp_forward_socket(socket, state))
+}
+
+/// Trustless TCP forwarder: browser sends a JSON routing header, then raw bytes
+/// flow bidirectionally between the WebSocket and the backend TCP socket.
+/// The proxy never inspects the payload — IronRDP WASM does TLS end-to-end.
+async fn handle_tcp_forward_socket(socket: WebSocket, state: Arc<ProxyState>) {
+    use futures_util::{SinkExt, StreamExt};
+
+    tracing::info!("[TCP-Forward] Handler started");
+
+    let (mut ws_sink, mut ws_stream) = socket.split();
+
+    // Step 1: Read routing header (first WS message must be JSON)
+    let routing = match ws_stream.next().await {
+        Some(Ok(Message::Text(text))) => {
+            match serde_json::from_str::<serde_json::Value>(&text) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!("[TCP-Forward] Invalid routing JSON: {e}");
+                    let _ = ws_sink.send(Message::Close(None)).await;
+                    return;
+                }
+            }
+        }
+        _ => {
+            tracing::error!("[TCP-Forward] Expected JSON routing header as first message");
+            let _ = ws_sink.send(Message::Close(None)).await;
+            return;
+        }
+    };
+
+    let destination = routing["destination"].as_str().unwrap_or("").to_string();
+    let auth_token = routing["authToken"].as_str().unwrap_or("").to_string();
+
+    if destination.is_empty() || auth_token.is_empty() {
+        tracing::error!("[TCP-Forward] Missing destination or authToken");
+        let _ = ws_sink.send(Message::Text(
+            serde_json::json!({"error": "missing destination or authToken"}).to_string().into(),
+        )).await;
+        let _ = ws_sink.send(Message::Close(None)).await;
+        return;
+    }
+
+    // Step 2: Verify JWT and check destination access
+    let payload = match state.auth.verify_token(&auth_token).await {
+        Some(p) => p,
+        None => {
+            tracing::error!("[TCP-Forward] Auth failed");
+            let _ = ws_sink.send(Message::Text(
+                serde_json::json!({"error": "auth failed"}).to_string().into(),
+            )).await;
+            let _ = ws_sink.send(Message::Close(None)).await;
+            return;
+        }
+    };
+
+    // Check destination role
+    if crate::rdcleanpath::rdcleanpath_handler::check_dest_roles(&payload, &destination, &state.role_client_id).is_none() {
+        tracing::error!("[TCP-Forward] Access denied for dest={destination} user={:?}", payload.sub);
+        let _ = ws_sink.send(Message::Text(
+            serde_json::json!({"error": "access denied"}).to_string().into(),
+        )).await;
+        let _ = ws_sink.send(Message::Close(None)).await;
+        return;
+    }
+
+    // Step 3: Resolve backend
+    let backend = state.config.backends.iter().find(|b| b.name == destination);
+    let backend = match backend {
+        Some(b) => b.clone(),
+        None => {
+            tracing::error!("[TCP-Forward] Unknown backend: {destination}");
+            let _ = ws_sink.send(Message::Text(
+                serde_json::json!({"error": "unknown backend"}).to_string().into(),
+            )).await;
+            let _ = ws_sink.send(Message::Close(None)).await;
+            return;
+        }
+    };
+
+    let parsed_url = match url::Url::parse(&backend.url) {
+        Ok(u) => u,
+        Err(_) => {
+            let _ = ws_sink.send(Message::Text(
+                serde_json::json!({"error": "invalid backend URL"}).to_string().into(),
+            )).await;
+            let _ = ws_sink.send(Message::Close(None)).await;
+            return;
+        }
+    };
+
+    let host = parsed_url.host_str().unwrap_or("127.0.0.1").to_string();
+    let port = parsed_url.port().unwrap_or(3389);
+
+    // Step 4: TCP connect to backend
+    tracing::info!("[TCP-Forward] Connecting to {host}:{port} for dest={destination}");
+    let tcp_stream = match tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::net::TcpStream::connect(format!("{host}:{port}")),
+    ).await {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            tracing::error!("[TCP-Forward] TCP connect failed: {e}");
+            let _ = ws_sink.send(Message::Text(
+                serde_json::json!({"error": format!("TCP connect failed: {e}")}).to_string().into(),
+            )).await;
+            let _ = ws_sink.send(Message::Close(None)).await;
+            return;
+        }
+        Err(_) => {
+            tracing::error!("[TCP-Forward] TCP connect timeout");
+            let _ = ws_sink.send(Message::Text(
+                serde_json::json!({"error": "TCP connect timeout"}).to_string().into(),
+            )).await;
+            let _ = ws_sink.send(Message::Close(None)).await;
+            return;
+        }
+    };
+
+    // Step 5: Send OK to client
+    tracing::info!("[TCP-Forward] Connected to {host}:{port}, entering relay mode");
+    if ws_sink.send(Message::Text(
+        serde_json::json!({"ok": true, "host": host, "port": port}).to_string().into(),
+    )).await.is_err() {
+        return;
+    }
+
+    // Step 6: Blind bidirectional relay (WS <-> TCP)
+    let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
+
+    // TCP -> WS
+    let mut ws_sink_relay = ws_sink;
+    let tcp_to_ws = tokio::spawn(async move {
+        let mut buf = vec![0u8; 16384];
+        loop {
+            match tcp_read.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    if ws_sink_relay.send(Message::Binary(buf[..n].to_vec().into())).await.is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    // WS -> TCP
+    let ws_to_tcp = tokio::spawn(async move {
+        while let Some(Ok(msg)) = ws_stream.next().await {
+            match msg {
+                Message::Binary(data) => {
+                    if tcp_write.write_all(&data).await.is_err() {
+                        break;
+                    }
+                }
+                Message::Close(_) => break,
+                _ => {}
+            }
+        }
+    });
+
+    tokio::select! {
+        _ = tcp_to_ws => {}
+        _ = ws_to_tcp => {}
+    }
+
+    tracing::info!("[TCP-Forward] Session ended for dest={destination}");
+}
+
 // ── Main request handler ─────────────────────────────────────────
 
 async fn handle_request(
@@ -1687,6 +1867,7 @@ async fn handle_webrtc_config(
 
     config["authServerUrl"] = serde_json::json!(state.tc_config.auth_server_url);
     config["realm"] = serde_json::json!(state.tc_config.realm);
+    config["e2eTls"] = serde_json::json!(true);
 
     // Include backendAuth map for eddsa backends (so RDP client auto-connects)
     {
