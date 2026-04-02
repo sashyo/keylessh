@@ -33,6 +33,8 @@ pub struct RDCleanPathSessionOptions {
     pub tc_client_id: Option<String>,
     pub server_url: Option<String>,
     pub recording: Option<RecordingHandle>,
+    /// Pre-obtained keylessh app token (via PKCE+SSO from browser) for recording API calls
+    pub recording_token: Option<String>,
 }
 
 pub struct RDCleanPathSession {
@@ -156,15 +158,21 @@ async fn run_session(
                     .unwrap_or("unknown")
                     .to_string();
                 let session_id = uuid::Uuid::new_v4().to_string();
+                // Use the pre-obtained keylessh app token (from browser PKCE+SSO) for recording,
+                // falling back to the stun client token if not available
+                let rec_token = opts.recording_token.clone().unwrap_or_else(|| req.proxy_auth.clone());
+
                 opts.recording = Some(crate::recording::start_recording(
                     crate::recording::RecordingMeta {
                         server_url: server_url.clone(),
-                        token: req.proxy_auth.clone(),
+                        token: rec_token,
                         session_id,
                         server_id: req.destination.clone(),
                         backend_name: req.destination.clone(),
                         gateway_id: opts.gateway_id.clone().unwrap_or_default(),
                         user_email,
+                        token_endpoint: None,
+                        target_client_id: None,
                     },
                 ));
                 tracing::info!("[Recording] RDP recording started for user {:?}", payload.sub);
