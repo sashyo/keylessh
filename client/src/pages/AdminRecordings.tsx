@@ -36,6 +36,7 @@ import { useToast } from "@/hooks/use-toast";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 import { RefreshButton } from "@/components/RefreshButton";
 import { RecordingPlayer } from "@/components/RecordingPlayer";
+import { RdpReplayPlayer } from "@/components/RdpReplayPlayer";
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 B";
@@ -433,24 +434,7 @@ export default function AdminRecordings() {
           {playingRecording && (
             <div className="flex-1 min-h-0 overflow-y-auto -mx-3 px-3 sm:-mx-4 sm:px-4 md:-mx-6 md:px-6">
               {playingRecording.recordingType === "rdp" ? (
-                <div className="flex flex-col items-center justify-center py-12 space-y-4 text-center">
-                  <Monitor className="h-12 w-12 text-muted-foreground" />
-                  <div>
-                    <p className="text-lg font-medium">RDP Session Recording</p>
-                    <p className="text-sm text-muted-foreground mt-1">
-                      {playingRecording.serverName} &mdash; {new Date(playingRecording.startedAt).toLocaleString()}
-                    </p>
-                  </div>
-                  <div className="flex gap-4 text-sm text-muted-foreground">
-                    {playingRecording.duration != null && (
-                      <span>Duration: {Math.floor(playingRecording.duration / 60)}:{String(Math.floor(playingRecording.duration % 60)).padStart(2, "0")}</span>
-                    )}
-                    <span>Size: {(playingRecording.fileSize / 1024).toFixed(1)} KB</span>
-                  </div>
-                  <Button variant="outline" onClick={() => handleDownload(playingRecording.id)}>
-                    Download PDU Recording
-                  </Button>
-                </div>
+                <RdpReplayPlayer recording={playingRecording} />
               ) : (
                 <RecordingPlayer recording={playingRecording} />
               )}
