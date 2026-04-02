@@ -45,6 +45,56 @@ pub struct RecordingMeta {
     pub backend_name: String,
     pub gateway_id: String,
     pub user_email: String,
+    /// TideCloak token endpoint for token exchange (e.g. https://login.example.com/realms/keylessh/protocol/openid-connect/token)
+    pub token_endpoint: Option<String>,
+    /// The target client ID to exchange the token for (e.g. "myclient")
+    pub target_client_id: Option<String>,
+}
+
+/// Exchange a token for a different client via OIDC token exchange.
+/// Returns the new access token, or the original if exchange fails.
+async fn exchange_token(
+    client: &reqwest::Client,
+    token_endpoint: &str,
+    subject_token: &str,
+    target_client_id: &str,
+) -> String {
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("grant_type", "urn:ietf:params:oauth:grant-type:token-exchange")
+        .append_pair("client_id", target_client_id)
+        .append_pair("subject_token", subject_token)
+        .append_pair("requested_token_type", "urn:ietf:params:oauth:token-type:access_token")
+        .append_pair("audience", target_client_id)
+        .finish();
+
+    match client
+        .post(token_endpoint)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(body)
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            if let Ok(data) = resp.json::<serde_json::Value>().await {
+                if let Some(token) = data["access_token"].as_str() {
+                    tracing::debug!("[Recording] Token exchanged for {target_client_id}");
+                    return token.to_string();
+                }
+            }
+            tracing::warn!("[Recording] Token exchange response missing access_token, using original");
+            subject_token.to_string()
+        }
+        Ok(resp) => {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            tracing::warn!("[Recording] Token exchange failed ({status}): {body}");
+            subject_token.to_string()
+        }
+        Err(e) => {
+            tracing::warn!("[Recording] Token exchange request failed: {e}");
+            subject_token.to_string()
+        }
+    }
 }
 
 /// Lightweight handle for recording — clone and pass to relay tasks.
@@ -111,10 +161,17 @@ async fn recording_uploader(meta: RecordingMeta, mut rx: mpsc::Receiver<Recordin
 
     let server_url = meta.server_url.trim_end_matches('/');
 
+    // Exchange token for the keylessh app client if configured
+    let token = if let (Some(endpoint), Some(target)) = (&meta.token_endpoint, &meta.target_client_id) {
+        exchange_token(&client, endpoint, &meta.token, target).await
+    } else {
+        meta.token.clone()
+    };
+
     // Step 1: Start recording on the server
     let start_url = format!("{server_url}/api/bridge/start-rdp-recording");
     let start_body = json!({
-        "token": meta.token,
+        "token": token,
         "sessionId": meta.session_id,
         "serverId": meta.server_id,
         "backendName": meta.backend_name,
@@ -168,7 +225,7 @@ async fn recording_uploader(meta: RecordingMeta, mut rx: mpsc::Receiver<Recordin
                         total_events += 1;
 
                         if buffer.len() >= FLUSH_BATCH_SIZE {
-                            flush_events(&client, &record_url, &meta.token, &meta.session_id, &recording_id, &mut buffer).await;
+                            flush_events(&client, &record_url, &token, &meta.session_id, &recording_id, &mut buffer).await;
                         }
                     }
                     None => {
@@ -179,7 +236,7 @@ async fn recording_uploader(meta: RecordingMeta, mut rx: mpsc::Receiver<Recordin
             }
             _ = flush_interval.tick() => {
                 if !buffer.is_empty() {
-                    flush_events(&client, &record_url, &meta.token, &meta.session_id, &recording_id, &mut buffer).await;
+                    flush_events(&client, &record_url, &token, &meta.session_id, &recording_id, &mut buffer).await;
                 }
             }
         }
@@ -187,13 +244,13 @@ async fn recording_uploader(meta: RecordingMeta, mut rx: mpsc::Receiver<Recordin
 
     // Flush remaining events
     if !buffer.is_empty() {
-        flush_events(&client, &record_url, &meta.token, &meta.session_id, &recording_id, &mut buffer).await;
+        flush_events(&client, &record_url, &token, &meta.session_id, &recording_id, &mut buffer).await;
     }
 
     // Step 3: End recording
     let end_url = format!("{server_url}/api/bridge/end-rdp-recording");
     let end_body = json!({
-        "token": meta.token,
+        "token": token,
         "sessionId": meta.session_id,
         "recordingId": recording_id,
     });

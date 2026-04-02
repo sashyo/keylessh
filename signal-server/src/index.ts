@@ -534,6 +534,8 @@ const requestHandler = async (req: import("http").IncomingMessage, res: import("
       if (payload) {
         // Token is valid — set as gateway_access (HttpOnly, forwarded by relay)
         cookies.push(`gateway_access=${token}; Path=/; HttpOnly; SameSite=None; Secure`);
+        // Also preserve the original keylessh app token for recording API calls
+        cookies.push(`keylessh_token=${token}; Path=/; HttpOnly; SameSite=None; Secure`);
       }
     }
     const redirect = params.get("redirect");
