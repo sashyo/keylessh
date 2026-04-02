@@ -214,11 +214,11 @@ export default function AdminGateways() {
             }
           }}
           rows={3}
-          placeholder='Paste the TideCloak adapter config JSON for the stun server client (e.g. myclient-stun)'
+          placeholder='Paste the TideCloak adapter config JSON'
           className="font-mono text-xs"
         />
         <p className="text-[10px] text-muted-foreground">
-          Download from TideCloak: Clients &rarr; <strong>{authConfig?.["stun-server-client-id"] || "myclient-stun"}</strong> &rarr; Installation. Paste JSON or base64.
+          Download from TideCloak: Clients &rarr; <strong>{authConfig?.resource || "myclient"}</strong> &rarr; Installation. Paste JSON or base64.
         </p>
       </div>
 

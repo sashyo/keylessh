@@ -100,11 +100,9 @@ export default function AdminUsers() {
     isBlocked: isFetchingUsers,
   });
 
-  const stunServerClientId: string | null = authConfig?.["stun-server-client-id"] || null;
-
   const { data: rolesData, isLoading: rolesLoading } = useQuery({
-    queryKey: ["/api/admin/roles/all", stunServerClientId],
-    queryFn: () => api.admin.roles.listAll(stunServerClientId),
+    queryKey: ["/api/admin/roles/all"],
+    queryFn: () => api.admin.roles.listAll(),
     enabled: !!editingUser,
     staleTime: 60_000,
   });

@@ -1505,9 +1505,7 @@ export async function registerRoutes(
         return config.stunServerUrl === ss.url || config.stunServerUrl === wsUrl;
       });
 
-      // Include the keylessh app client ID so the bridge can do token exchange for recordings
-      const keylesshClientId = GetConfig().resource;
-      const toml = gatewayConfigStorage.toToml(config, matchingSignalServer, keylesshClientId);
+      const toml = gatewayConfigStorage.toToml(config, matchingSignalServer);
       res.setHeader("Content-Type", "application/toml");
       res.setHeader("Content-Disposition", `attachment; filename="gateway.toml"`);
       res.send(toml);

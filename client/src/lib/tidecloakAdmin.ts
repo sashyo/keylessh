@@ -351,32 +351,19 @@ export async function getTideRealmAdminRole(): Promise<RoleRepresentation> {
   return roles[0];
 }
 
-export async function getAllRoles(stunServerClientId?: string | null): Promise<RoleRepresentation[]> {
+export async function getAllRoles(): Promise<RoleRepresentation[]> {
   const clientRoles = await getClientRoles();
-
-  // Also fetch roles from the stun server client
-  let stunRoles: RoleRepresentation[] = [];
-  if (stunServerClientId) {
-    try {
-      const stunClient = await getClientByClientId(stunServerClientId);
-      if (stunClient) {
-        stunRoles = await tcFetch<RoleRepresentation[]>(`/clients/${stunClient.id}/roles`);
-      }
-    } catch {
-      // stun client may not exist yet
-    }
-  }
 
   try {
     const adminRole = await getTideRealmAdminRole();
-    return [...clientRoles, ...stunRoles, adminRole];
+    return [...clientRoles, adminRole];
   } catch {
-    return [...clientRoles, ...stunRoles];
+    return clientRoles;
   }
 }
 
-export async function createRole(data: { name: string; description?: string }, targetClientId?: string): Promise<void> {
-  const clientIdStr = targetClientId || await getClientId();
+export async function createRole(data: { name: string; description?: string }): Promise<void> {
+  const clientIdStr = await getClientId();
   const client = await getClientByClientId(clientIdStr);
   if (!client) throw new Error(`Client '${clientIdStr}' not found`);
 
@@ -388,8 +375,8 @@ export async function createRole(data: { name: string; description?: string }, t
   invalidateRolesCache();
 }
 
-export async function updateRole(roleRep: { name: string; description?: string }, targetClientId?: string): Promise<void> {
-  const clientIdStr = targetClientId || await getClientId();
+export async function updateRole(roleRep: { name: string; description?: string }): Promise<void> {
+  const clientIdStr = await getClientId();
   const client = await getClientByClientId(clientIdStr);
   if (!client) throw new Error(`Client '${clientIdStr}' not found`);
 
@@ -401,8 +388,8 @@ export async function updateRole(roleRep: { name: string; description?: string }
   invalidateRolesCache();
 }
 
-export async function deleteRole(roleName: string, targetClientId?: string): Promise<{ approvalCreated: boolean; message?: string }> {
-  const clientIdStr = targetClientId || await getClientId();
+export async function deleteRole(roleName: string): Promise<{ approvalCreated: boolean; message?: string }> {
+  const clientIdStr = await getClientId();
   const client = await getClientByClientId(clientIdStr);
   if (!client) throw new Error(`Client '${clientIdStr}' not found`);
 
@@ -418,15 +405,9 @@ export async function deleteRole(roleName: string, targetClientId?: string): Pro
   }
 }
 
-/** Determine which TideCloak client a role belongs to based on its prefix. */
+/** Determine which TideCloak client a role belongs to. */
 async function getClientIdForRole(roleName: string): Promise<string> {
   if (roleName === ADMIN_ROLE) return REALM_MGMT;
-  // dest: and vpn: roles live on the stun server client
-  if (/^(dest|vpn)[:\-]/i.test(roleName)) {
-    const cfg = await getConfig();
-    const stunClientId = (cfg as any)["stun-server-client-id"];
-    if (stunClientId) return stunClientId;
-  }
   return await getClientId();
 }
 

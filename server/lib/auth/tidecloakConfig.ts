@@ -109,9 +109,6 @@ export function getHomeOrkUrl(): string {
   return typedTcData()["homeOrkUrl"] || "";
 }
 
-export function getStunServerClientId(): string | null {
-  return typedTcData()["stun-server-client-id"] || null;
-}
 
 export function getJWK(): JSONWebKeySet | null {
   if (

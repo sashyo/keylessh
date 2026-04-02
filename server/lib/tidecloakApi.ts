@@ -6,21 +6,16 @@ import {
   UserRepresentation,
 } from "./auth/keycloakTypes";
 import { Roles } from "@shared/config/roles";
-import { getAuthOverrideUrl, getRealm, getResource, getStunServerClientId } from "./auth/tidecloakConfig";
+import { getAuthOverrideUrl, getRealm, getResource } from "./auth/tidecloakConfig";
 
 // Lazy-evaluated getters to avoid calling config functions at module load time
 const getKeycloakAuthServer = () => getAuthOverrideUrl();
 const getRealm_ = () => getRealm();
 const getClient = () => getResource();
-const getStunClient = () => getStunServerClientId();
 
-/// Determine which TideCloak client a role belongs to based on its prefix.
+/// Determine which TideCloak client a role belongs to.
 function getClientForRole(roleName: string): string {
   if (roleName === Roles.Admin) return REALM_MGMT;
-  // dest: and vpn: roles live on the stun server client
-  if (/^(dest|vpn)[:\-]/i.test(roleName)) {
-    return getStunClient() || getClient();
-  }
   return getClient();
 }
 
@@ -697,35 +692,13 @@ export const GetTideLinkUrl = async (
 export const GetAllRoles = async (
   token: string
 ): Promise<RoleRepresentation[]> => {
-  // Get main client roles
   const clientRoles = await getClientRoles(token);
 
-  // Get stun server client roles
-  let stunRoles: RoleRepresentation[] = [];
-  const stunClientId = getStunClient();
-  if (stunClientId && stunClientId !== getClient()) {
-    try {
-      const stunClient = await getClientByClientId(stunClientId, token);
-      if (stunClient?.id) {
-        const response = await fetch(`${getTcUrl()}/clients/${stunClient.id}/roles`, {
-          method: "GET",
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (response.ok) {
-          stunRoles = await response.json();
-        }
-      }
-    } catch {
-      // Stun client may not exist yet
-    }
-  }
-
-  // Get admin role
   try {
     const adminRole = await getTideRealmAdminRole(token);
-    return [...clientRoles, ...stunRoles, adminRole];
+    return [...clientRoles, adminRole];
   } catch {
-    return [...clientRoles, ...stunRoles];
+    return clientRoles;
   }
 };
 

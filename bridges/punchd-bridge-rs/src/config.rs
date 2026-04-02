@@ -50,10 +50,6 @@ struct GatewayToml {
     #[serde(default)]
     strip_auth_header: Option<bool>,
     #[serde(default)]
-    tc_client_id: Option<String>,
-    #[serde(default)]
-    keylessh_client_id: Option<String>,
-    #[serde(default)]
     server_url: Option<String>,
 }
 
@@ -94,7 +90,6 @@ pub struct ServerConfig {
     pub https: bool,
     pub tls_hostname: String,
     pub tc_internal_url: Option<String>,
-    pub tc_client_id: Option<String>,
     pub server_url: Option<String>,
 }
 
@@ -384,8 +379,6 @@ pub fn load_config() -> ServerConfig {
             .unwrap_or(true),
         tls_hostname: get_val_or(&toml_cfg.tls_hostname, "TLS_HOSTNAME", "localhost"),
         tc_internal_url: get_val(&toml_cfg.tc_internal_url, "TC_INTERNAL_URL"),
-        tc_client_id: get_val(&toml_cfg.keylessh_client_id, "KEYLESSH_CLIENT_ID")
-            .or_else(|| get_val(&toml_cfg.tc_client_id, "TC_CLIENT_ID")),
         server_url: get_val(&toml_cfg.server_url, "SERVER_URL"),
     }
 }
