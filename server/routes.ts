@@ -1121,9 +1121,11 @@ export async function registerRoutes(
           return;
         }
 
-        res.setHeader("Content-Type", "video/webm");
-        res.setHeader("Content-Length", videoData.length.toString());
-        res.send(videoData);
+        res.writeHead(200, {
+          "Content-Type": "video/webm",
+          "Content-Length": videoData.length.toString(),
+        });
+        res.end(videoData);
       } catch (error) {
         log(`RDP video serve error: ${error}`);
         res.status(500).json({ error: "Failed to serve video" });
