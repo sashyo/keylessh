@@ -221,20 +221,20 @@ export const api = {
         const roles = await tc.getClientRoles();
         return { roles: roles as unknown as AdminRole[] };
       },
-      listAll: async (stunServerClientId?: string | null) => {
-        const roles = await tc.getAllRoles(stunServerClientId);
+      listAll: async () => {
+        const roles = await tc.getAllRoles();
         return { roles: roles as unknown as AdminRole[] };
       },
-      create: async (data: { name: string; description?: string; policy?: SshPolicyConfig; targetClientId?: string }) => {
-        await tc.createRole({ name: data.name, description: data.description }, data.targetClientId);
+      create: async (data: { name: string; description?: string; policy?: SshPolicyConfig }) => {
+        await tc.createRole({ name: data.name, description: data.description });
         return { success: "Role created" };
       },
-      update: async (data: { name: string; description?: string; targetClientId?: string }) => {
-        await tc.updateRole(data, data.targetClientId);
+      update: async (data: { name: string; description?: string }) => {
+        await tc.updateRole(data);
         return { success: "Role updated" };
       },
-      delete: async (roleName: string, targetClientId?: string) => {
-        const result = await tc.deleteRole(roleName, targetClientId);
+      delete: async (roleName: string) => {
+        const result = await tc.deleteRole(roleName);
         return { success: "Role deleted", approvalCreated: result.approvalCreated };
       },
       policies: {

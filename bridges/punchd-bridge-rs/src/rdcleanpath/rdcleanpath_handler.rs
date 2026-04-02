@@ -30,7 +30,6 @@ pub struct RDCleanPathSessionOptions {
     pub backends: Vec<BackendEntry>,
     pub auth: Arc<TidecloakAuth>,
     pub gateway_id: Option<String>,
-    pub tc_client_id: Option<String>,
     pub server_url: Option<String>,
     pub recording: Option<RecordingHandle>,
     /// Pre-obtained keylessh app token (via PKCE+SSO from browser) for recording API calls
@@ -128,9 +127,9 @@ async fn run_session(
         if let Some(ref ra) = payload.resource_access {
             tracing::info!("Resource access: {}", ra);
         }
-        tracing::info!("tc_client_id: {:?}, destination: {}", opts.tc_client_id, req.destination);
+        tracing::info!("destination: {}", req.destination);
 
-        _rdp_username = match check_dest_roles(&payload, &req.destination, opts.tc_client_id.as_deref()) {
+        _rdp_username = match check_dest_roles(&payload, &req.destination, Some(&payload.azp.clone().unwrap_or_default())) {
             Some(u) => u,
             None => {
                 tracing::error!(

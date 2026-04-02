@@ -41,7 +41,6 @@ pub struct StunRegistrationOptions {
     pub metadata: serde_json::Value,
     pub backends: Vec<BackendEntry>,
     pub auth: Option<Arc<TidecloakAuth>>,
-    pub tc_client_id: Option<String>,
     pub vpn_state: Option<Arc<Mutex<VpnState>>>,
 }
 
@@ -180,7 +179,6 @@ async fn connect_and_run(
             send_signaling: signaling_tx.clone(),
             backends: options.backends.clone(),
             auth: options.auth.clone(),
-            tc_client_id: options.tc_client_id.clone(),
             vpn_state: options.vpn_state.clone(),
         });
         tracing::info!("[STUN-Reg] WebRTC peer handler ready");

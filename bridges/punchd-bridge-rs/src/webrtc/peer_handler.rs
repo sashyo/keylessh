@@ -84,7 +84,6 @@ pub struct PeerHandlerOptions {
     pub send_signaling: mpsc::UnboundedSender<serde_json::Value>,
     pub backends: Vec<BackendEntry>,
     pub auth: Option<Arc<TidecloakAuth>>,
-    pub tc_client_id: Option<String>,
     pub vpn_state: Option<Arc<Mutex<VpnState>>>,
 }
 

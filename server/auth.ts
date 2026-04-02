@@ -23,7 +23,7 @@ import {
   invalidateCache,
 } from "./lib/tidecloakApi";
 import { UserRepresentation, RoleRepresentation, ClientRepresentation } from "./lib/auth/keycloakTypes";
-import { getResource, getAuthOverrideUrl, getRealm, getStunServerClientId } from "./lib/auth/tidecloakConfig";
+import { getResource, getAuthOverrideUrl, getRealm } from "./lib/auth/tidecloakConfig";
 
 // Extended Request interface with user information
 export interface AuthenticatedRequest extends Request {
@@ -373,39 +373,6 @@ export class TidecloakAdmin {
             } catch { /* skip failed role lookup */ }
           })
         );
-      }
-    }
-
-    // Get stun server client roles and their members
-    const stunClientId = getStunServerClientId();
-    if (stunClientId && stunClientId !== getResource()) {
-      const stunClient = await getClientByClientId(stunClientId, token);
-      if (stunClient?.id) {
-        const tcUrl = `${getAuthOverrideUrl()}/admin/realms/${getRealm()}`;
-        const rolesRes = await fetch(`${tcUrl}/clients/${stunClient.id}/roles`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (rolesRes.ok) {
-          const roles: RoleRepresentation[] = await rolesRes.json();
-          await Promise.all(
-            roles.map(async (role) => {
-              try {
-                const usersRes = await fetch(
-                  `${tcUrl}/clients/${stunClient.id}/roles/${encodeURIComponent(role.name!)}/users`,
-                  { headers: { Authorization: `Bearer ${token}` } }
-                );
-                if (usersRes.ok) {
-                  const roleUsers: UserRepresentation[] = await usersRes.json();
-                  for (const u of roleUsers) {
-                    const existing = userRolesMap.get(u.id!) || [];
-                    existing.push(role.name!);
-                    userRolesMap.set(u.id!, existing);
-                  }
-                }
-              } catch { /* skip */ }
-            })
-          );
-        }
       }
     }
 
