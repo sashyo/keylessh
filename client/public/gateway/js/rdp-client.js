@@ -410,7 +410,7 @@
 
   // ── Initialization ────────────────────────────────────────────
 
-  function init() {
+  async function init() {
     var params = new URLSearchParams(location.search);
     backendName = (params.get("backend") || "").replace(/\/+$/, "");
     if (!backendName) {
@@ -428,19 +428,29 @@
         setStatus("error", "No gateway specified. Use ?gateway=<id>");
         return;
       }
-      var wsProto = SIGNAL_BASE.startsWith("https") ? "wss" : "ws";
-      var signalHost = SIGNAL_BASE.replace(/^https?:\/\//, "");
-      config = {
-        signalingUrl: wsProto + "://" + signalHost,
-        targetGatewayId: gatewayId,
-        e2eTls: true,
-      };
       sessionToken = localStorage.getItem("access_token") || "";
       if (!sessionToken) {
         setStatus("error", "Not authenticated — please log in to KeyleSSH first");
         return;
       }
-      console.log("[RDP] Config built from query params, token from localStorage");
+      // Fetch TURN/STUN credentials from the signal server
+      try {
+        var res = await fetch(SIGNAL_BASE + "/webrtc-config");
+        if (res.ok) {
+          config = await res.json();
+        } else {
+          config = {};
+        }
+      } catch (e) {
+        console.warn("[RDP] Failed to fetch webrtc-config, continuing without TURN:", e);
+        config = {};
+      }
+      var wsProto = SIGNAL_BASE.startsWith("https") ? "wss" : "ws";
+      var signalHost = SIGNAL_BASE.replace(/^https?:\/\//, "");
+      config.signalingUrl = wsProto + "://" + signalHost;
+      config.targetGatewayId = gatewayId;
+      config.e2eTls = true;
+      console.log("[RDP] Config loaded from signal server, token from localStorage");
       connectSignaling();
     } else {
       // Legacy: served by gateway through signal server relay — use cookies
