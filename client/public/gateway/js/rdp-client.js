@@ -433,7 +433,6 @@
       config = {
         signalingUrl: wsProto + "://" + signalHost,
         targetGatewayId: gatewayId,
-        e2eTls: true,
       };
       sessionToken = localStorage.getItem("access_token") || "";
       if (!sessionToken) {
