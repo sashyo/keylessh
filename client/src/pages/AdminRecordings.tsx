@@ -432,7 +432,28 @@ export default function AdminRecordings() {
           </DialogHeader>
           {playingRecording && (
             <div className="flex-1 min-h-0 overflow-y-auto -mx-3 px-3 sm:-mx-4 sm:px-4 md:-mx-6 md:px-6">
-              <RecordingPlayer recording={playingRecording} />
+              {playingRecording.recordingType === "rdp" ? (
+                <div className="flex flex-col items-center justify-center py-12 space-y-4 text-center">
+                  <Monitor className="h-12 w-12 text-muted-foreground" />
+                  <div>
+                    <p className="text-lg font-medium">RDP Session Recording</p>
+                    <p className="text-sm text-muted-foreground mt-1">
+                      {playingRecording.serverName} &mdash; {new Date(playingRecording.startedAt).toLocaleString()}
+                    </p>
+                  </div>
+                  <div className="flex gap-4 text-sm text-muted-foreground">
+                    {playingRecording.duration != null && (
+                      <span>Duration: {Math.floor(playingRecording.duration / 60)}:{String(Math.floor(playingRecording.duration % 60)).padStart(2, "0")}</span>
+                    )}
+                    <span>Size: {(playingRecording.fileSize / 1024).toFixed(1)} KB</span>
+                  </div>
+                  <Button variant="outline" onClick={() => handleDownload(playingRecording.id)}>
+                    Download PDU Recording
+                  </Button>
+                </div>
+              ) : (
+                <RecordingPlayer recording={playingRecording} />
+              )}
             </div>
           )}
         </DialogContent>

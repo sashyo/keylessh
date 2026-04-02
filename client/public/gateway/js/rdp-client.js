@@ -926,7 +926,7 @@
       builder = builder.setCursorStyleCallbackContext(window);
 
       if (useE2eTls) {
-        builder = builder.extension("e2e_tls", true);
+        builder = builder.extension(new wasm.Extension("e2e_tls", true));
       }
 
       console.log("[RDP] Connecting via " + (useE2eTls ? "e2e TLS" : "RDCleanPath") + "...");

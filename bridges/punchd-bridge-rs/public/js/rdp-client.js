@@ -984,7 +984,7 @@
       builder = builder.renderCanvas(rdpCanvas);
       builder = builder.desktopSize(new wasm.DesktopSize(canvasWidth, canvasHeight));
       if (useDirectTls) {
-        builder = builder.extension("e2e_tls", true);
+        builder = builder.extension(new wasm.Extension("e2e_tls", true));
       }
       builder = builder.setCursorStyleCallback(function (kind, data, hotspotX, hotspotY) {
         if (kind === "default") {
