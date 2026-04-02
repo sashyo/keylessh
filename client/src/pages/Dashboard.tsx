@@ -243,14 +243,13 @@ function RdpEndpointCard({ endpoint, backend }: { endpoint: GatewayEndpoint; bac
   const usernames = backend.rdpUsernames || [];
   const [selectedUser, setSelectedUser] = useState<string>(usernames[0] || "");
   const handleConnect = () => {
-    const url = endpoint.signalServerUrl.replace(/\/$/, "");
-    const token = localStorage.getItem("access_token") || "";
+    const signalUrl = endpoint.signalServerUrl.replace(/\/$/, "");
     const params = new URLSearchParams({
+      signalUrl,
       gateway: endpoint.id,
       backend: backend.name,
     });
-    if (token) params.set("token", token);
-    window.open(`${url}/api/select?${params.toString()}&redirect=${encodeURIComponent(`/rdp?backend=${encodeURIComponent(backend.name)}`)}`, "_blank");
+    window.open(`/gateway/rdp.html?${params.toString()}`, "_blank");
   };
 
   return (
@@ -361,7 +360,14 @@ function CustomConnectionCard({ endpoint }: { endpoint: GatewayEndpoint }) {
     if (token) params.set("token", token);
 
     if (protocol === "rdp") {
-      window.open(`${url}/api/select?${params.toString()}&redirect=${encodeURIComponent(`/rdp?host=${encodeURIComponent(target)}`)}`, "_blank");
+      const rdpParams = new URLSearchParams({
+        signalUrl: url,
+        gateway: endpoint.id,
+        backend: "__custom__",
+        host: target,
+      });
+      if (flags) rdpParams.set("customFlags", flags);
+      window.open(`/gateway/rdp.html?${rdpParams.toString()}`, "_blank");
     } else {
       window.open(`${url}/api/select?${params.toString()}`, "_blank");
     }
@@ -591,14 +597,20 @@ function ServiceListItem({ item, sshBlocked }: { item: ServiceItem; sshBlocked?:
   const accessible = backend.accessible !== false;
   const isDisabled = !accessible || !endpoint.online;
   const handleConnect = () => {
-    const url = endpoint.signalServerUrl.replace(/\/$/, "");
-    const token = localStorage.getItem("access_token") || "";
-    const params = new URLSearchParams({ gateway: endpoint.id, backend: backend.name });
-    if (token) params.set("token", token);
+    const signalUrl = endpoint.signalServerUrl.replace(/\/$/, "");
     if (isRdp) {
-      params.set("redirect", `/rdp?backend=${encodeURIComponent(backend.name)}`);
+      const rdpParams = new URLSearchParams({
+        signalUrl,
+        gateway: endpoint.id,
+        backend: backend.name,
+      });
+      window.open(`/gateway/rdp.html?${rdpParams.toString()}`, "_blank");
+    } else {
+      const token = localStorage.getItem("access_token") || "";
+      const params = new URLSearchParams({ gateway: endpoint.id, backend: backend.name });
+      if (token) params.set("token", token);
+      window.open(`${signalUrl}/api/select?${params.toString()}`, "_blank");
     }
-    window.open(`${url}/api/select?${params.toString()}`, "_blank");
   };
 
   const Icon = isRdp ? Monitor : Globe;
