@@ -960,20 +960,30 @@ async fn handle_tcp_forward_socket(socket: WebSocket, state: Arc<ProxyState>) {
 
     let (mut ws_sink, mut ws_stream) = socket.split();
 
-    // Step 1: Read routing header (first WS message must be JSON)
+    // Step 1: Read routing header (first WS message — Text or Binary JSON)
     let routing = match ws_stream.next().await {
         Some(Ok(Message::Text(text))) => {
             match serde_json::from_str::<serde_json::Value>(&text) {
                 Ok(v) => v,
                 Err(e) => {
-                    tracing::error!("[TCP-Forward] Invalid routing JSON: {e}");
+                    tracing::error!("[TCP-Forward] Invalid routing JSON (text): {e}");
                     let _ = ws_sink.send(Message::Close(None)).await;
                     return;
                 }
             }
         }
-        _ => {
-            tracing::error!("[TCP-Forward] Expected JSON routing header as first message");
+        Some(Ok(Message::Binary(data))) => {
+            match serde_json::from_slice::<serde_json::Value>(&data) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!("[TCP-Forward] Invalid routing JSON (binary): {e}");
+                    let _ = ws_sink.send(Message::Close(None)).await;
+                    return;
+                }
+            }
+        }
+        other => {
+            tracing::error!("[TCP-Forward] Expected JSON routing header as first message, got: {other:?}");
             let _ = ws_sink.send(Message::Close(None)).await;
             return;
         }
