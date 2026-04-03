@@ -473,8 +473,10 @@ export class BrowserSSHClient {
 
       this.options.onStatusChange("connecting");
 
-      // Create session record first so the WS bridge can be associated with a session.
-      this.sessionId = await this.createSessionRecord();
+      // Create session record (skip in gateway mode — gateway creates its own)
+      if (!this.options.gatewayUrl) {
+        this.sessionId = await this.createSessionRecord();
+      }
       this.sessionEnded = false;
 
       // Register browser close/navigate handlers to end session on unexpected exit
