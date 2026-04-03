@@ -533,6 +533,13 @@ signalWss.on("connection", (ws: WebSocket, req) => {
   let messageCount = 0;
   const rateLimitInterval = setInterval(() => { messageCount = 0; }, 1000);
 
+  // Server-side ping keepalive (15s) to prevent Azure/proxy idle timeouts
+  const pingInterval = setInterval(() => {
+    if (ws.readyState === ws.OPEN) {
+      ws.ping();
+    }
+  }, 15000);
+
   ws.on("message", (data) => {
     if (!gatewayWebSockets.has(ws)) {
       messageCount++;
@@ -561,8 +568,8 @@ signalWss.on("connection", (ws: WebSocket, req) => {
         handleSdp(ws, msg);
         break;
       case "quic_address":
-        // QUIC transport: forward endpoint address between peers (same as candidate forwarding)
-        handleCandidate(ws, msg);
+        // QUIC transport: forward endpoint address + cert hash between peers
+        handleQuicAddress(ws, msg);
         break;
       case "http_response":
         handleHttpResponse(msg as unknown as {
@@ -609,6 +616,7 @@ signalWss.on("connection", (ws: WebSocket, req) => {
 
   ws.on("close", () => {
     clearInterval(rateLimitInterval);
+    clearInterval(pingInterval);
     gatewayWebSockets.delete(ws);
     const info = registry.getInfoByWs(ws);
     if (info?.type === "gateway") {
@@ -625,6 +633,7 @@ signalWss.on("connection", (ws: WebSocket, req) => {
 
   ws.on("error", () => {
     clearInterval(rateLimitInterval);
+    clearInterval(pingInterval);
     gatewayWebSockets.delete(ws);
     const info = registry.getInfoByWs(ws);
     if (info?.type === "gateway") {
@@ -697,6 +706,24 @@ function handleCandidate(ws: WebSocket, msg: SignalMessage): void {
   }
   const fromId = msg.fromId || "unknown";
   forwardCandidate(registry, fromId, msg.targetId, msg.candidate);
+}
+
+function handleQuicAddress(ws: WebSocket, msg: SignalMessage): void {
+  if (!msg.targetId) {
+    safeSend(ws, { type: "error", message: "Missing targetId for quic_address" });
+    return;
+  }
+  const fromId = msg.fromId || "unknown";
+  // Forward the full quic_address message to the target peer
+  const target = registry.getClient(msg.targetId) || registry.getGateway(msg.targetId);
+  if (target) {
+    safeSend(target.ws, {
+      type: "quic_address",
+      fromId,
+      address: (msg as any).address,
+      certHash: (msg as any).certHash,
+    });
+  }
 }
 
 

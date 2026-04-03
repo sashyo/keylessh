@@ -1160,7 +1160,19 @@ async fn handle_ssh_socket(
         return;
     }
 
-    tracing::info!("[SSH] Connection request: {host}:{port}");
+    // Resolve backend name to actual host:port from config
+    let (resolved_host, resolved_port) = if let Some(backend) = state.config.backends.iter().find(|b| b.protocol == "ssh" && b.name == host) {
+        let url = backend.url.trim_start_matches("ssh://");
+        if let Some((h, p)) = url.rsplit_once(':') {
+            (h.to_string(), p.parse::<u16>().unwrap_or(22))
+        } else {
+            (url.to_string(), 22)
+        }
+    } else {
+        (host.clone(), port)
+    };
+
+    tracing::info!("[SSH] Connection request: {host} -> {resolved_host}:{resolved_port}");
 
     // Verify JWT
     let payload = match state.auth.verify_token(&token).await {
@@ -1236,8 +1248,8 @@ async fn handle_ssh_socket(
 
     let (mut ws_sink, mut ws_stream) = socket.split();
 
-    // Connect to SSH server
-    let addr = format!("{host}:{port}");
+    // Connect to SSH server (use resolved address from backend config)
+    let addr = format!("{resolved_host}:{resolved_port}");
     let tcp_stream = match tokio::time::timeout(
         std::time::Duration::from_secs(10),
         tokio::net::TcpStream::connect(&addr),
