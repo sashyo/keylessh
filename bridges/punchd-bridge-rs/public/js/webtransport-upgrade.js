@@ -16,8 +16,13 @@
   // Check WebTransport support — fall back to WebRTC if not available
   if (typeof WebTransport === "undefined") {
     console.log("[QUIC] WebTransport not supported — using WebRTC fallback");
+    window.__quicFailed = true;
     return; // webrtc-upgrade.js handles it
   }
+
+  // Global flag: set to true when QUIC connects, checked by webrtc-upgrade.js
+  window.__quicActive = false;
+  window.__quicFailed = false;
 
   const BACKEND_PREFIX = (function () {
     const m = location.pathname.match(/^\/__b\/[^/]+/);
@@ -167,6 +172,7 @@
       await transport.ready;
       console.log("[QUIC] WebTransport connected!");
       reconnectAttempts = 0;
+      window.__quicActive = true;
 
       // Authenticate — open first bidi stream with JWT
       await authenticate();
@@ -180,7 +186,8 @@
     } catch (e) {
       console.error("[QUIC] WebTransport failed:", e);
       console.log("[QUIC] Falling back to WebRTC...");
-      // Let webrtc-upgrade.js handle it on next page load
+      window.__quicActive = false;
+      window.__quicFailed = true;
       cleanup();
     }
   }

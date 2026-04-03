@@ -597,10 +597,13 @@ export class BrowserSSHClient {
       sessionId: this.sessionId || "",
     });
 
-    // Route through gateway via signal server if gatewayUrl is set
+    // Route through gateway — use signal server relay as WebSocket
+    // (QUIC WebTransport for SSH would need a separate stream, not WebSocket)
     if (this.options.gatewayUrl) {
-      const gwUrl = this.options.gatewayUrl.replace(/^https?/, "wss").replace(/\/$/, "");
-      return `${gwUrl}/ws/ssh?${params.toString()}`;
+      const gwUrl = this.options.gatewayUrl.replace(/\/$/, "");
+      // Convert http(s) to ws(s)
+      const wsUrl = gwUrl.replace(/^https:/, "wss:").replace(/^http:/, "ws:");
+      return `${wsUrl}/ws/ssh?${params.toString()}`;
     }
 
     // Use external bridge URL if provided, otherwise fallback to local /ws/tcp
