@@ -484,29 +484,37 @@ export class BrowserSSHClient {
 
       const keyPair = auth.keyPair;
 
-      // Connect via QUIC (WebTransport) or WebSocket fallback
+      // Connect via QUIC (WebTransport) with WebSocket fallback
+      let useWebSocket = true;
       if (this.options.gatewayUrl && typeof WebTransport !== "undefined") {
-        const { connectQuicSsh } = await import("./quicSsh");
-        const token = localStorage.getItem("access_token") || "";
-        this.websocket = await connectQuicSsh({
-          signalUrl: this.options.gatewayUrl,
-          gatewayId: this.options.gatewayId || this.options.serverId,
-          backendName: this.options.host,
-          token,
-          host: this.options.host,
-          port: this.options.port,
-        });
-        this.websocket.binaryType = "arraybuffer";
-      } else {
-        // WebSocket fallback
+        try {
+          const { connectQuicSsh } = await import("./quicSsh");
+          const token = localStorage.getItem("access_token") || "";
+          this.websocket = await connectQuicSsh({
+            signalUrl: this.options.gatewayUrl,
+            gatewayId: this.options.gatewayId || this.options.serverId,
+            backendName: this.options.host,
+            token,
+            host: this.options.host,
+            port: this.options.port,
+          });
+          this.websocket.binaryType = "arraybuffer";
+          useWebSocket = false;
+          console.log("[SSH] Connected via QUIC WebTransport");
+        } catch (quicErr) {
+          console.warn("[SSH] QUIC failed, falling back to WebSocket:", quicErr);
+        }
+      }
+      if (useWebSocket) {
         const wsUrl = this.buildWebSocketUrl();
+        console.log("[SSH] Connecting via WebSocket:", wsUrl);
         this.websocket = new WebSocket(wsUrl);
         this.websocket.binaryType = "arraybuffer";
         await this.waitForWebSocketOpen();
       }
 
       // Handle socket closure (e.g. admin termination, network drop)
-      this.websocket.addEventListener("close", (event) => {
+      this.websocket!.addEventListener("close", (event) => {
         if (this.isCleaningUp) return;
         if (event.reason) {
           this.options.onError(event.reason);
@@ -571,7 +579,7 @@ export class BrowserSSHClient {
       });
 
       // Wrap WebSocket in SSH stream
-      const stream = new WebSocketStream(this.websocket);
+      const stream = new WebSocketStream(this.websocket!);
 
       // Connect the SSH session
       await this.session.connect(stream);
