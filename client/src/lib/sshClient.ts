@@ -334,6 +334,8 @@ export interface SSHClientOptions {
   signer?: SSHSigner;
   /** Gateway URL for routing SSH through punchd gateway's /ws/ssh endpoint */
   gatewayUrl?: string;
+  /** Gateway ID for QUIC signaling pairing */
+  gatewayId?: string;
 }
 
 /**
@@ -480,15 +482,26 @@ export class BrowserSSHClient {
 
       const keyPair = auth.keyPair;
 
-      // Get the WebSocket URL for the TCP bridge
-      const wsUrl = this.buildWebSocketUrl();
-
-      // Create WebSocket connection to the TCP bridge
-      this.websocket = new WebSocket(wsUrl);
-      this.websocket.binaryType = "arraybuffer";
-
-      // Wait for WebSocket to connect
-      await this.waitForWebSocketOpen();
+      // Connect via QUIC (WebTransport) or WebSocket fallback
+      if (this.options.gatewayUrl && typeof WebTransport !== "undefined") {
+        const { connectQuicSsh } = await import("./quicSsh");
+        const token = localStorage.getItem("access_token") || "";
+        this.websocket = await connectQuicSsh({
+          signalUrl: this.options.gatewayUrl,
+          gatewayId: this.options.gatewayId || this.options.serverId,
+          backendName: this.options.host,
+          token,
+          host: this.options.host,
+          port: this.options.port,
+        });
+        this.websocket.binaryType = "arraybuffer";
+      } else {
+        // WebSocket fallback
+        const wsUrl = this.buildWebSocketUrl();
+        this.websocket = new WebSocket(wsUrl);
+        this.websocket.binaryType = "arraybuffer";
+        await this.waitForWebSocketOpen();
+      }
 
       // Handle socket closure (e.g. admin termination, network drop)
       this.websocket.addEventListener("close", (event) => {
