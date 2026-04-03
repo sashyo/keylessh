@@ -1135,10 +1135,34 @@
     window.WebSocket.prototype = NativeWebSocket.prototype;
   }
 
-  // Start upgrade after page load
+  // Start upgrade after page load — but wait for QUIC to try first
+  function startIfNeeded() {
+    // If QUIC (WebTransport) already connected, don't start WebRTC
+    if (window.__quicActive) {
+      console.log("[WebRTC] QUIC already active — skipping WebRTC");
+      return;
+    }
+    // If QUIC failed or not supported, start WebRTC
+    if (window.__quicFailed) {
+      console.log("[WebRTC] QUIC failed — starting WebRTC fallback");
+      init();
+      return;
+    }
+    // QUIC still trying — wait a bit then check again
+    console.log("[WebRTC] Waiting for QUIC attempt...");
+    setTimeout(function () {
+      if (window.__quicActive) {
+        console.log("[WebRTC] QUIC connected — skipping WebRTC");
+      } else {
+        console.log("[WebRTC] QUIC did not connect — starting WebRTC");
+        init();
+      }
+    }, 10000); // Give QUIC 10 seconds
+  }
+
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", init);
+    document.addEventListener("DOMContentLoaded", startIfNeeded);
   } else {
-    init();
+    startIfNeeded();
   }
 })();

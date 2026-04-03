@@ -159,7 +159,7 @@ function ServerCardSkeleton() {
   );
 }
 
-function GatewayEndpointCard({ endpoint, backend }: { endpoint: GatewayEndpoint; backend: { name: string; accessible?: boolean } }) {
+function GatewayEndpointCard({ endpoint, backend }: { endpoint: GatewayEndpoint; backend: { name: string; protocol?: string; accessible?: boolean } }) {
   const accessible = backend.accessible !== false;
   const isDisabled = !accessible || !endpoint.online;
   const handleConnect = () => {
@@ -211,7 +211,7 @@ function GatewayEndpointCard({ endpoint, backend }: { endpoint: GatewayEndpoint;
         {!accessible && (
           <p className="text-xs text-muted-foreground">
             No access to this endpoint. Ask an admin to grant a role like{" "}
-            <span className="font-mono">dest:{endpoint.id}:{backend.name}</span>.
+            <span className="font-mono">{backend.protocol === "ssh" ? "ssh" : "dest"}:{endpoint.id}:{backend.name}{backend.protocol === "ssh" ? ":username" : ""}</span>.
           </p>
         )}
 

@@ -332,6 +332,8 @@ export interface SSHClientOptions {
    * signature algorithm (the library will wrap it in SSH "signature data").
    */
   signer?: SSHSigner;
+  /** Gateway URL for routing SSH through punchd gateway's /ws/ssh endpoint */
+  gatewayUrl?: string;
 }
 
 /**
@@ -595,10 +597,13 @@ export class BrowserSSHClient {
       sessionId: this.sessionId || "",
     });
 
-    // Route through gateway via signal server if gatewayUrl is set
-    if ((this.options as any).gatewayUrl) {
-      const gwUrl = (this.options as any).gatewayUrl.replace(/\/$/, "");
-      return `${gwUrl}/ws/ssh?${params.toString()}`;
+    // Route through gateway — use signal server relay as WebSocket
+    // (QUIC WebTransport for SSH would need a separate stream, not WebSocket)
+    if (this.options.gatewayUrl) {
+      const gwUrl = this.options.gatewayUrl.replace(/\/$/, "");
+      // Convert http(s) to ws(s)
+      const wsUrl = gwUrl.replace(/^https:/, "wss:").replace(/^http:/, "ws:");
+      return `${wsUrl}/ws/ssh?${params.toString()}`;
     }
 
     // Use external bridge URL if provided, otherwise fallback to local /ws/tcp

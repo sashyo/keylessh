@@ -61,6 +61,12 @@ export default function Console() {
   const searchParams = new URLSearchParams(search);
   const sshUser = searchParams.get("user") || "root";
 
+  // Gateway SSH mode: connect through punchd gateway instead of direct bridge
+  const gatewayUrl = searchParams.get("gatewayUrl");
+  const gatewayBackend = searchParams.get("backend");
+  const gatewayId = searchParams.get("gateway");
+  const isGatewayMode = !!gatewayUrl;
+
   const { toast } = useToast();
   const authConfig = useAuthConfig();
 
@@ -99,11 +105,12 @@ export default function Console() {
   // SSH session hook
   const { connect, disconnect, send, resize, setDimensions, status, error } =
     useSSHSession({
-      host: server?.host || "",
-      port: server?.port || 22,
-      serverId: params.serverId || "",
+      host: isGatewayMode ? (gatewayBackend || "") : (server?.host || ""),
+      port: isGatewayMode ? 22 : (server?.port || 22),
+      serverId: isGatewayMode ? (gatewayBackend || "") : (params.serverId || ""),
       username: sshUser,
       onData: writeToTerminal,
+      gatewayUrl: isGatewayMode ? gatewayUrl! : undefined,
     });
 
   const prevStatusRef = useRef<SSHConnectionStatus>("disconnected");
