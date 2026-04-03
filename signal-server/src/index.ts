@@ -481,10 +481,82 @@ const server = useTls
 // ── WebSocket Server (signaling on any path) ────────────────────
 
 const signalWss = new WebSocketServer({ noServer: true, maxPayload: 5 * 1024 * 1024 });
+const sshWss = new WebSocketServer({ noServer: true, maxPayload: 1 * 1024 * 1024 });
 
 server.on("upgrade", (req, socket, head) => {
-  signalWss.handleUpgrade(req, socket, head, (ws) => {
-    signalWss.emit("connection", ws, req);
+  const url = req.url || "";
+  if (url.startsWith("/ws/ssh")) {
+    sshWss.handleUpgrade(req, socket, head, (ws) => {
+      sshWss.emit("connection", ws, req);
+    });
+  } else {
+    signalWss.handleUpgrade(req, socket, head, (ws) => {
+      signalWss.emit("connection", ws, req);
+    });
+  }
+});
+
+// ── SSH WebSocket Proxy ────────────────────────────────────────
+// Proxies /ws/ssh?host=X&port=Y&token=Z to the gateway's /ws/ssh endpoint
+sshWss.on("connection", (clientWs: WebSocket, req) => {
+  const url = new URL(req.url || "", `http://${req.headers.host}`);
+  const gatewayId = url.searchParams.get("gatewayId") || "";
+  const queryString = url.search; // includes the leading '?'
+
+  // Find gateway
+  const gateway = gatewayId
+    ? registry.getGateway(gatewayId)
+    : registry.getAvailableGateway();
+
+  if (!gateway) {
+    clientWs.close(4004, "No gateway available");
+    return;
+  }
+
+  // Connect to gateway's /ws/ssh endpoint using its public IP
+  const gwPublicIp = (gateway.ws as any)._publicIp;
+  const gwPort = gateway.addresses[0]?.split(":").pop() || "7891";
+  if (!gwPublicIp) {
+    clientWs.close(4004, "Gateway has no public address");
+    return;
+  }
+
+  const gwWsUrl = `ws://${gwPublicIp}:${gwPort}/ws/ssh${queryString}`;
+  console.log(`[SSH-Proxy] Connecting to gateway: ${gwWsUrl}`);
+
+  const gwWs = new WebSocket(gwWsUrl);
+
+  gwWs.on("open", () => {
+    console.log(`[SSH-Proxy] Connected to gateway ${gateway.id}`);
+  });
+
+  // Bridge: client → gateway
+  clientWs.on("message", (data, isBinary) => {
+    if (gwWs.readyState === gwWs.OPEN) {
+      gwWs.send(data, { binary: isBinary });
+    }
+  });
+
+  // Bridge: gateway → client
+  gwWs.on("message", (data: Buffer, isBinary: boolean) => {
+    if (clientWs.readyState === clientWs.OPEN) {
+      clientWs.send(data, { binary: isBinary });
+    }
+  });
+
+  // Close propagation
+  clientWs.on("close", (code, reason) => {
+    gwWs.close(code, reason);
+  });
+
+  gwWs.on("close", (code, reason) => {
+    clientWs.close(code, reason);
+  });
+
+  clientWs.on("error", () => gwWs.close());
+  gwWs.on("error", (err) => {
+    console.error(`[SSH-Proxy] Gateway connection error: ${err.message}`);
+    clientWs.close(4002, "Gateway connection failed");
   });
 });
 
