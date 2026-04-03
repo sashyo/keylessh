@@ -13,7 +13,7 @@ import AuthRedirect from "@/pages/AuthRedirect";
 import Dashboard from "@/pages/Dashboard";
 import ConsoleWorkspace from "@/pages/ConsoleWorkspace";
 import AdminDashboard from "@/pages/AdminDashboard";
-import AdminServers from "@/pages/AdminServers";
+// AdminServers removed — SSH servers are now gateway backends
 import AdminUsers from "@/pages/AdminUsers";
 import AdminRoles from "@/pages/AdminRoles";
 import AdminApprovals from "@/pages/AdminApprovals";
@@ -21,7 +21,7 @@ import AdminSessions from "@/pages/AdminSessions";
 import AdminLogs from "@/pages/AdminLogs";
 import AdminLicense from "@/pages/AdminLicense";
 import AdminRecordings from "@/pages/AdminRecordings";
-import AdminBridges from "@/pages/AdminBridges";
+// AdminBridges removed — SSH goes through gateway now
 import AdminSignalServers from "@/pages/AdminSignalServers";
 import AdminGateways from "@/pages/AdminGateways";
 import NotFound from "@/pages/not-found";
@@ -141,12 +141,6 @@ function AuthenticatedApp() {
           </Route>
           <Route path="/admin">
             {isAdmin ? <AdminDashboard /> : <Redirect to="/app" />}
-          </Route>
-          <Route path="/admin/servers">
-            {isAdmin ? <AdminServers /> : <Redirect to="/app" />}
-          </Route>
-          <Route path="/admin/bridges">
-            {isAdmin ? <AdminBridges /> : <Redirect to="/app" />}
           </Route>
           <Route path="/admin/signal-servers">
             {isAdmin ? <AdminSignalServers /> : <Redirect to="/app" />}

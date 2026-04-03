@@ -595,6 +595,12 @@ export class BrowserSSHClient {
       sessionId: this.sessionId || "",
     });
 
+    // Route through gateway via signal server if gatewayUrl is set
+    if ((this.options as any).gatewayUrl) {
+      const gwUrl = (this.options as any).gatewayUrl.replace(/\/$/, "");
+      return `${gwUrl}/ws/ssh?${params.toString()}`;
+    }
+
     // Use external bridge URL if provided, otherwise fallback to local /ws/tcp
     if (this.bridgeUrl) {
       return `${this.bridgeUrl}?${params.toString()}`;

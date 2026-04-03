@@ -644,7 +644,7 @@ fn detect_lan_subnets(vpn_gateway_ip: Ipv4Addr) -> Vec<String> {
 // written to the single shared TUN device.
 
 use std::sync::OnceLock;
-static TUN_WRITE_TX: OnceLock<mpsc::UnboundedSender<Vec<u8>>> = OnceLock::new();
+pub static TUN_WRITE_TX: OnceLock<mpsc::UnboundedSender<Vec<u8>>> = OnceLock::new();
 
 /// Run the shared TUN device. Reads IP packets from TUN and routes
 /// them to the correct peer based on destination IP. Also writes

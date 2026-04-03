@@ -18,6 +18,7 @@ static ASSET_RDP_HTML: &str = include_str!("../../public/rdp.html");
 static ASSET_JS_SW: &str = include_str!("../../public/js/sw.js");
 static ASSET_JS_RDP_CLIENT: &str = include_str!("../../public/js/rdp-client.js");
 static ASSET_JS_WEBRTC_UPGRADE: &str = include_str!("../../public/js/webrtc-upgrade.js");
+static ASSET_JS_WEBTRANSPORT_UPGRADE: &str = include_str!("../../public/js/webtransport-upgrade.js");
 static ASSET_JS_TIDE_E2E: &str = include_str!("../../public/js/tide-e2e.js");
 static ASSET_WASM_JS: &str = include_str!("../../public/wasm/ironrdp_web.js");
 static ASSET_WASM_BG: &[u8] = include_bytes!("../../public/wasm/ironrdp_web_bg.wasm");
@@ -788,6 +789,7 @@ pub fn build_router(state: Arc<ProxyState>) -> (Router, SharedState) {
     let router = Router::new()
         .route("/ws/rdcleanpath", get(handle_rdcleanpath_ws))
         .route("/ws/tcp-forward", get(handle_tcp_forward_ws))
+        .route("/ws/ssh", get(handle_ssh_ws))
         .fallback(any(handle_request))
         .with_state(shared.clone());
 
@@ -1128,6 +1130,196 @@ async fn handle_tcp_forward_socket(socket: WebSocket, state: Arc<ProxyState>) {
     tracing::info!("[TCP-Forward] Session ended for dest={destination}");
 }
 
+// ── SSH WebSocket handler ────────────────────────────────────────
+// Bidirectional TCP relay to an SSH server. The browser SSH terminal
+// opens a WebSocket to /ws/ssh?host=X&port=Y&token=Z, gateway verifies
+// the JWT and relays bytes to the SSH server.
+
+async fn handle_ssh_ws(
+    State(shared): State<SharedState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let state = shared.load_full();
+    ws.on_upgrade(move |socket| handle_ssh_socket(socket, state, params))
+}
+
+async fn handle_ssh_socket(
+    socket: WebSocket,
+    state: Arc<ProxyState>,
+    params: std::collections::HashMap<String, String>,
+) {
+    use futures_util::{SinkExt, StreamExt};
+
+    let host = params.get("host").cloned().unwrap_or_default();
+    let port: u16 = params.get("port").and_then(|p| p.parse().ok()).unwrap_or(22);
+    let token = params.get("token").cloned().unwrap_or_default();
+
+    if host.is_empty() || token.is_empty() {
+        tracing::error!("[SSH] Missing host or token");
+        return;
+    }
+
+    tracing::info!("[SSH] Connection request: {host}:{port}");
+
+    // Verify JWT
+    let payload = match state.auth.verify_token(&token).await {
+        Some(p) => p,
+        None => {
+            tracing::error!("[SSH] JWT verification failed");
+            let (mut sink, _) = socket.split();
+            let _ = sink.send(Message::Text(
+                serde_json::json!({"type": "error", "message": "Unauthorized"}).to_string().into()
+            )).await;
+            let _ = sink.send(Message::Close(None)).await;
+            return;
+        }
+    };
+
+    let user = payload.sub.as_deref().unwrap_or("unknown");
+    tracing::info!("[SSH] Authenticated: {user} -> {host}:{port}");
+
+    // Find the SSH backend
+    let backend = state.config.backends.iter().find(|b| {
+        b.protocol == "ssh" && (b.url == format!("{host}:{port}") || b.name == host)
+    });
+
+    let backend_name = backend.map(|b| b.name.clone()).unwrap_or_else(|| host.clone());
+
+    // Check ssh: role — same pattern as dest: roles for RDP
+    // Looks in all resource_access entries for ssh:<gateway>:<backend> or ssh:<gateway>:<backend>:<username>
+    if !backend.map(|b| b.no_auth).unwrap_or(false) {
+        let gateway_id = state.gateway_id.as_deref().unwrap_or("");
+        let required_prefix = format!("ssh:{gateway_id}:{backend_name}");
+
+        let mut all_roles: Vec<String> = Vec::new();
+        if let Some(ref ra) = payload.realm_access {
+            all_roles.extend(ra.roles.clone());
+        }
+        if let Some(ref ra) = payload.resource_access {
+            if let Some(obj) = ra.as_object() {
+                for (_, access) in obj {
+                    if let Some(roles) = access.get("roles").and_then(|r| r.as_array()) {
+                        for role in roles {
+                            if let Some(r) = role.as_str() {
+                                all_roles.push(r.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let has_access = all_roles.iter().any(|r| {
+            r == &required_prefix || r.starts_with(&format!("{required_prefix}:"))
+        });
+
+        if !has_access {
+            tracing::warn!("[SSH] Access denied for {user} to {backend_name} (need role {required_prefix})");
+            let (mut sink, _) = socket.split();
+            let _ = sink.send(Message::Text(
+                serde_json::json!({"type": "error", "message": format!("Access denied: role '{}' required", required_prefix)}).to_string().into()
+            )).await;
+            let _ = sink.send(Message::Close(None)).await;
+            return;
+        }
+
+        // Extract SSH username from role if present (ssh:<gw>:<backend>:<username>)
+        let _ssh_username = all_roles.iter().find_map(|r| {
+            if r.starts_with(&format!("{required_prefix}:")) {
+                Some(r[required_prefix.len()+1..].to_string())
+            } else {
+                None
+            }
+        });
+    }
+
+    let (mut ws_sink, mut ws_stream) = socket.split();
+
+    // Connect to SSH server
+    let addr = format!("{host}:{port}");
+    let tcp_stream = match tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::net::TcpStream::connect(&addr),
+    ).await {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            tracing::error!("[SSH] TCP connect to {addr} failed: {e}");
+            let _ = ws_sink.send(Message::Text(
+                serde_json::json!({"type": "error", "message": format!("Connection failed: {e}")}).to_string().into()
+            )).await;
+            let _ = ws_sink.send(Message::Close(None)).await;
+            return;
+        }
+        Err(_) => {
+            tracing::error!("[SSH] TCP connect to {addr} timed out");
+            let _ = ws_sink.send(Message::Text(
+                serde_json::json!({"type": "error", "message": "Connection timed out"}).to_string().into()
+            )).await;
+            let _ = ws_sink.send(Message::Close(None)).await;
+            return;
+        }
+    };
+
+    tracing::info!("[SSH] TCP connected to {addr}");
+
+    // Send connected notification
+    let _ = ws_sink.send(Message::Text(
+        serde_json::json!({"type": "connected"}).to_string().into()
+    )).await;
+
+    let (tcp_read, tcp_write) = tcp_stream.into_split();
+
+    // TCP → WebSocket
+    let tcp_to_ws = {
+        let mut tcp_read = tcp_read;
+        let mut ws_sink = ws_sink;
+        async move {
+            let mut buf = vec![0u8; 65536];
+            loop {
+                match tcp_read.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if ws_sink.send(Message::Binary(buf[..n].to_vec().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!("[SSH] TCP read error: {e}");
+                        break;
+                    }
+                }
+            }
+            let _ = ws_sink.send(Message::Close(None)).await;
+        }
+    };
+
+    // WebSocket → TCP
+    let ws_to_tcp = {
+        let mut tcp_write = tcp_write;
+        async move {
+            while let Some(Ok(msg)) = ws_stream.next().await {
+                match msg {
+                    Message::Binary(data) => {
+                        if tcp_write.write_all(&data).await.is_err() {
+                            break;
+                        }
+                    }
+                    Message::Close(_) => break,
+                    _ => {}
+                }
+            }
+        }
+    };
+
+    tokio::select! {
+        _ = tcp_to_ws => {}
+        _ = ws_to_tcp => {}
+    }
+
+    tracing::info!("[SSH] Session ended: {user} -> {addr}");
+}
+
 // ── Main request handler ─────────────────────────────────────────
 
 async fn handle_request(
@@ -1234,6 +1426,7 @@ async fn handle_request(
             }
             "/js/rdp-client.js" => Some(ASSET_JS_RDP_CLIENT),
             "/js/webrtc-upgrade.js" => Some(ASSET_JS_WEBRTC_UPGRADE),
+            "/js/webtransport-upgrade.js" => Some(ASSET_JS_WEBTRANSPORT_UPGRADE),
             "/js/tide-e2e.js" => Some(ASSET_JS_TIDE_E2E),
             _ => None,
         };
@@ -1810,10 +2003,11 @@ async fn handle_request(
             }
         }
 
-        // Inject WebRTC upgrade script
+        // Inject WebTransport (QUIC) + WebRTC upgrade scripts
+        // WebTransport loads first — exits early on unsupported browsers, letting WebRTC take over
         if !state.config.ice_servers.is_empty() {
             let script = format!(
-                r#"<script src="{backend_prefix}/js/webrtc-upgrade.js"></script>"#
+                r#"<script src="{backend_prefix}/js/webtransport-upgrade.js"></script><script src="{backend_prefix}/js/webrtc-upgrade.js"></script>"#
             );
             if html.contains("<head>") {
                 html = html.replacen("<head>", &format!("<head>{script}"), 1);

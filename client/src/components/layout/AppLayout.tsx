@@ -74,8 +74,6 @@ const adminNavGroups = [
     label: "Infrastructure",
     items: [
       { title: "Overview", url: "/admin", icon: Shield },
-      { title: "Servers", url: "/admin/servers", icon: Server },
-      { title: "Bridges", url: "/admin/bridges", icon: Network },
       { title: "Signal Servers", url: "/admin/signal-servers", icon: Radio },
       { title: "Punchd", url: "/admin/gateways", icon: Router },
       { title: "Sessions", url: "/admin/sessions", icon: Activity },

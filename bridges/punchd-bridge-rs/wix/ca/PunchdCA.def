@@ -1,0 +1,4 @@
+EXPORTS
+    BrowseAndValidateConfig
+    CopyConfig
+    RemoveConfig

@@ -268,11 +268,77 @@ async fn connect_and_run(
                             }
                             "paired" => {
                                 if let Some(client) = parsed.get("client") {
-                                    let client_id = client["id"].as_str().unwrap_or("unknown");
+                                    let client_id = client["id"].as_str().unwrap_or("unknown").to_string();
+                                    let client_token = client["token"].as_str().unwrap_or("").to_string();
                                     tracing::info!("[STUN-Reg] Paired with client: {}", client_id);
+
+                                    // Create QUIC endpoint for this client
+                                    let signaling = signaling_tx.clone();
+                                    let gateway_id = options.gateway_id.clone();
+                                    let opts_clone = options.clone();
+                                    tokio::spawn(async move {
+                                        match crate::quic::transport::create_server_endpoint(
+                                            "0.0.0.0:0".parse().unwrap()
+                                        ) {
+                                            Ok((endpoint, cert_hash)) => {
+                                                let local_addr = endpoint.local_addr().unwrap();
+                                                tracing::info!("[QUIC] Endpoint created on {local_addr} for client {client_id} (cert: {cert_hash})");
+
+                                                // Send our QUIC address + cert hash to the client via signaling channel
+                                                let _ = signaling.send(serde_json::json!({
+                                                    "type": "quic_address",
+                                                    "targetId": client_id,
+                                                    "fromId": gateway_id,
+                                                    "address": local_addr.to_string(),
+                                                    "certHash": cert_hash,
+                                                }));
+
+                                                // Accept the QUIC connection
+                                                match tokio::time::timeout(
+                                                    std::time::Duration::from_secs(30),
+                                                    endpoint.accept()
+                                                ).await {
+                                                    Ok(Some(incoming)) => {
+                                                        match incoming.await {
+                                                            Ok(conn) => {
+                                                                tracing::info!("[QUIC] Client {client_id} connected");
+                                                                let handler = crate::quic::peer_handler::QuicPeerHandler::new(
+                                                                    crate::quic::peer_handler::QuicPeerHandlerOptions {
+                                                                        listen_port: opts_clone.listen_port,
+                                                                        use_tls: opts_clone.use_tls,
+                                                                        gateway_id: opts_clone.gateway_id.clone(),
+                                                                        send_signaling: signaling.clone(),
+                                                                        backends: opts_clone.backends.clone(),
+                                                                        auth: opts_clone.auth.clone(),
+                                                                        vpn_state: opts_clone.vpn_state.clone(),
+                                                                    },
+                                                                );
+                                                                tokio::spawn(async move {
+                                                                    handler.handle_connection(conn, client_id).await;
+                                                                });
+                                                            }
+                                                            Err(e) => {
+                                                                tracing::error!("[QUIC] Connection from {client_id} failed: {e}");
+                                                            }
+                                                        }
+                                                    }
+                                                    Ok(None) => {
+                                                        tracing::warn!("[QUIC] Endpoint closed before {client_id} connected");
+                                                    }
+                                                    Err(_) => {
+                                                        tracing::warn!("[QUIC] Timeout waiting for {client_id} QUIC connection");
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                tracing::error!("[QUIC] Failed to create endpoint: {e}");
+                                            }
+                                        }
+                                    });
                                 }
                             }
                             "candidate" => {
+                                // WebRTC ICE candidate (legacy/fallback)
                                 if let (Some(from_id), Some(candidate)) =
                                     (parsed["fromId"].as_str(), parsed.get("candidate"))
                                 {
@@ -285,6 +351,16 @@ async fn connect_and_run(
                                             ph.handle_candidate(from_id, cand_str, mid).await;
                                         }
                                     }
+                                }
+                            }
+                            "quic_address" => {
+                                // Client sent their QUIC address — used for hole-punching
+                                if let (Some(from_id), Some(addr)) =
+                                    (parsed["fromId"].as_str(), parsed["address"].as_str())
+                                {
+                                    tracing::info!("[QUIC] Client {from_id} QUIC address: {addr}");
+                                    // The QUIC endpoint is already listening —
+                                    // client will connect to our address, we accept
                                 }
                             }
                             "sdp_offer" => {

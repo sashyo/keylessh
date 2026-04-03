@@ -13,7 +13,7 @@ on:
 
 env:
   KEYLESSH_IMAGE: tideorg/keylessh
-  BRIDGE_IMAGE: tideorg/keylessh-bridge
+  GATEWAY_IMAGE: tideorg/punchd-gateway
 
 jobs:
   build-keylessh:
@@ -60,8 +60,8 @@ jobs:
           echo "KeyleSSH image pushed!"
           echo "Tags: ${{ steps.meta.outputs.tags }}"
 
-  build-bridge:
-    name: Build TCP Bridge
+  build-gateway:
+    name: Build Punchd Gateway
     runs-on: ubuntu-latest
 
     steps:
@@ -81,17 +81,17 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.BRIDGE_IMAGE }}
+          images: ${{ env.GATEWAY_IMAGE }}
           tags: |
             type=raw,value=${{ inputs.tag || 'latest' }}
             type=ref,event=tag
             type=sha,prefix=
 
-      - name: Build and push TCP Bridge image
+      - name: Build and push Punchd Gateway image
         uses: docker/build-push-action@v5
         with:
-          context: ./tcp-bridge
-          file: ./tcp-bridge/Dockerfile
+          context: ./bridges/punchd-bridge-rs
+          file: ./bridges/punchd-bridge-rs/Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -101,5 +101,6 @@ jobs:
 
       - name: Output image info
         run: |
-          echo "TCP Bridge image pushed!"
+          echo "Punchd Gateway image pushed!"
           echo "Tags: ${{ steps.meta.outputs.tags }}"
+

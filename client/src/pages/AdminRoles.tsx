@@ -113,6 +113,12 @@ export default function AdminRoles() {
     priority: string;
   }>>([]);
 
+  // Custom role builder state
+  const [customPrefix, setCustomPrefix] = useState<"none" | "ssh" | "dest" | "vpn">("none");
+  const [customGateway, setCustomGateway] = useState("");
+  const [customBackend, setCustomBackend] = useState("");
+  const [customUsername, setCustomUsername] = useState("");
+
   const normalizeSshRoleName = (value: string) => {
     const trimmed = value.trim();
     if (!trimmed) return "";
@@ -409,7 +415,17 @@ export default function AdminRoles() {
     e.preventDefault();
     let name: string;
     if (roleType === "ssh") {
-      name = normalizeSshRoleName(formData.name);
+      if (!selectedGatewayId || !selectedBackendName) {
+        toast({ title: "Please select a gateway and SSH backend", variant: "destructive" });
+        return;
+      }
+      if (formData.name.trim()) {
+        // ssh:<gateway>:<backend>:<username>
+        name = `ssh:${selectedGatewayId}:${selectedBackendName}:${formData.name.trim()}`;
+      } else {
+        // ssh:<gateway>:<backend>
+        name = `ssh:${selectedGatewayId}:${selectedBackendName}`;
+      }
     } else if (roleType === "endpoint") {
       if (!selectedGatewayId || !selectedBackendName) {
         toast({ title: "Please select a gateway and backend", variant: "destructive" });
@@ -456,7 +472,19 @@ export default function AdminRoles() {
         }
       }
     } else {
-      name = formData.name.trim();
+      // Custom / Manual role
+      if (customPrefix !== "none") {
+        const parts = [customPrefix, customGateway.trim()];
+        if (customPrefix !== "vpn" && customBackend.trim()) {
+          parts.push(customBackend.trim());
+        }
+        if (customPrefix !== "vpn" && customUsername.trim()) {
+          parts.push(customUsername.trim());
+        }
+        name = parts.join(":");
+      } else {
+        name = formData.name.trim();
+      }
     }
     if (!name) {
       toast({ title: "Role name is required", variant: "destructive" });
@@ -1011,30 +1039,74 @@ export default function AdminRoles() {
                 <button
                   type="button"
                   className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${roleType === "custom" ? "bg-background shadow-sm" : "text-muted-foreground hover:text-foreground"}`}
-                  onClick={() => { setRoleType("custom"); setFormData({ ...formData, name: "" }); }}
+                  onClick={() => { setRoleType("custom"); setFormData({ ...formData, name: "" }); setCustomPrefix("none"); setCustomGateway(""); setCustomBackend(""); setCustomUsername(""); }}
                 >
-                  Custom
+                  Manual
                 </button>
               </div>
             </div>
 
-            {/* SSH Role Name Input */}
+            {/* SSH Role — Gateway, Backend, Username */}
             {roleType === "ssh" && (
-              <div className="space-y-2">
-                <Label htmlFor="roleName">SSH Username</Label>
-                <Input
-                  id="roleName"
-                  value={formData.name}
-                  onChange={(e) => {
-                    const raw = e.target.value;
-                    setFormData({ ...formData, name: normalizeSshRoleName(raw) });
-                  }}
-                  placeholder="e.g., root"
-                  required
-                />
-                <p className="text-xs text-muted-foreground">
-                  Creates role <span className="font-mono">ssh:{formData.name.replace(/^ssh[:\-]/i, "") || "username"}</span> — grants SSH access as this user.
-                </p>
+              <div className="space-y-3">
+                <div className="space-y-2">
+                  <Label>Gateway</Label>
+                  <Select
+                    value={selectedGatewayId}
+                    onValueChange={(v) => {
+                      setSelectedGatewayId(v);
+                      setSelectedBackendName("");
+                    }}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select gateway" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {(gatewayEndpoints || []).filter(g => g.backends?.some(b => b.protocol === "ssh")).map((gw) => (
+                        <SelectItem key={gw.id} value={gw.id}>
+                          {gw.displayName || gw.id}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                {selectedGatewayId && (
+                  <div className="space-y-2">
+                    <Label>SSH Backend</Label>
+                    <Select
+                      value={selectedBackendName}
+                      onValueChange={setSelectedBackendName}
+                    >
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select SSH server" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {(gatewayEndpoints || [])
+                          .find(g => g.id === selectedGatewayId)
+                          ?.backends?.filter(b => b.protocol === "ssh")
+                          .map((b) => (
+                            <SelectItem key={b.name} value={b.name}>
+                              {b.name}
+                            </SelectItem>
+                          ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
+                {selectedBackendName && (
+                  <div className="space-y-2">
+                    <Label htmlFor="sshUsername">SSH Username (optional)</Label>
+                    <Input
+                      id="sshUsername"
+                      value={formData.name}
+                      onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                      placeholder="e.g., root (leave blank for any user)"
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Creates role <span className="font-mono">ssh:{selectedGatewayId}:{selectedBackendName}{formData.name ? `:${formData.name}` : ""}</span>
+                    </p>
+                  </div>
+                )}
               </div>
             )}
 
@@ -1117,7 +1189,7 @@ export default function AdminRoles() {
                 )}
                 {(!gatewayEndpoints || gatewayEndpoints.length === 0) && (
                   <p className="text-xs text-amber-600 dark:text-amber-400">
-                    No gateways are currently online. You can still create the role manually using "Custom" type.
+                    No gateways are currently online. You can still create the role manually using the "Manual" tab.
                   </p>
                 )}
               </div>
@@ -1286,17 +1358,74 @@ export default function AdminRoles() {
               </div>
             )}
 
-            {/* Custom Role Name Input */}
+            {/* Manual Role Builder */}
             {roleType === "custom" && (
-              <div className="space-y-2">
-                <Label htmlFor="roleName">Role Name</Label>
-                <Input
-                  id="roleName"
-                  value={formData.name}
-                  onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                  placeholder="e.g., developer"
-                  required
-                />
+              <div className="space-y-3">
+                <div className="space-y-2">
+                  <Label>Role Prefix</Label>
+                  <div className="flex gap-2 flex-wrap">
+                    {(["none", "ssh", "dest", "vpn"] as const).map((p) => (
+                      <button
+                        key={p}
+                        type="button"
+                        className={`px-3 py-1.5 rounded-md text-sm font-medium border transition-colors ${customPrefix === p ? "bg-primary text-primary-foreground border-primary" : "bg-background border-border text-muted-foreground hover:text-foreground"}`}
+                        onClick={() => { setCustomPrefix(p); setCustomGateway(""); setCustomBackend(""); setCustomUsername(""); }}
+                      >
+                        {p === "none" ? "None" : `${p}:`}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {customPrefix !== "none" && (
+                  <div className="space-y-2">
+                    <Label>Gateway ID</Label>
+                    <Input
+                      value={customGateway}
+                      onChange={(e) => setCustomGateway(e.target.value)}
+                      placeholder="e.g., SashasGateway"
+                    />
+                  </div>
+                )}
+
+                {customPrefix !== "none" && customPrefix !== "vpn" && (
+                  <div className="space-y-2">
+                    <Label>Backend / Endpoint</Label>
+                    <Input
+                      value={customBackend}
+                      onChange={(e) => setCustomBackend(e.target.value)}
+                      placeholder="e.g., MyServer"
+                    />
+                  </div>
+                )}
+
+                {customPrefix !== "none" && customPrefix !== "vpn" && (
+                  <div className="space-y-2">
+                    <Label>Username (optional)</Label>
+                    <Input
+                      value={customUsername}
+                      onChange={(e) => setCustomUsername(e.target.value)}
+                      placeholder="e.g., Administrator"
+                    />
+                  </div>
+                )}
+
+                {customPrefix === "none" ? (
+                  <div className="space-y-2">
+                    <Label htmlFor="roleName">Role Name</Label>
+                    <Input
+                      id="roleName"
+                      value={formData.name}
+                      onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                      placeholder="e.g., developer"
+                      required
+                    />
+                  </div>
+                ) : (
+                  <p className="text-xs text-muted-foreground font-mono">
+                    Preview: {customPrefix}:{customGateway || "<gateway>"}{customPrefix !== "vpn" ? `:${customBackend || "<backend>"}` : ""}{customUsername ? `:${customUsername}` : ""}
+                  </p>
+                )}
               </div>
             )}
 

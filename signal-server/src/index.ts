@@ -560,6 +560,10 @@ signalWss.on("connection", (ws: WebSocket, req) => {
       case "sdp_answer":
         handleSdp(ws, msg);
         break;
+      case "quic_address":
+        // QUIC transport: forward endpoint address between peers (same as candidate forwarding)
+        handleCandidate(ws, msg);
+        break;
       case "http_response":
         handleHttpResponse(msg as unknown as {
           id: string;
