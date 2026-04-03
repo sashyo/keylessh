@@ -21,7 +21,7 @@ import { appFetch } from "@/lib/appFetch";
 import { api, type GatewayEndpoint } from "@/lib/api";
 
 type ServiceItem =
-  | { kind: "ssh"; server: ServerWithAccess }
+  | { kind: "ssh"; endpoint: GatewayEndpoint; backend: { name: string; protocol?: string; auth?: string; accessible?: boolean } }
   | { kind: "web"; endpoint: GatewayEndpoint; backend: { name: string; protocol?: string; auth?: string; rdpUsernames?: string[]; accessible?: boolean } }
   | { kind: "rdp"; endpoint: GatewayEndpoint; backend: { name: string; protocol?: string; auth?: string; rdpUsernames?: string[]; accessible?: boolean } }
   | { kind: "custom"; endpoint: GatewayEndpoint };
@@ -504,70 +504,55 @@ function CustomConnectionCard({ endpoint }: { endpoint: GatewayEndpoint }) {
 }
 
 function ServiceListItem({ item, sshBlocked }: { item: ServiceItem; sshBlocked?: boolean }) {
-  const [selectedUser, setSelectedUser] = useState<string>(
-    item.kind === "ssh" ? item.server.allowedSshUsers[0] || "" : ""
-  );
+  const [selectedUser, setSelectedUser] = useState<string>("");
 
   if (item.kind === "ssh") {
-    const { server } = item;
-    const hasAnySshUser = server.allowedSshUsers.length > 0;
-    const isDisabled = !server.enabled || server.status === "offline" || !selectedUser || sshBlocked;
+    const { endpoint, backend } = item;
+    const accessible = backend.accessible !== false;
+    const isDisabled = !accessible || !endpoint.online;
+
+    const handleSshConnect = () => {
+      // Route through gateway's direct URL or signal server
+      const baseUrl = endpoint.directUrl || endpoint.signalServerUrl.replace(/\/$/, "");
+      const token = localStorage.getItem("access_token") || "";
+      const params = new URLSearchParams({
+        gateway: endpoint.id,
+        backend: backend.name,
+        token,
+      });
+      // Open SSH terminal pointing to the gateway's /ws/ssh endpoint
+      window.open(`/app/console?gatewayUrl=${encodeURIComponent(baseUrl)}&backend=${encodeURIComponent(backend.name)}&gateway=${encodeURIComponent(endpoint.id)}`, "_blank");
+    };
 
     return (
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 py-3 px-4 hover-elevate rounded-md group">
         <div className="flex items-center gap-3 min-w-0">
           <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-[hsl(var(--neon-cyan)/0.15)] border border-[hsl(var(--neon-cyan)/0.3)]">
-            <Server className="h-5 w-5 text-[hsl(var(--neon-cyan))]" />
+            <Terminal className="h-5 w-5 text-[hsl(var(--neon-cyan))]" />
           </div>
           <div className="min-w-0">
-            <p className="text-sm font-medium truncate">{server.name}</p>
-            <p className="text-xs text-muted-foreground font-mono truncate">
-              {server.host}:{server.port}
+            <p className="text-sm font-medium truncate">{backend.name}</p>
+            <p className="text-xs text-muted-foreground truncate">
+              {endpoint.displayName} &middot; SSH
             </p>
           </div>
         </div>
         <div className="flex items-center gap-3 pl-13 sm:pl-0">
-          {server.status === "online" ? (
+          {endpoint.online ? (
             <Badge variant="outline" className="gap-1.5 label-success shrink-0">
               <span className="h-2 w-2 rounded-full bg-[hsl(var(--neon-green))] animate-pulse" />
               Online
             </Badge>
-          ) : server.status === "offline" ? (
+          ) : (
             <Badge variant="outline" className="gap-1.5 label-danger shrink-0">
               <span className="h-2 w-2 rounded-full bg-[hsl(var(--neon-red))]" />
               Offline
             </Badge>
-          ) : (
-            <Badge variant="outline" className="gap-1.5 shrink-0">
-              <HelpCircle className="h-3 w-3" />
-              Unknown
-            </Badge>
           )}
-          {hasAnySshUser && (
-            <Select value={selectedUser} onValueChange={setSelectedUser}>
-              <SelectTrigger className="w-[120px] h-9">
-                <SelectValue placeholder="User" />
-              </SelectTrigger>
-              <SelectContent>
-                {server.allowedSshUsers.map((user) => (
-                  <SelectItem key={user} value={user}>{user}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          )}
-          {isDisabled ? (
-            <Button size="sm" disabled className="gap-1.5 min-h-[36px]">
-              <Terminal className="h-4 w-4" />
-              {sshBlocked ? "Disabled" : "Connect"}
-            </Button>
-          ) : (
-            <Link href={`/app/console?serverId=${encodeURIComponent(server.id)}&user=${encodeURIComponent(selectedUser)}`}>
-              <Button size="sm" className="gap-1.5 btn-primary-glow min-h-[36px]">
-                <Terminal className="h-4 w-4" />
-                Connect
-              </Button>
-            </Link>
-          )}
+          <Button size="sm" disabled={isDisabled} onClick={handleSshConnect} className={isDisabled ? "gap-1.5 min-h-[36px]" : "gap-1.5 btn-primary-glow min-h-[36px]"}>
+            <Terminal className="h-4 w-4" />
+            Connect
+          </Button>
         </div>
       </div>
     );
@@ -774,16 +759,17 @@ export default function Dashboard() {
 
   const allServices: ServiceItem[] = useMemo(() => {
     const items: ServiceItem[] = [];
-    for (const server of servers ?? []) {
-      items.push({ kind: "ssh", server });
-    }
     for (const endpoint of gatewayEndpoints ?? []) {
       const backends = endpoint.backends?.length > 0 ? endpoint.backends : [{ name: "Default", accessible: true }];
       for (const backend of backends) {
-        const kind = backend.protocol === "rdp" ? "rdp" : "web";
-        items.push(kind === "rdp"
-          ? { kind: "rdp", endpoint, backend }
-          : { kind: "web", endpoint, backend });
+        if (backend.protocol === "ssh") {
+          items.push({ kind: "ssh", endpoint, backend });
+        } else {
+          const kind = backend.protocol === "rdp" ? "rdp" : "web";
+          items.push(kind === "rdp"
+            ? { kind: "rdp", endpoint, backend }
+            : { kind: "web", endpoint, backend });
+        }
       }
       // Add a "Custom Connection" card for each online gateway
       if (endpoint.online) {
@@ -794,13 +780,13 @@ export default function Dashboard() {
     items.sort((a, b) => {
       const rank = (item: ServiceItem) => {
         if (item.kind === "custom") return 2; // custom cards at end
-        if (item.kind === "ssh") return (item.server.allowedSshUsers.length > 0 && item.server.status === "online") ? 0 : 1;
+        if (item.kind === "ssh") return (item.backend.accessible !== false && item.endpoint.online) ? 0 : 1;
         return item.backend.accessible !== false ? 0 : 1;
       };
       return rank(a) - rank(b);
     });
     return items;
-  }, [servers, gatewayEndpoints]);
+  }, [gatewayEndpoints]);
 
   const sshCount = useMemo(() => allServices.filter((i) => i.kind === "ssh").length, [allServices]);
   const webCount = useMemo(() => allServices.filter((i) => i.kind === "web").length, [allServices]);
@@ -815,11 +801,8 @@ export default function Dashboard() {
       const q = search.toLowerCase();
       list = list.filter((item) => {
         if (item.kind === "ssh") {
-          const s = item.server;
-          return s.name.toLowerCase().includes(q)
-            || s.host.toLowerCase().includes(q)
-            || s.environment.toLowerCase().includes(q)
-            || s.tags?.some((t) => t.toLowerCase().includes(q));
+          return item.backend.name.toLowerCase().includes(q)
+            || item.endpoint.displayName.toLowerCase().includes(q);
         }
         if (item.kind === "custom") {
           return "custom".includes(q)
@@ -992,7 +975,7 @@ export default function Dashboard() {
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
               {filteredServices.map((item) =>
                 item.kind === "ssh" ? (
-                  <ServerCard key={item.server.id} server={item.server} sshBlocked={isSshBlocked} />
+                  <GatewayEndpointCard key={`ssh-${item.endpoint.id}-${item.backend.name}`} endpoint={item.endpoint} backend={item.backend} />
                 ) : item.kind === "rdp" ? (
                   <RdpEndpointCard key={`${item.endpoint.signalServerId}-${item.endpoint.id}-${item.backend.name}`} endpoint={item.endpoint} backend={item.backend} />
                 ) : item.kind === "custom" ? (
@@ -1006,7 +989,7 @@ export default function Dashboard() {
             <Card>
               <CardContent className="p-0 divide-y divide-border">
                 {filteredServices.map((item) => (
-                  <ServiceListItem key={item.kind === "ssh" ? item.server.id : item.kind === "custom" ? `custom-${item.endpoint.id}` : `${item.endpoint.signalServerId}-${item.endpoint.id}-${item.backend.name}`} item={item} sshBlocked={isSshBlocked} />
+                  <ServiceListItem key={item.kind === "ssh" ? `ssh-${item.endpoint.id}-${item.backend.name}` : item.kind === "custom" ? `custom-${item.endpoint.id}` : `${item.endpoint.signalServerId}-${item.endpoint.id}-${item.backend.name}`} item={item} sshBlocked={isSshBlocked} />
                 ))}
               </CardContent>
             </Card>

@@ -536,6 +536,18 @@ try {
   // Ignore migration errors
 }
 
+// Migration: Add direct_url to gateway_configs for LAN/offline access
+try {
+  const gwColumns = sqlite
+    .prepare(`PRAGMA table_info(gateway_configs)`)
+    .all() as Array<{ name: string }>;
+  if (!gwColumns.some((c) => c.name === "direct_url")) {
+    sqlite.prepare(`ALTER TABLE gateway_configs ADD COLUMN direct_url TEXT`).run();
+  }
+} catch {
+  // Ignore migration errors
+}
+
 // Migration: Add video_data column for WebM video recordings
 try {
   const recColumns = sqlite
@@ -2253,8 +2265,9 @@ export class RecordingStorage {
   }
 
   // Video recordings storage path — files stored on disk, not in DB
-  // Set RECORDING_STORAGE_PATH env var to mount external storage (e.g. Azure Files)
+  // Set RECORDING_STORAGE_PATH or RECORDINGS_STORAGE_PATH env var for external mount
   private videoDir: string = process.env.RECORDING_STORAGE_PATH
+    || process.env.RECORDINGS_STORAGE_PATH
     || (typeof __dirname !== "undefined"
       ? __dirname + "/../data/recordings"
       : "./data/recordings");
@@ -2863,6 +2876,7 @@ export interface GatewayConfig {
   https: boolean;
   tlsHostname: string;
   extraConfig: string | null;
+  directUrl: string | null;
   enabled: boolean;
   createdAt: number;
   updatedAt: number;
@@ -2887,6 +2901,7 @@ export interface InsertGatewayConfig {
   https?: boolean;
   tlsHostname?: string;
   extraConfig?: string;
+  directUrl?: string;
 }
 
 export class GatewayConfigStorage {
@@ -2895,8 +2910,8 @@ export class GatewayConfigStorage {
     const now = Math.floor(Date.now() / 1000);
 
     sqlite.prepare(`
-      INSERT INTO gateway_configs (id, gateway_id, display_name, stun_server_url, api_secret, ice_servers, turn_server, turn_secret, backends, tidecloak_config_b64, auth_server_public_url, server_url, vpn_enabled, vpn_subnet, listen_port, health_port, https, tls_hostname, extra_config, enabled, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+      INSERT INTO gateway_configs (id, gateway_id, display_name, stun_server_url, api_secret, ice_servers, turn_server, turn_secret, backends, tidecloak_config_b64, auth_server_public_url, server_url, vpn_enabled, vpn_subnet, listen_port, health_port, https, tls_hostname, extra_config, direct_url, enabled, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
     `).run(
       id, data.gatewayId, data.displayName || null,
       data.stunServerUrl || null, data.apiSecret || null,
@@ -2906,7 +2921,7 @@ export class GatewayConfigStorage {
       data.vpnEnabled ? 1 : 0, data.vpnSubnet || "10.66.0.0/24",
       data.listenPort || 7891, data.healthPort || 7892,
       data.https !== false ? 1 : 0, data.tlsHostname || "localhost",
-      data.extraConfig || null, now, now,
+      data.extraConfig || null, data.directUrl || null, now, now,
     );
 
     return this.getById(id) as Promise<GatewayConfig>;
@@ -2939,6 +2954,7 @@ export class GatewayConfigStorage {
       authServerPublicUrl: "auth_server_public_url", serverUrl: "server_url",
       vpnSubnet: "vpn_subnet", listenPort: "listen_port", healthPort: "health_port",
       tlsHostname: "tls_hostname", extraConfig: "extra_config",
+      directUrl: "direct_url",
     };
 
     for (const [key, col] of Object.entries(mapping)) {
@@ -3046,6 +3062,7 @@ export class GatewayConfigStorage {
       https: !!row.https,
       tlsHostname: row.tls_hostname || "localhost",
       extraConfig: row.extra_config,
+      directUrl: row.direct_url || null,
       enabled: !!row.enabled,
       createdAt: row.created_at,
       updatedAt: row.updated_at,

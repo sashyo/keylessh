@@ -575,6 +575,7 @@ export interface GatewayEndpoint {
   signalServerId: string;
   signalServerName: string;
   signalServerUrl: string;
+  directUrl?: string;
 }
 
 // Re-export types for convenience

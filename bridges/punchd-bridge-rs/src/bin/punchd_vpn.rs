@@ -351,6 +351,12 @@ fn run_cli_setup() -> VpnFileConfig {
 #[path = "../vpn/tun_device.rs"]
 mod tun_device;
 
+#[path = "../quic/transport.rs"]
+mod quic_transport;
+
+#[path = "../quic/turn_client.rs"]
+mod turn_client;
+
 // ── Windows Service support ───────────────────────────────────────────
 
 const SERVICE_NAME: &str = "punchd-vpn";
@@ -1280,6 +1286,11 @@ fn open_browser(url: &str) {
 // ── VPN connection ──────────────────────────────────────────────────
 
 async fn run_vpn(cfg: ResolvedConfig) -> Result<(), String> {
+    // Use QUIC transport by default
+    return run_vpn_quic(cfg).await;
+
+    // Legacy WebRTC path (kept for fallback — unreachable by default)
+    #[allow(unreachable_code)]
     // Load TideCloak config and login
     let tc = load_tc_config(&cfg.tc_path, &cfg.tc_b64)?;
     tracing::info!("TideCloak: realm={}, auth={}", tc.realm, tc.auth_server_url);
@@ -1727,6 +1738,358 @@ async fn run_vpn(cfg: ResolvedConfig) -> Result<(), String> {
     let _ = pc.close().await;
     tracing::info!("VPN disconnected");
     Ok(())
+}
+
+/// QUIC-based VPN connection — no WebRTC, no SDP, no ICE.
+/// Connects to signaling, receives gateway's QUIC address, connects directly.
+async fn run_vpn_quic(cfg: ResolvedConfig) -> Result<(), String> {
+    let tc = load_tc_config(&cfg.tc_path, &cfg.tc_b64)?;
+    tracing::info!("[QUIC-VPN] TideCloak: realm={}, auth={}", tc.realm, tc.auth_server_url);
+
+    let token = oidc_login(&tc).await?;
+
+    // Connect to signaling server
+    tracing::info!("[QUIC-VPN] Connecting to signaling server...");
+    let connector = {
+        let tls = native_tls::TlsConnector::builder()
+            .danger_accept_invalid_certs(true)
+            .build()
+            .map_err(|e| format!("TLS error: {e}"))?;
+        Some(tokio_tungstenite::Connector::NativeTls(tls))
+    };
+
+    let (ws_stream, _) = tokio_tungstenite::connect_async_tls_with_config(
+        &cfg.stun_server, None, false, connector,
+    ).await.map_err(|e| format!("Failed to connect to signaling: {e}"))?;
+
+    let (ws_sink, mut ws_stream) = ws_stream.split();
+    let ws_sink = Arc::new(Mutex::new(ws_sink));
+    let peer_id = format!("vpn-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+
+    // Register as client
+    {
+        let msg = json!({
+            "type": "register",
+            "role": "client",
+            "id": peer_id,
+            "targetGatewayId": cfg.gateway_id,
+            "token": token,
+        });
+        let mut sink = ws_sink.lock().await;
+        sink.send(Message::Text(msg.to_string())).await
+            .map_err(|e| format!("Failed to register: {e}"))?;
+    }
+    tracing::info!("[QUIC-VPN] Registered as: {peer_id}");
+
+    // Create QUIC client endpoint
+    let quic_endpoint = quic_transport::create_client_endpoint()?;
+    let local_addr = quic_endpoint.local_addr().unwrap();
+    tracing::info!("[QUIC-VPN] QUIC endpoint on {local_addr}");
+
+    // Resolve public address via STUN (if configured)
+    let public_addr = if let Some(ref ice) = cfg.ice_server {
+        let stun_addr = ice.trim_start_matches("stun:");
+        // Create a temp socket for STUN resolution
+        let stun_sock = match tokio::net::UdpSocket::bind("0.0.0.0:0").await {
+            Ok(s) => s,
+            Err(e) => return Err(format!("STUN socket bind error: {e}")),
+        };
+        match quic_transport::stun_resolve(&stun_sock, stun_addr).await {
+            Ok(addr) => {
+                tracing::info!("[QUIC-VPN] STUN resolved: {addr}");
+                addr
+            }
+            Err(e) => {
+                tracing::warn!("[QUIC-VPN] STUN failed: {e}, using local address");
+                local_addr
+            }
+        }
+    } else {
+        local_addr
+    };
+
+    // Wait for pairing and gateway's QUIC address
+    let gateway_addr: Arc<Mutex<Option<std::net::SocketAddr>>> = Arc::new(Mutex::new(None));
+    let gateway_addr_notify = Arc::new(Notify::new());
+
+    let gateway_addr_clone = gateway_addr.clone();
+    let gateway_addr_notify_clone = gateway_addr_notify.clone();
+    let ws_sink_sig = ws_sink.clone();
+    let peer_id_clone = peer_id.clone();
+    let gateway_id = cfg.gateway_id.clone();
+    let public_addr_str = public_addr.to_string();
+
+    // Process signaling messages
+    let sig_task = tokio::spawn(async move {
+        while let Some(Ok(msg)) = ws_stream.next().await {
+            if let Message::Text(text) = msg {
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
+                    let msg_type = parsed["type"].as_str().unwrap_or("");
+                    match msg_type {
+                        "registered" => tracing::info!("[QUIC-VPN] Registered with signaling"),
+                        "paired" => {
+                            tracing::info!("[QUIC-VPN] Paired with gateway");
+                            // Send our STUN-resolved QUIC address to the gateway
+                            let msg = json!({
+                                "type": "quic_address",
+                                "targetId": gateway_id,
+                                "fromId": peer_id_clone,
+                                "address": public_addr_str,
+                            });
+                            let mut sink = ws_sink_sig.lock().await;
+                            let _ = sink.send(Message::Text(msg.to_string())).await;
+                        }
+                        "quic_address" => {
+                            // Gateway sent its QUIC address
+                            if let Some(addr_str) = parsed["address"].as_str() {
+                                if let Ok(addr) = addr_str.parse::<std::net::SocketAddr>() {
+                                    tracing::info!("[QUIC-VPN] Gateway QUIC address: {addr}");
+                                    *gateway_addr_clone.lock().await = Some(addr);
+                                    gateway_addr_notify_clone.notify_one();
+                                }
+                            }
+                        }
+                        "error" => {
+                            let message = parsed["message"].as_str().unwrap_or("unknown");
+                            tracing::error!("[QUIC-VPN] Signaling error: {message}");
+                        }
+                        _ => tracing::debug!("[QUIC-VPN] Signaling: {msg_type}"),
+                    }
+                }
+            }
+        }
+    });
+
+    // Wait for gateway address
+    tokio::select! {
+        _ = gateway_addr_notify.notified() => {}
+        _ = tokio::time::sleep(Duration::from_secs(30)) => {
+            return Err("Timeout waiting for gateway QUIC address".into());
+        }
+    }
+
+    let gateway_addr = gateway_addr.lock().await
+        .ok_or_else(|| "No gateway address received".to_string())?;
+
+    // Try direct QUIC connection first, fall back to TURN relay
+    tracing::info!("[QUIC-VPN] Connecting QUIC to {gateway_addr}...");
+    let conn = match tokio::time::timeout(
+        Duration::from_secs(5),
+        quic_endpoint.connect(gateway_addr, "punchd-gateway")
+            .map_err(|e| format!("QUIC connect error: {e}"))
+            .expect("QUIC connect setup failed"),
+    ).await {
+        Ok(Ok(c)) => {
+            tracing::info!("[QUIC-VPN] Direct QUIC connection established");
+            c
+        }
+        Ok(Err(e)) => {
+            tracing::warn!("[QUIC-VPN] Direct QUIC failed: {e}");
+            try_turn_relay(&cfg, &quic_endpoint, gateway_addr, &peer_id).await?
+        }
+        Err(_) => {
+            tracing::warn!("[QUIC-VPN] Direct QUIC timed out (5s)");
+            try_turn_relay(&cfg, &quic_endpoint, gateway_addr, &peer_id).await?
+        }
+    };
+
+    tracing::info!("[QUIC-VPN] QUIC connected to gateway");
+
+    // Auth stream: send JWT
+    let (mut auth_send, mut auth_recv) = conn.open_bi().await
+        .map_err(|e| format!("Failed to open auth stream: {e}"))?;
+
+    // [type=0x01][token_len:u16][token_bytes]
+    auth_send.write_all(&[0x01u8 /* AUTH */]).await
+        .map_err(|e| format!("Auth write error: {e}"))?;
+    let token_bytes = token.as_bytes();
+    auth_send.write_all(&(token_bytes.len() as u16).to_be_bytes()).await
+        .map_err(|e| format!("Auth write error: {e}"))?;
+    auth_send.write_all(token_bytes).await
+        .map_err(|e| format!("Auth write error: {e}"))?;
+    auth_send.finish().map_err(|e| format!("Auth finish error: {e}"))?;
+
+    // Read auth response
+    let mut auth_resp = vec![0u8; 10];
+    let n = auth_recv.read(&mut auth_resp).await
+        .map_err(|e| format!("Auth read error: {e}"))?
+        .ok_or_else(|| "Auth stream closed".to_string())?;
+    let resp = String::from_utf8_lossy(&auth_resp[..n]);
+    if resp != "OK" {
+        return Err(format!("Auth rejected: {resp}"));
+    }
+    tracing::info!("[QUIC-VPN] Authenticated");
+
+    // VPN control stream: request tunnel
+    let (mut vpn_send, mut vpn_recv) = conn.open_bi().await
+        .map_err(|e| format!("Failed to open VPN stream: {e}"))?;
+
+    // Send stream type + vpn_open request
+    let vpn_open = json!({
+        "type": "vpn_open",
+        "id": uuid::Uuid::new_v4().to_string(),
+        "token": token,
+    });
+    let vpn_open_bytes = vpn_open.to_string();
+    vpn_send.write_all(&[0x04u8 /* VPN */]).await
+        .map_err(|e| format!("VPN write error: {e}"))?;
+    vpn_send.write_all(&(vpn_open_bytes.len() as u32).to_be_bytes()).await
+        .map_err(|e| format!("VPN write error: {e}"))?;
+    vpn_send.write_all(vpn_open_bytes.as_bytes()).await
+        .map_err(|e| format!("VPN write error: {e}"))?;
+
+    // Read vpn_opened response
+    let mut resp_len_buf = [0u8; 4];
+    vpn_recv.read_exact(&mut resp_len_buf).await
+        .map_err(|e| format!("VPN read error: {e}"))?;
+    let resp_len = u32::from_be_bytes(resp_len_buf) as usize;
+    let mut resp_buf = vec![0u8; resp_len];
+    vpn_recv.read_exact(&mut resp_buf).await
+        .map_err(|e| format!("VPN read error: {e}"))?;
+
+    let vpn_resp: serde_json::Value = serde_json::from_slice(&resp_buf)
+        .map_err(|e| format!("Invalid VPN response: {e}"))?;
+
+    if vpn_resp["type"].as_str() != Some("vpn_opened") {
+        let err_msg = vpn_resp["message"].as_str().unwrap_or("unknown error");
+        return Err(format!("VPN denied: {err_msg}"));
+    }
+
+    let client_ip: Ipv4Addr = vpn_resp["clientIp"].as_str().unwrap_or("10.66.0.2")
+        .parse().unwrap_or(Ipv4Addr::new(10, 66, 0, 2));
+    let server_ip: Ipv4Addr = vpn_resp["serverIp"].as_str().unwrap_or("10.66.0.1")
+        .parse().unwrap_or(Ipv4Addr::new(10, 66, 0, 1));
+    let netmask: Ipv4Addr = vpn_resp["netmask"].as_str().unwrap_or("255.255.255.0")
+        .parse().unwrap_or(Ipv4Addr::new(255, 255, 255, 0));
+    let mtu = vpn_resp["mtu"].as_u64().unwrap_or(1400) as u16;
+    let routes: Vec<String> = vpn_resp["routes"].as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default();
+
+    tracing::info!("[QUIC-VPN] Tunnel opened: client={client_ip}, server={server_ip}, mtu={mtu}");
+
+    // Create TUN device
+    let tun_cfg = tun_device::TunConfig {
+        name: cfg.tun_name.clone(),
+        address: client_ip,
+        netmask,
+        mtu,
+    };
+    let mut tun = tun_device::TunDevice::create(&tun_cfg)
+        .map_err(|e| format!("Failed to create TUN device: {e}"))?;
+
+    tracing::info!("[QUIC-VPN] TUN device created");
+
+    if cfg.default_route {
+        setup_routing(&cfg.tun_name, &server_ip.to_string());
+    }
+    for route in &routes {
+        install_route(route, &server_ip.to_string());
+    }
+
+    tracing::info!("[QUIC-VPN] VPN active! Local={client_ip} Gateway={server_ip}");
+
+    // Packet forwarding loop using QUIC datagrams
+    let mut read_buf = vec![0u8; 65536];
+
+    loop {
+        tokio::select! {
+            // TUN → QUIC datagram (client to gateway)
+            result = tun.read(&mut read_buf) => {
+                match result {
+                    Ok(n) if n >= 20 => {
+                        if (read_buf[0] >> 4) != 4 { continue; } // Drop non-IPv4
+                        if let Err(e) = conn.send_datagram(Bytes::copy_from_slice(&read_buf[..n])) {
+                            tracing::error!("[QUIC-VPN] Datagram send error: {e}");
+                            break;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::error!("[QUIC-VPN] TUN read error: {e}");
+                        break;
+                    }
+                }
+            }
+            // QUIC datagram → TUN (gateway to client)
+            result = conn.read_datagram() => {
+                match result {
+                    Ok(data) => {
+                        if data.len() >= 20 && (data[0] >> 4) == 4 {
+                            if let Err(e) = tun.write(&data).await {
+                                tracing::error!("[QUIC-VPN] TUN write error: {e}");
+                                break;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("[QUIC-VPN] Datagram recv error: {e}");
+                        break;
+                    }
+                }
+            }
+            // Ctrl+C
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!("[QUIC-VPN] Shutting down...");
+                break;
+            }
+        }
+    }
+
+    // Cleanup
+    for route in &routes {
+        remove_route(route);
+    }
+    conn.close(0u32.into(), b"bye");
+    sig_task.abort();
+    tracing::info!("[QUIC-VPN] Disconnected");
+    Ok(())
+}
+
+/// Try TURN relay when direct QUIC connection fails.
+async fn try_turn_relay(
+    cfg: &ResolvedConfig,
+    quic_endpoint: &quinn::Endpoint,
+    gateway_addr: std::net::SocketAddr,
+    peer_id: &str,
+) -> Result<quinn::Connection, String> {
+    let turn_server = cfg.turn_server.as_deref()
+        .ok_or_else(|| "No TURN server configured — direct connection failed and no relay available".to_string())?;
+    let turn_secret = cfg.turn_secret.as_deref()
+        .ok_or_else(|| "No TURN secret — cannot authenticate with relay".to_string())?;
+
+    tracing::info!("[QUIC-VPN] Falling back to TURN relay via {turn_server}...");
+
+    let (username, credential) = turn_client::generate_credentials(turn_secret, peer_id);
+
+    // Separate socket for TURN since quinn owns its socket
+    let turn_socket = Arc::new(
+        tokio::net::UdpSocket::bind("0.0.0.0:0").await
+            .map_err(|e| format!("TURN socket bind: {e}"))?
+    );
+
+    let allocation = turn_client::allocate(
+        turn_socket.clone(),
+        turn_server,
+        &username,
+        &credential,
+        gateway_addr,
+    ).await?;
+
+    let relay_addr = allocation.relay_addr();
+    tracing::info!("[QUIC-VPN] TURN relay allocated: {relay_addr}");
+    tracing::info!("[QUIC-VPN] Connecting QUIC through TURN relay...");
+
+    // Connect QUIC to the gateway through TURN
+    // The gateway sees the connection coming from the TURN relay address
+    let conn = quic_endpoint
+        .connect(gateway_addr, "punchd-gateway")
+        .map_err(|e| format!("QUIC connect via TURN: {e}"))?
+        .await
+        .map_err(|e| format!("QUIC via TURN failed: {e}"))?;
+
+    tracing::info!("[QUIC-VPN] Connected via TURN relay");
+    Ok(conn)
 }
 
 /// Agent-mode VPN connection — takes token directly, no OIDC login.

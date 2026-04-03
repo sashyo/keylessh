@@ -14,6 +14,7 @@ mod tls;
 mod tray;
 pub mod vpn;
 mod webrtc;
+pub mod quic;
 
 #[tokio::main]
 async fn main() {
