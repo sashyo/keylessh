@@ -169,7 +169,7 @@ function GatewayEndpointCard({ endpoint, backend }: { endpoint: GatewayEndpoint;
     if (isSsh) {
       // SSH: open console with gateway routing + selected username
       const baseUrl = endpoint.directUrl || endpoint.signalServerUrl.replace(/\/$/, "");
-      window.open(`/app/console?gatewayUrl=${encodeURIComponent(baseUrl)}&backend=${encodeURIComponent(backend.name)}&gateway=${encodeURIComponent(endpoint.id)}&user=${encodeURIComponent(selectedSshUser)}`, "_blank");
+      window.location.href = `/app/console?gatewayUrl=${encodeURIComponent(baseUrl)}&backend=${encodeURIComponent(backend.name)}&gateway=${encodeURIComponent(endpoint.id)}&user=${encodeURIComponent(selectedSshUser)}`;
     } else {
       // Web endpoint: open via signal server relay
       const url = endpoint.signalServerUrl.replace(/\/$/, "");
@@ -546,7 +546,7 @@ function ServiceListItem({ item, sshBlocked }: { item: ServiceItem; sshBlocked?:
         token,
       });
       // Open SSH terminal pointing to the gateway's /ws/ssh endpoint
-      window.open(`/app/console?gatewayUrl=${encodeURIComponent(baseUrl)}&backend=${encodeURIComponent(backend.name)}&gateway=${encodeURIComponent(endpoint.id)}`, "_blank");
+      window.location.href = `/app/console?gatewayUrl=${encodeURIComponent(baseUrl)}&backend=${encodeURIComponent(backend.name)}&gateway=${encodeURIComponent(endpoint.id)}`;
     };
 
     return (
