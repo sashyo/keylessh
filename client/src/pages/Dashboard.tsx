@@ -162,29 +162,40 @@ function ServerCardSkeleton() {
 function GatewayEndpointCard({ endpoint, backend }: { endpoint: GatewayEndpoint; backend: { name: string; protocol?: string; accessible?: boolean } }) {
   const accessible = backend.accessible !== false;
   const isDisabled = !accessible || !endpoint.online;
+  const isSsh = backend.protocol === "ssh";
   const handleConnect = () => {
-    const url = endpoint.signalServerUrl.replace(/\/$/, "");
-    const token = localStorage.getItem("access_token") || "";
-    const params = new URLSearchParams({
-      gateway: endpoint.id,
-      backend: backend.name,
-    });
-    if (token) params.set("token", token);
-    window.open(`${url}/api/select?${params.toString()}`, "_blank");
+    if (isSsh) {
+      // SSH: open console with gateway routing
+      const baseUrl = endpoint.directUrl || endpoint.signalServerUrl.replace(/\/$/, "");
+      window.open(`/app/console?gatewayUrl=${encodeURIComponent(baseUrl)}&backend=${encodeURIComponent(backend.name)}&gateway=${encodeURIComponent(endpoint.id)}`, "_blank");
+    } else {
+      // Web endpoint: open via signal server relay
+      const url = endpoint.signalServerUrl.replace(/\/$/, "");
+      const token = localStorage.getItem("access_token") || "";
+      const params = new URLSearchParams({
+        gateway: endpoint.id,
+        backend: backend.name,
+      });
+      if (token) params.set("token", token);
+      window.open(`${url}/api/select?${params.toString()}`, "_blank");
+    }
   };
+
+  const IconComponent = isSsh ? Terminal : Globe;
+  const colorVar = isSsh ? "--neon-cyan" : "--neon-purple";
 
   return (
     <Card className="group cyber-card hover-neon-glow">
       <CardHeader className="pb-3">
         <div className="flex items-start justify-between gap-4">
           <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-[hsl(var(--neon-purple)/0.15)] border border-[hsl(var(--neon-purple)/0.3)] group-hover:border-[hsl(var(--neon-purple)/0.5)] transition-colors">
-              <Globe className="h-5 w-5 text-[hsl(var(--neon-purple))]" />
+            <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-[hsl(var(${colorVar})/0.15)] border border-[hsl(var(${colorVar})/0.3)] group-hover:border-[hsl(var(${colorVar})/0.5)] transition-colors`}>
+              <IconComponent className={`h-5 w-5 text-[hsl(var(${colorVar}))]`} />
             </div>
             <div>
               <CardTitle className="text-base">{backend.name}</CardTitle>
               <CardDescription className="text-xs">
-                {endpoint.displayName}
+                {endpoint.displayName} {isSsh && <Badge variant="outline" className="ml-1 text-[10px] px-1 py-0">SSH</Badge>}
               </CardDescription>
             </div>
           </div>
@@ -217,17 +228,16 @@ function GatewayEndpointCard({ endpoint, backend }: { endpoint: GatewayEndpoint;
 
         {isDisabled ? (
           <Button className="w-full gap-2" disabled>
-            <ExternalLink className="h-4 w-4" />
-            Connect
-            <ArrowRight className="h-4 w-4" />
+            {isSsh ? <Terminal className="h-4 w-4" /> : <ExternalLink className="h-4 w-4" />}
+            {isSsh ? "SSH" : "Connect"}
           </Button>
         ) : (
           <Button
             className="w-full gap-2 btn-primary-glow"
             onClick={handleConnect}
           >
-            <ExternalLink className="h-4 w-4" />
-            Connect
+            {isSsh ? <Terminal className="h-4 w-4" /> : <ExternalLink className="h-4 w-4" />}
+            {isSsh ? "SSH" : "Connect"}
             <ArrowRight className="h-4 w-4" />
           </Button>
         )}
