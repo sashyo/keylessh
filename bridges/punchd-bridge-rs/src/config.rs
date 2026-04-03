@@ -51,6 +51,8 @@ struct GatewayToml {
     strip_auth_header: Option<bool>,
     #[serde(default)]
     server_url: Option<String>,
+    #[serde(default)]
+    quic_port: Option<u16>,
 }
 
 // ── Public types ────────────────────────────────────────────────
@@ -91,6 +93,7 @@ pub struct ServerConfig {
     pub tls_hostname: String,
     pub tc_internal_url: Option<String>,
     pub server_url: Option<String>,
+    pub quic_port: u16,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -380,6 +383,9 @@ pub fn load_config() -> ServerConfig {
         tls_hostname: get_val_or(&toml_cfg.tls_hostname, "TLS_HOSTNAME", "localhost"),
         tc_internal_url: get_val(&toml_cfg.tc_internal_url, "TC_INTERNAL_URL"),
         server_url: get_val(&toml_cfg.server_url, "SERVER_URL"),
+        quic_port: toml_cfg.quic_port
+            .or_else(|| env::var("QUIC_PORT").ok().and_then(|s| s.parse().ok()))
+            .unwrap_or(7893),
     }
 }
 
