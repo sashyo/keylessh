@@ -498,6 +498,8 @@ fn parse_backends_str(input: &str) -> Vec<BackendEntry> {
 
             let protocol = if raw_url.starts_with("rdp://") {
                 "rdp"
+            } else if raw_url.starts_with("ssh://") {
+                "ssh"
             } else {
                 "http"
             };
