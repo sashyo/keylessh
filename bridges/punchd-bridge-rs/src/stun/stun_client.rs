@@ -25,7 +25,7 @@ const MAX_BODY_SIZE: usize = 10 * 1024 * 1024; // 10MB
 const MAX_RESPONSE_SIZE: usize = 50 * 1024 * 1024; // 50MB
 const MAX_SINGLE_WS: usize = 512 * 1024; // 512KB
 const CHUNK_SIZE: usize = 256 * 1024; // 256KB
-const PING_INTERVAL: Duration = Duration::from_secs(30);
+const PING_INTERVAL: Duration = Duration::from_secs(15);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct StunRegistrationOptions {
