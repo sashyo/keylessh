@@ -332,6 +332,8 @@ export interface SSHClientOptions {
    * signature algorithm (the library will wrap it in SSH "signature data").
    */
   signer?: SSHSigner;
+  /** Gateway URL for routing SSH through punchd gateway's /ws/ssh endpoint */
+  gatewayUrl?: string;
 }
 
 /**
@@ -596,8 +598,8 @@ export class BrowserSSHClient {
     });
 
     // Route through gateway via signal server if gatewayUrl is set
-    if ((this.options as any).gatewayUrl) {
-      const gwUrl = (this.options as any).gatewayUrl.replace(/\/$/, "");
+    if (this.options.gatewayUrl) {
+      const gwUrl = this.options.gatewayUrl.replace(/^https?/, "wss").replace(/\/$/, "");
       return `${gwUrl}/ws/ssh?${params.toString()}`;
     }
 
