@@ -13,6 +13,8 @@ export interface DestPermission {
   backendName: string;
   /** Windows username for RDP/EdDSA passwordless logon (from dest:gw:ep:user roles) */
   username?: string;
+  /** Role prefix: "dest" or "ssh" */
+  prefix: string;
 }
 
 function getAllRoleNames(payload: TokenPayload): string[] {
@@ -24,15 +26,17 @@ function getAllRoleNames(payload: TokenPayload): string[] {
 }
 
 function parseDestRole(role: string): DestPermission | null {
-  if (!/^dest:/i.test(role)) return null;
-  // "dest:<gatewayId>:<backendName>" or "dest:<gatewayId>:<backendName>:<username>"
-  const parts = role.slice(5).split(":");
+  // Match dest: or ssh: prefix
+  const match = /^(dest|ssh):/i.exec(role);
+  if (!match) return null;
+  const prefix = match[1].toLowerCase();
+  const parts = role.slice(prefix.length + 1).split(":");
   if (parts.length < 2) return null;
   const gatewayId = parts[0].trim();
   const backendName = parts[1].trim();
   if (!gatewayId || !backendName) return null;
   const username = parts.length >= 3 ? parts.slice(2).join(":").trim() : undefined;
-  return { gatewayId, backendName, ...(username ? { username } : {}) };
+  return { gatewayId, backendName, prefix, ...(username ? { username } : {}) };
 }
 
 export function parseDestRolesFromToken(

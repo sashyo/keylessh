@@ -1696,24 +1696,29 @@ export async function registerRoutes(
 
         const annotated = results.map((gw) => {
           const backends = (gw.backends.length > 0 ? gw.backends : [{ name: "Default" }]).map((b) => {
+            const backendProtocol = ("protocol" in b ? b.protocol : "http") || "http";
+            // SSH backends match ssh: roles, everything else matches dest: roles
+            const expectedPrefix = backendProtocol === "ssh" ? "ssh" : "dest";
             const matchingPerms = destPerms.filter(
-              (p) => p.gatewayId.toLowerCase() === gw.id.toLowerCase() && p.backendName.toLowerCase() === b.name.toLowerCase()
+              (p) => p.prefix === expectedPrefix && p.gatewayId.toLowerCase() === gw.id.toLowerCase() && p.backendName.toLowerCase() === b.name.toLowerCase()
             );
             const isEddsa = "auth" in b && b.auth === "eddsa";
-            // For EdDSA backends, require a 4-segment role with username
-            const accessible = isEddsa
+            const isSsh = backendProtocol === "ssh";
+            // EdDSA and SSH backends require a username in the role
+            const accessible = (isEddsa || isSsh)
               ? matchingPerms.some((p) => p.username)
               : matchingPerms.length > 0;
-            // Collect all usernames from matching 4-segment roles
-            const rdpUsernames = matchingPerms
+            // Collect all usernames from matching roles
+            const usernames = matchingPerms
               .map((p) => p.username)
               .filter((u): u is string => !!u);
             return {
               name: b.name,
-              protocol: ("protocol" in b ? b.protocol : "http") || "http",
+              protocol: backendProtocol,
               ...("auth" in b && b.auth ? { auth: b.auth } : {}),
               accessible,
-              ...(rdpUsernames.length > 0 ? { rdpUsernames } : {}),
+              ...(usernames.length > 0 && isEddsa ? { rdpUsernames: usernames } : {}),
+              ...(usernames.length > 0 && isSsh ? { sshUsernames: usernames } : {}),
             };
           });
           return { ...gw, backends };

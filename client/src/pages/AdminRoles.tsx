@@ -409,7 +409,15 @@ export default function AdminRoles() {
     e.preventDefault();
     let name: string;
     if (roleType === "ssh") {
-      name = normalizeSshRoleName(formData.name);
+      if (!selectedGatewayId || !selectedBackendName) {
+        toast({ title: "Please select a gateway and SSH backend", variant: "destructive" });
+        return;
+      }
+      if (!formData.name.trim()) {
+        toast({ title: "SSH username is required", variant: "destructive" });
+        return;
+      }
+      name = `ssh:${selectedGatewayId}:${selectedBackendName}:${formData.name.trim()}`;
     } else if (roleType === "endpoint") {
       if (!selectedGatewayId || !selectedBackendName) {
         toast({ title: "Please select a gateway and backend", variant: "destructive" });
@@ -1018,23 +1026,71 @@ export default function AdminRoles() {
               </div>
             </div>
 
-            {/* SSH Role Name Input */}
+            {/* SSH Role — Gateway, Backend, Username */}
             {roleType === "ssh" && (
-              <div className="space-y-2">
-                <Label htmlFor="roleName">SSH Username</Label>
-                <Input
-                  id="roleName"
-                  value={formData.name}
-                  onChange={(e) => {
-                    const raw = e.target.value;
-                    setFormData({ ...formData, name: normalizeSshRoleName(raw) });
-                  }}
-                  placeholder="e.g., root"
-                  required
-                />
-                <p className="text-xs text-muted-foreground">
-                  Creates role <span className="font-mono">ssh:{formData.name.replace(/^ssh[:\-]/i, "") || "username"}</span> — grants SSH access as this user.
-                </p>
+              <div className="space-y-3">
+                <div className="space-y-2">
+                  <Label>Gateway</Label>
+                  <Select
+                    value={selectedGatewayId}
+                    onValueChange={(v) => {
+                      setSelectedGatewayId(v);
+                      setSelectedBackendName("");
+                    }}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select gateway" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {(gatewayEndpoints || []).filter(g => g.backends?.some(b => b.protocol === "ssh")).map((gw) => (
+                        <SelectItem key={gw.id} value={gw.id}>
+                          {gw.displayName || gw.id}
+                        </SelectItem>
+                      ))}
+                      {(gatewayEndpoints || []).filter(g => g.backends?.some(b => b.protocol === "ssh")).length === 0 && (
+                        <SelectItem value="_none" disabled>No gateways with SSH backends</SelectItem>
+                      )}
+                    </SelectContent>
+                  </Select>
+                </div>
+                {selectedGatewayId && (
+                  <div className="space-y-2">
+                    <Label>SSH Backend</Label>
+                    <Select
+                      value={selectedBackendName}
+                      onValueChange={setSelectedBackendName}
+                    >
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select SSH server" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {(gatewayEndpoints || [])
+                          .find(g => g.id === selectedGatewayId)
+                          ?.backends?.filter(b => b.protocol === "ssh")
+                          .map((b) => (
+                            <SelectItem key={b.name} value={b.name}>
+                              {b.name}
+                            </SelectItem>
+                          ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
+                {selectedBackendName && (
+                  <div className="space-y-2">
+                    <Label htmlFor="sshUsername">SSH Username</Label>
+                    <Input
+                      id="sshUsername"
+                      value={formData.name}
+                      onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                      placeholder="e.g., root"
+                      required
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Creates role <span className="font-mono">ssh:{selectedGatewayId}:{selectedBackendName}:{formData.name || "username"}</span>
+                    </p>
+                  </div>
+                )}
               </div>
             )}
 

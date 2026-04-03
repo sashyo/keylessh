@@ -33,17 +33,55 @@ function parseSshUsersFromRoles(payload: TokenPayload): string[] {
     if (typeof role !== "string") continue;
 
     // Supported patterns:
-    // - ssh:root
-    // - ssh-root
+    // - ssh:root                              (legacy: simple username)
+    // - ssh-root                              (legacy: simple username)
+    // - ssh:Gateway:Backend:username          (new: gateway-scoped with username)
     const match = role.match(/^ssh[:\-](.+)$/i);
     if (!match) continue;
 
-    const user = match[1].trim();
-    if (!user) continue;
-    extracted.push(user);
+    const rest = match[1].trim();
+    if (!rest) continue;
+
+    // Check if it's the new gateway format (has colons = gateway:backend:user)
+    const parts = rest.split(":");
+    if (parts.length >= 3) {
+      // ssh:Gateway:Backend:Username — extract username
+      extracted.push(parts.slice(2).join(":").trim());
+    } else if (parts.length === 1) {
+      // ssh:username (legacy)
+      extracted.push(rest);
+    }
+    // ssh:Gateway:Backend (no username) — skip, no user to extract
   }
 
   return extracted;
+}
+
+/**
+ * Get allowed SSH users for a specific gateway backend from token roles.
+ * Looks for ssh:<gatewayId>:<backendName>:<username> roles.
+ */
+export function getSshUsersForBackend(
+  payload: TokenPayload | undefined | null,
+  gatewayId: string,
+  backendName: string
+): string[] {
+  if (!payload) return [];
+  const roles = getAllRoleNames(payload);
+  const users: string[] = [];
+
+  for (const role of roles) {
+    if (typeof role !== "string") continue;
+    if (!/^ssh:/i.test(role)) continue;
+    const parts = role.slice(4).split(":");
+    if (parts.length >= 3
+      && parts[0].toLowerCase() === gatewayId.toLowerCase()
+      && parts[1].toLowerCase() === backendName.toLowerCase()) {
+      users.push(parts.slice(2).join(":").trim());
+    }
+  }
+
+  return users;
 }
 
 export function getAllowedSshUsersFromToken(payload: TokenPayload | undefined | null): string[] {
