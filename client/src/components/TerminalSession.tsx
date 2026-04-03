@@ -73,11 +73,15 @@ export function TerminalSession({
   sshUser,
   isActive = true,
   onCloseTab,
+  gatewayUrl,
+  gatewayId,
 }: {
   serverId: string;
   sshUser: string;
   isActive?: boolean;
   onCloseTab?: () => void;
+  gatewayUrl?: string;
+  gatewayId?: string;
 }) {
   const { toast } = useToast();
   const authConfig = useAuthConfig();
@@ -97,20 +101,23 @@ export function TerminalSession({
 
   const [showKeyDialog, setShowKeyDialog] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const isGatewayMode = !!gatewayUrl;
 
   const { data: server, isLoading: serverLoading } = useQuery<ServerWithAccess>({
     queryKey: ["/api/servers", serverId],
+    enabled: !isGatewayMode,
   });
 
-  const serverIsDisabled = server ? !server.enabled : false;
-  const serverIsOffline = server ? server.status === "offline" : false;
-
+  const serverIsDisabled = isGatewayMode ? false : (server ? !server.enabled : false);
+  const serverIsOffline = isGatewayMode ? false : (server ? server.status === "offline" : false);
   const { connect, disconnect, send, resize, setDimensions, status, error, openSftp, closeSftp, sftpClient, openScp, closeScp, scpClient, getSession, sendFileOpEvent } = useSSHSession({
-    host: server?.host || "",
-    port: server?.port || 22,
+    host: isGatewayMode ? serverId : (server?.host || ""),
+    port: isGatewayMode ? 22 : (server?.port || 22),
     serverId,
     username: sshUser,
     onData: writeToTerminal,
+    gatewayUrl,
+    gatewayId,
   });
 
   const [showFileBrowser, setShowFileBrowser] = useState(false);
@@ -134,7 +141,7 @@ export function TerminalSession({
 
   const handleConnect = useCallback(async () => {
     try {
-      if (serverLoading || !server) {
+      if (!isGatewayMode && (serverLoading || !server)) {
         toast({ title: "Loading server info", description: "Please try again in a moment." });
         return;
       }
@@ -514,8 +521,15 @@ export function TerminalSession({
     }
   }, [server?.name, sshUser, status, toast]);
 
-  // Important UX: never auto-open the Tide connect modal.
-  // Users should explicitly click Connect/Reconnect to open it.
+  // Important UX: never auto-open the Tide connect modal for standalone servers.
+  // But for gateway mode, auto-connect immediately (user already chose from Dashboard).
+  const hasAutoConnected = useRef(false);
+  useEffect(() => {
+    if (isGatewayMode && !hasAutoConnected.current && status === "disconnected" && !error) {
+      hasAutoConnected.current = true;
+      handleConnect();
+    }
+  }, [isGatewayMode, status, error, handleConnect]);
 
   const StatusIcon = statusConfig[status].icon;
 

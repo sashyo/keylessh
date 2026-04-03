@@ -10,7 +10,14 @@ import { Label } from "@/components/ui/label";
 import { Plus, Terminal, X } from "lucide-react";
 import { TerminalSession } from "@/components/TerminalSession";
 
-type ConsoleTab = { id: string; serverId: string; sshUser: string };
+type ConsoleTab = {
+  id: string;
+  serverId: string;
+  sshUser: string;
+  gatewayUrl?: string;
+  gatewayId?: string;
+  backend?: string;
+};
 
 function newId() {
   // Prefer crypto.randomUUID when available; fallback to timestamp+random.
@@ -95,10 +102,32 @@ export default function ConsoleWorkspace() {
     });
   };
 
-  // Support opening a new tab via URL query: /app/console?serverId=...&user=...
+  // Support opening a new tab via URL query
+  // Old: /app/console?serverId=...&user=...
+  // New: /app/console?gatewayUrl=...&gateway=...&backend=...&user=...
   useEffect(() => {
-    const serverId = searchParams.get("serverId");
+    const gatewayUrl = searchParams.get("gatewayUrl");
+    const gateway = searchParams.get("gateway");
+    const backend = searchParams.get("backend");
     const sshUser = searchParams.get("user");
+
+    if (gatewayUrl && gateway && backend && sshUser) {
+      // Gateway SSH mode
+      const tabId = newId();
+      setTabs((prev) => [...prev, {
+        id: tabId,
+        serverId: backend, // use backend name as serverId for display
+        sshUser,
+        gatewayUrl,
+        gatewayId: gateway,
+        backend,
+      }]);
+      setActiveTabId(tabId);
+      setLocation("/app/console");
+      return;
+    }
+
+    const serverId = searchParams.get("serverId");
     if (!serverId || !sshUser) return;
 
     addTab(serverId, sshUser);
@@ -209,6 +238,8 @@ export default function ConsoleWorkspace() {
                 sshUser={tab.sshUser}
                 isActive={activeTabId === tab.id}
                 onCloseTab={() => closeTab(tab.id)}
+                gatewayUrl={tab.gatewayUrl}
+                gatewayId={tab.gatewayId}
               />
             </TabsContent>
           ))}

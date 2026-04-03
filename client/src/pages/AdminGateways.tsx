@@ -25,9 +25,54 @@ import { RefreshButton } from "@/components/RefreshButton";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
-import { Router, Plus, Pencil, Trash2, Download, Wifi, Copy, Check } from "lucide-react";
+import { Router, Plus, Pencil, Trash2, Download, Wifi, Copy, Check, KeyRound } from "lucide-react";
 import type { SignalServer } from "@shared/schema";
-import { useAuthConfig } from "@/contexts/AuthContext";
+import { useAuth, useAuthConfig } from "@/contexts/AuthContext";
+import { useMemo } from "react";
+import { base64UrlToBytes, formatOpenSshEd25519PublicKey } from "@/lib/sshClient";
+
+function SshPublicKeyBanner() {
+  const { user } = useAuth();
+  const authConfig = useAuthConfig();
+  const [copied, setCopied] = useState(false);
+  const username = user?.username || "user";
+
+  const publicKey = useMemo(() => {
+    try {
+      const jwkX = authConfig?.jwk?.keys?.[0]?.x;
+      if (typeof jwkX !== "string") return null;
+      const rawPublicKey = base64UrlToBytes(jwkX);
+      return formatOpenSshEd25519PublicKey(rawPublicKey, `${username}@keylessh`);
+    } catch {
+      return null;
+    }
+  }, [username, authConfig]);
+
+  if (!publicKey) return null;
+
+  return (
+    <div className="rounded-lg border border-border bg-card">
+      <div className="flex items-center gap-3 px-4 py-3">
+        <KeyRound className="h-4 w-4 text-[hsl(var(--neon-cyan))] shrink-0" />
+        <span className="text-sm font-medium flex-1">SSH Public Key</span>
+        <Badge variant="outline" className="text-xs font-mono">ed25519</Badge>
+      </div>
+      <div className="px-4 pb-3 space-y-2">
+        <p className="text-xs text-muted-foreground">
+          Add this key to <code className="text-xs bg-muted px-1 py-0.5 rounded">~/.ssh/authorized_keys</code> on your SSH servers to enable passwordless authentication.
+        </p>
+        <div className="flex gap-2">
+          <code className="flex-1 text-xs font-mono bg-muted px-3 py-2 rounded-md break-all select-all leading-relaxed">
+            {publicKey}
+          </code>
+          <Button variant="outline" size="sm" onClick={() => { navigator.clipboard.writeText(publicKey); setCopied(true); setTimeout(() => setCopied(false), 2000); }} className="shrink-0 h-auto">
+            {copied ? <Check className="h-3.5 w-3.5 text-green-500" /> : <Copy className="h-3.5 w-3.5" />}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 const defaultForm: Partial<GatewayConfigSummary> = {
   gatewayId: "",
@@ -266,6 +311,8 @@ export default function AdminGateways() {
 
   return (
     <div className="p-4 sm:p-6 space-y-4 sm:space-y-6">
+      <SshPublicKeyBanner />
+
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div className="space-y-1">
           <h1 className="text-xl sm:text-2xl font-semibold tracking-tight flex items-center gap-2">
