@@ -159,15 +159,17 @@ function ServerCardSkeleton() {
   );
 }
 
-function GatewayEndpointCard({ endpoint, backend }: { endpoint: GatewayEndpoint; backend: { name: string; protocol?: string; accessible?: boolean } }) {
+function GatewayEndpointCard({ endpoint, backend }: { endpoint: GatewayEndpoint; backend: { name: string; protocol?: string; sshUsernames?: string[]; accessible?: boolean } }) {
   const accessible = backend.accessible !== false;
-  const isDisabled = !accessible || !endpoint.online;
   const isSsh = backend.protocol === "ssh";
+  const sshUsernames = (backend as any).sshUsernames || [];
+  const [selectedSshUser, setSelectedSshUser] = useState<string>(sshUsernames[0] || "");
+  const isDisabled = !accessible || !endpoint.online || (isSsh && !selectedSshUser);
   const handleConnect = () => {
     if (isSsh) {
-      // SSH: open console with gateway routing
+      // SSH: open console with gateway routing + selected username
       const baseUrl = endpoint.directUrl || endpoint.signalServerUrl.replace(/\/$/, "");
-      window.open(`/app/console?gatewayUrl=${encodeURIComponent(baseUrl)}&backend=${encodeURIComponent(backend.name)}&gateway=${encodeURIComponent(endpoint.id)}`, "_blank");
+      window.open(`/app/console?gatewayUrl=${encodeURIComponent(baseUrl)}&backend=${encodeURIComponent(backend.name)}&gateway=${encodeURIComponent(endpoint.id)}&user=${encodeURIComponent(selectedSshUser)}`, "_blank");
     } else {
       // Web endpoint: open via signal server relay
       const url = endpoint.signalServerUrl.replace(/\/$/, "");
@@ -226,10 +228,23 @@ function GatewayEndpointCard({ endpoint, backend }: { endpoint: GatewayEndpoint;
           </p>
         )}
 
+        {isSsh && sshUsernames.length > 0 && (
+          <Select value={selectedSshUser} onValueChange={setSelectedSshUser}>
+            <SelectTrigger className="w-full">
+              <SelectValue placeholder="Select user" />
+            </SelectTrigger>
+            <SelectContent>
+              {sshUsernames.map((u: string) => (
+                <SelectItem key={u} value={u}>{u}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
+
         {isDisabled ? (
           <Button className="w-full gap-2" disabled>
             {isSsh ? <Terminal className="h-4 w-4" /> : <ExternalLink className="h-4 w-4" />}
-            {isSsh ? "SSH" : "Connect"}
+            {isSsh ? (selectedSshUser ? `SSH as ${selectedSshUser}` : "SSH") : "Connect"}
           </Button>
         ) : (
           <Button
@@ -237,7 +252,7 @@ function GatewayEndpointCard({ endpoint, backend }: { endpoint: GatewayEndpoint;
             onClick={handleConnect}
           >
             {isSsh ? <Terminal className="h-4 w-4" /> : <ExternalLink className="h-4 w-4" />}
-            {isSsh ? "SSH" : "Connect"}
+            {isSsh ? `SSH as ${selectedSshUser}` : "Connect"}
             <ArrowRight className="h-4 w-4" />
           </Button>
         )}

@@ -569,7 +569,7 @@ export interface GatewayEndpoint {
   id: string;
   displayName: string;
   description: string;
-  backends: { name: string; protocol?: string; auth?: string; rdpUsernames?: string[]; accessible: boolean }[];
+  backends: { name: string; protocol?: string; auth?: string; rdpUsernames?: string[]; sshUsernames?: string[]; accessible: boolean }[];
   online: boolean;
   clientCount: number;
   signalServerId: string;
