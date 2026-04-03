@@ -419,13 +419,11 @@ export default function AdminRoles() {
         toast({ title: "Please select a gateway and SSH backend", variant: "destructive" });
         return;
       }
-      if (formData.name.trim()) {
-        // ssh:<gateway>:<backend>:<username>
-        name = `ssh:${selectedGatewayId}:${selectedBackendName}:${formData.name.trim()}`;
-      } else {
-        // ssh:<gateway>:<backend>
-        name = `ssh:${selectedGatewayId}:${selectedBackendName}`;
+      if (!formData.name.trim()) {
+        toast({ title: "SSH username is required", variant: "destructive" });
+        return;
       }
+      name = `ssh:${selectedGatewayId}:${selectedBackendName}:${formData.name.trim()}`;
     } else if (roleType === "endpoint") {
       if (!selectedGatewayId || !selectedBackendName) {
         toast({ title: "Please select a gateway and backend", variant: "destructive" });
@@ -1067,6 +1065,9 @@ export default function AdminRoles() {
                           {gw.displayName || gw.id}
                         </SelectItem>
                       ))}
+                      {(gatewayEndpoints || []).filter(g => g.backends?.some(b => b.protocol === "ssh")).length === 0 && (
+                        <SelectItem value="_none" disabled>No gateways with SSH backends</SelectItem>
+                      )}
                     </SelectContent>
                   </Select>
                 </div>
@@ -1095,15 +1096,16 @@ export default function AdminRoles() {
                 )}
                 {selectedBackendName && (
                   <div className="space-y-2">
-                    <Label htmlFor="sshUsername">SSH Username (optional)</Label>
+                    <Label htmlFor="sshUsername">SSH Username</Label>
                     <Input
                       id="sshUsername"
                       value={formData.name}
                       onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                      placeholder="e.g., root (leave blank for any user)"
+                      placeholder="e.g., root"
+                      required
                     />
                     <p className="text-xs text-muted-foreground">
-                      Creates role <span className="font-mono">ssh:{selectedGatewayId}:{selectedBackendName}{formData.name ? `:${formData.name}` : ""}</span>
+                      Creates role <span className="font-mono">ssh:{selectedGatewayId}:{selectedBackendName}:{formData.name || "username"}</span>
                     </p>
                   </div>
                 )}
