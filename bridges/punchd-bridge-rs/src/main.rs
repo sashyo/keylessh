@@ -142,6 +142,7 @@ async fn main() {
         backends: config.backends.clone(),
         auth: Some(auth.clone()),
         vpn_state: Some(vpn_state.clone()),
+        quic_port: config.quic_port,
     });
 
     // Watch config files for changes — hot-reload backends, auth, VPN settings
@@ -224,6 +225,7 @@ async fn main() {
     }
     tracing::info!("STUN Server: {}", config.stun_server_url);
     tracing::info!("Gateway ID: {}", config.gateway_id);
+    tracing::info!("QUIC Port: {}", config.quic_port);
 
     // Start servers
     let _health_handle = tokio::spawn(async move {

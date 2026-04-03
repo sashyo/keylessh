@@ -671,6 +671,8 @@ async function handleRegister(ws: WebSocket, msg: SignalMessage, clientIp: strin
 
     registry.registerGateway(msg.id, msg.addresses || [], ws, msg.metadata);
     gatewayWebSockets.add(ws);
+    // Store the gateway's public IP for QUIC address resolution
+    (ws as any)._publicIp = clientIp;
     safeSend(ws, { type: "registered", role: "gateway", id: msg.id });
   } else if (msg.role === "client") {
     // Signal server is a dumb relay — gateway handles auth.
@@ -714,13 +716,21 @@ function handleQuicAddress(ws: WebSocket, msg: SignalMessage): void {
     return;
   }
   const fromId = msg.fromId || "unknown";
+  let address = (msg as any).address as string || "";
+
+  // Replace 0.0.0.0 with the sender's actual public IP
+  const senderIp = (ws as any)._publicIp;
+  if (senderIp && address.startsWith("0.0.0.0:")) {
+    address = address.replace("0.0.0.0", senderIp);
+  }
+
   // Forward the full quic_address message to the target peer
   const target = registry.getClient(msg.targetId) || registry.getGateway(msg.targetId);
   if (target) {
     safeSend(target.ws, {
       type: "quic_address",
       fromId,
-      address: (msg as any).address,
+      address,
       certHash: (msg as any).certHash,
     });
   }
