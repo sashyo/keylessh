@@ -1,68 +1,228 @@
 <?xml version="1.0" encoding="utf-8"?>
-<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
-  <Product Id="*"
-           Name="Punchd VPN"
-           Manufacturer="KeyleSSH"
-           Version="1.0.0"
-           UpgradeCode="8B5E2F3A-4C1D-4A7E-9F2B-1D3E5A7C9B0F"
-           Language="1033">
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
 
-    <Package InstallerVersion="200" Compressed="yes" InstallScope="perMachine"
-             Description="Punchd VPN — WebRTC VPN client for punchd-bridge gateways"
-             Manufacturer="KeyleSSH" />
+  <Package
+    Name="Punchd VPN"
+    Manufacturer="KeyleSSH"
+    Version="1.0.0"
+    UpgradeCode="8B5E2F3A-4C1D-4A7E-9F2B-1D3E5A7C9B0F"
+    Scope="perMachine">
 
-    <MajorUpgrade DowngradeErrorMessage="A newer version of Punchd VPN is already installed." />
+    <MajorUpgrade
+      DowngradeErrorMessage="A newer version of Punchd VPN is already installed."
+      AllowSameVersionUpgrades="yes"
+      Schedule="afterInstallInitialize" />
 
-    <Media Id="1" Cabinet="punchd.cab" EmbedCab="yes" />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Launch Condition="Privileged" Message="This installer requires administrator privileges." />
+
+    <!-- Properties -->
+    <Property Id="VPN_CONFIG_FILE" Secure="yes" />
 
     <!-- Install to Program Files\Punchd VPN -->
-    <Directory Id="TARGETDIR" Name="SourceDir">
-      <Directory Id="ProgramFiles64Folder">
-        <Directory Id="INSTALLFOLDER" Name="Punchd VPN">
-          <Component Id="MainExecutable" Guid="A1B2C3D4-E5F6-7890-ABCD-EF1234567890" Win64="yes">
-            <File Id="PunchdVpnExe" Name="punchd-vpn.exe" Source="punchd-vpn.exe" KeyPath="yes" />
+    <StandardDirectory Id="ProgramFiles6432Folder">
+      <Directory Id="INSTALLFOLDER" Name="Punchd VPN">
+        <Component Id="MainExecutable" Guid="A1B2C3D4-E5F6-7890-ABCD-EF1234567890">
+          <File Id="PunchdVpnExe" Source="punchd-vpn.exe" KeyPath="yes" />
 
-            <ServiceInstall Id="PunchdVpnService"
-                            Name="punchd-vpn"
-                            DisplayName="Punchd VPN Service"
-                            Description="VPN client that tunnels IP traffic through punchd-bridge gateways. Connects automatically on boot."
-                            Type="ownProcess"
-                            Start="auto"
-                            ErrorControl="normal"
-                            Arguments="--service" />
+          <ServiceInstall
+            Id="PunchdVpnService"
+            Name="punchd-vpn"
+            DisplayName="Punchd VPN Service"
+            Description="VPN client that tunnels IP traffic through punchd-bridge gateways. Connects automatically on boot."
+            Type="ownProcess"
+            Start="auto"
+            ErrorControl="normal"
+            Arguments="--service" />
 
-            <ServiceControl Id="PunchdVpnServiceControl"
-                            Name="punchd-vpn"
-                            Start="install"
-                            Stop="both"
-                            Remove="uninstall"
-                            Wait="yes" />
-          </Component>
-        </Directory>
+          <ServiceControl
+            Id="PunchdVpnServiceControl"
+            Name="punchd-vpn"
+            Start="install"
+            Stop="both"
+            Remove="uninstall"
+            Wait="yes" />
+        </Component>
       </Directory>
+    </StandardDirectory>
 
-      <!-- ProgramData config directory -->
-      <Directory Id="CommonAppDataFolder">
-        <Directory Id="PunchdVpnDataDir" Name="punchd-vpn">
-          <Component Id="ConfigDirectory" Guid="B2C3D4E5-F6A7-8901-BCDE-F12345678901">
-            <CreateFolder />
-            <RemoveFolder Id="RemoveDataDir" On="uninstall" />
-            <RegistryValue Root="HKLM"
-                           Key="Software\KeyleSSH\PunchdVPN"
-                           Name="Installed"
-                           Type="integer"
-                           Value="1"
-                           KeyPath="yes" />
-          </Component>
-        </Directory>
+    <!-- ProgramData\punchd-vpn config directory -->
+    <StandardDirectory Id="CommonAppDataFolder">
+      <Directory Id="PunchdVpnDataDir" Name="punchd-vpn">
+        <Component Id="ConfigDirectory" Guid="B2C3D4E5-F6A7-8901-BCDE-F12345678901">
+          <CreateFolder />
+          <RemoveFolder Id="RemoveDataDir" On="uninstall" />
+          <RegistryValue
+            Root="HKLM"
+            Key="Software\KeyleSSH\PunchdVPN"
+            Name="ConfigDir"
+            Type="string"
+            Value="[PunchdVpnDataDir]"
+            KeyPath="yes" />
+        </Component>
       </Directory>
-    </Directory>
+    </StandardDirectory>
+
+    <Property Id="ARPPRODUCTICON" Value="PunchdVpnExe" />
 
     <Feature Id="ProductFeature" Title="Punchd VPN" Level="1">
       <ComponentRef Id="MainExecutable" />
       <ComponentRef Id="ConfigDirectory" />
     </Feature>
 
-    <Property Id="ARPPRODUCTICON" Value="PunchdVpnExe" />
-  </Product>
+    <!-- Custom actions DLL -->
+    <Binary Id="PunchdCA" SourceFile="ca\PunchdCA.dll" />
+
+    <!-- Immediate: browse for config + validate (opens file dialog on "Install" click) -->
+    <CustomAction Id="CA_BrowseAndValidateConfig"
+                  DllEntry="BrowseAndValidateConfig"
+                  BinaryRef="PunchdCA"
+                  Execute="immediate"
+                  Return="check" />
+
+    <!-- Pass config file path to deferred CA -->
+    <CustomAction Id="CA_SetCopyConfigData"
+                  Property="CA_CopyConfig"
+                  Value="[VPN_CONFIG_FILE]" />
+
+    <!-- Deferred: copy vpn-config.toml to ProgramData -->
+    <CustomAction Id="CA_CopyConfig"
+                  DllEntry="CopyConfig"
+                  BinaryRef="PunchdCA"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="check" />
+
+    <!-- Deferred: remove config on uninstall -->
+    <CustomAction Id="CA_RemoveConfig"
+                  DllEntry="RemoveConfig"
+                  BinaryRef="PunchdCA"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <!-- ═══════════ Installer UI ═══════════ -->
+    <UI>
+      <TextStyle Id="TitleFont" FaceName="Tahoma" Size="10" Bold="yes" />
+      <TextStyle Id="BodyFont" FaceName="Tahoma" Size="8" />
+      <TextStyle Id="SmallFont" FaceName="Tahoma" Size="7" />
+
+      <Dialog Id="WelcomeDlg" Width="370" Height="270" Title="Punchd VPN Setup">
+        <Control Id="Title" Type="Text" X="20" Y="20" Width="330" Height="20"
+                 Text="{\TitleFont}Welcome to Punchd VPN Setup" />
+        <Control Id="Desc" Type="Text" X="20" Y="50" Width="330" Height="60"
+                 Text="{\BodyFont}This will install Punchd VPN as a Windows service. It connects to punchd-bridge gateways over WebRTC, providing secure VPN access to remote networks.&#xA;&#xA;You will need your vpn-config.toml configuration file." />
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17"
+                 Default="yes" Text="Next">
+          <Publish Event="NewDialog" Value="ConfigDlg" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17"
+                 Cancel="yes" Text="Cancel">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+      </Dialog>
+
+      <Dialog Id="ConfigDlg" Width="370" Height="220" Title="Punchd VPN Setup">
+        <Control Id="Title" Type="Text" X="20" Y="20" Width="330" Height="20"
+                 Text="{\TitleFont}VPN Configuration" />
+        <Control Id="Desc" Type="Text" X="20" Y="50" Width="330" Height="50"
+                 Text="{\BodyFont}Clicking Install will open a file browser for you to select your vpn-config.toml file. You can download it from KeyleSSH: Admin > Gateways > Download VPN Config." />
+        <Control Id="Hint" Type="Text" X="20" Y="100" Width="330" Height="24"
+                 Text="{\SmallFont}Config will be copied to C:\ProgramData\punchd-vpn\vpn-config.toml" />
+        <Control Id="SilentHint" Type="Text" X="20" Y="124" Width="330" Height="24"
+                 Text="{\SmallFont}Silent install: msiexec /i punchd-vpn.msi /qn VPN_CONFIG_FILE=C:\path\to\vpn-config.toml" />
+
+        <Control Id="Back" Type="PushButton" X="180" Y="190" Width="56" Height="17"
+                 Text="Back">
+          <Publish Event="NewDialog" Value="WelcomeDlg" />
+        </Control>
+        <Control Id="Next" Type="PushButton" X="236" Y="190" Width="56" Height="17"
+                 Default="yes" Text="Install">
+          <Publish Event="DoAction" Value="CA_BrowseAndValidateConfig" Order="1" />
+          <Publish Event="EndDialog" Value="Return" Order="2" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="190" Width="56" Height="17"
+                 Cancel="yes" Text="Cancel">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+      </Dialog>
+
+      <Dialog Id="CancelDlg" Width="260" Height="85" Title="Cancel Setup">
+        <Control Id="Text" Type="Text" X="48" Y="15" Width="194" Height="30"
+                 Text="{\BodyFont}Are you sure you want to cancel?" />
+        <Control Id="Yes" Type="PushButton" X="72" Y="57" Width="56" Height="17"
+                 Text="Yes">
+          <Publish Event="EndDialog" Value="Exit" />
+        </Control>
+        <Control Id="No" Type="PushButton" X="132" Y="57" Width="56" Height="17"
+                 Cancel="yes" Default="yes" Text="No">
+          <Publish Event="EndDialog" Value="Return" />
+        </Control>
+      </Dialog>
+
+      <Dialog Id="ExitDlg" Width="370" Height="270" Title="Punchd VPN Setup Complete">
+        <Control Id="Title" Type="Text" X="20" Y="20" Width="330" Height="20"
+                 Text="{\TitleFont}Installation Complete" />
+        <Control Id="Desc" Type="Text" X="20" Y="50" Width="330" Height="60"
+                 Text="{\BodyFont}Punchd VPN has been installed and the service has been started. It will connect automatically on boot and reconnect if the connection drops." />
+        <Control Id="Finish" Type="PushButton" X="304" Y="243" Width="56" Height="17"
+                 Default="yes" Cancel="yes" Text="Finish">
+          <Publish Event="EndDialog" Value="Return" />
+        </Control>
+      </Dialog>
+
+      <Dialog Id="AlreadyInstalledDlg" Width="370" Height="200" Title="Punchd VPN Setup">
+        <Control Id="Title" Type="Text" X="20" Y="20" Width="330" Height="20"
+                 Text="{\TitleFont}Punchd VPN is already installed" />
+        <Control Id="Desc" Type="Text" X="20" Y="50" Width="330" Height="40"
+                 Text="{\BodyFont}Would you like to uninstall Punchd VPN? This will stop the service and remove the program files." />
+        <Control Id="Uninstall" Type="PushButton" X="172" Y="170" Width="64" Height="17"
+                 Default="yes" Text="Uninstall">
+          <Publish Property="REMOVE" Value="ALL" />
+          <Publish Event="EndDialog" Value="Return" />
+        </Control>
+        <Control Id="Reinstall" Type="PushButton" X="240" Y="170" Width="64" Height="17"
+                 Text="Reinstall">
+          <Publish Property="REINSTALL" Value="ALL" />
+          <Publish Event="EndDialog" Value="Return" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="308" Y="170" Width="52" Height="17"
+                 Cancel="yes" Text="Cancel">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+      </Dialog>
+
+      <Dialog Id="UninstallExitDlg" Width="370" Height="270" Title="Punchd VPN Setup">
+        <Control Id="Title" Type="Text" X="20" Y="20" Width="330" Height="20"
+                 Text="{\TitleFont}Uninstall Complete" />
+        <Control Id="Desc" Type="Text" X="20" Y="50" Width="330" Height="40"
+                 Text="{\BodyFont}Punchd VPN has been removed. The service has been stopped and deleted." />
+        <Control Id="Finish" Type="PushButton" X="304" Y="243" Width="56" Height="17"
+                 Default="yes" Cancel="yes" Text="Finish">
+          <Publish Event="EndDialog" Value="Return" />
+        </Control>
+      </Dialog>
+
+      <InstallUISequence>
+        <Show Dialog="WelcomeDlg" Before="ExecuteAction" Condition="NOT Installed" />
+        <Show Dialog="AlreadyInstalledDlg" Before="ExecuteAction" Condition="Installed AND NOT REMOVE" />
+        <Show Dialog="ExitDlg" After="ExecuteAction" Condition="NOT Installed OR REINSTALL" />
+        <Show Dialog="UninstallExitDlg" After="ExecuteAction" Condition="REMOVE=&quot;ALL&quot;" />
+      </InstallUISequence>
+    </UI>
+
+    <InstallExecuteSequence>
+      <!-- Install: copy config then install service -->
+      <Custom Action="CA_SetCopyConfigData" After="InstallFiles"
+              Condition="NOT REMOVE=&quot;ALL&quot;" />
+      <Custom Action="CA_CopyConfig" After="CA_SetCopyConfigData"
+              Condition="NOT REMOVE=&quot;ALL&quot;" />
+
+      <!-- Uninstall: remove config -->
+      <Custom Action="CA_RemoveConfig" Before="RemoveFiles"
+              Condition="REMOVE=&quot;ALL&quot;" />
+    </InstallExecuteSequence>
+
+  </Package>
 </Wix>

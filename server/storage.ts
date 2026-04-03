@@ -2253,8 +2253,9 @@ export class RecordingStorage {
   }
 
   // Video recordings storage path — files stored on disk, not in DB
-  // Set RECORDING_STORAGE_PATH env var to mount external storage (e.g. Azure Files)
+  // Set RECORDING_STORAGE_PATH or RECORDINGS_STORAGE_PATH env var for external mount
   private videoDir: string = process.env.RECORDING_STORAGE_PATH
+    || process.env.RECORDINGS_STORAGE_PATH
     || (typeof __dirname !== "undefined"
       ? __dirname + "/../data/recordings"
       : "./data/recordings");
