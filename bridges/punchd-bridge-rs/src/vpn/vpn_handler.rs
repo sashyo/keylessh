@@ -18,13 +18,15 @@ const VPN_TUNNEL_MAGIC: u8 = 0x04;
 const VPN_MTU: u16 = 1400;
 
 /// A firewall rule parsed from a VPN role.
-/// Format: `vpn:<gateway>:<allow|deny>:<network>/<prefix>:<ports>`
+/// Format: `vpn:<gateway>:<allow|deny>:<network>/<prefix>:<ports>:<priority>`
+/// Priority is optional (defaults to 0). Higher priority rules are evaluated first.
 #[derive(Clone, Debug)]
 pub struct FirewallRule {
     pub action: FirewallAction,
     pub network: Ipv4Addr,
     pub prefix: u8,
     pub ports: PortMatch,
+    pub priority: i32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -40,14 +42,14 @@ pub enum PortMatch {
 }
 
 impl FirewallRule {
-    /// Parse from role string: `vpn:GatewayId:allow:192.168.0.0/24:80,443`
+    /// Parse from role string: `vpn:GatewayId:allow:192.168.0.0/24:80,443:10`
     pub fn parse(role: &str, gateway_id: &str) -> Option<Self> {
         let prefix_str = format!("vpn:{gateway_id}:");
         if !role.starts_with(&prefix_str) {
             return None;
         }
         let rest = &role[prefix_str.len()..];
-        let parts: Vec<&str> = rest.splitn(3, ':').collect();
+        let parts: Vec<&str> = rest.splitn(4, ':').collect();
         if parts.len() < 2 {
             return None;
         }
@@ -78,11 +80,19 @@ impl FirewallRule {
             }
         };
 
+        // Parse priority (optional, defaults to 0)
+        let priority = if parts.len() >= 4 {
+            parts[3].parse::<i32>().unwrap_or(0)
+        } else {
+            0
+        };
+
         Some(FirewallRule {
             action,
             network,
             prefix,
             ports,
+            priority,
         })
     }
 
@@ -104,9 +114,12 @@ impl FirewallRule {
 /// Per-session firewall: list of rules extracted from the user's roles.
 /// If no rules are present (just `vpn:GatewayId`), all traffic is allowed.
 /// If rules exist, default is deny — only explicitly allowed traffic passes.
+/// Uses a decision cache for O(1) lookups on repeated destinations.
 #[derive(Clone, Debug)]
 pub struct SessionFirewall {
     pub rules: Vec<FirewallRule>,
+    /// Cache of recent firewall decisions: (ip_u32, port) -> allowed
+    decision_cache: std::collections::HashMap<(u32, u16), bool>,
     /// Tracks recently blocked destinations to avoid spamming notifications.
     blocked_cache: std::collections::HashSet<String>,
     /// Channel to send block notifications to the client via control channel.
@@ -114,35 +127,49 @@ pub struct SessionFirewall {
 }
 
 impl SessionFirewall {
-    pub fn new(rules: Vec<FirewallRule>) -> Self {
+    pub fn new(mut rules: Vec<FirewallRule>) -> Self {
+        // Sort by priority descending — highest priority evaluated first
+        rules.sort_by(|a, b| b.priority.cmp(&a.priority));
         Self {
             rules,
+            decision_cache: std::collections::HashMap::with_capacity(64),
             blocked_cache: std::collections::HashSet::new(),
             block_notify_tx: None,
         }
     }
 
     /// Check if a packet to dst_ip:dst_port is allowed.
-    pub fn is_allowed(&self, dst_ip: Ipv4Addr, dst_port: u16) -> bool {
+    /// Uses a cache for O(1) lookups on repeated destinations.
+    /// Rules are evaluated highest-priority-first. First matching rule wins.
+    /// If no rules exist, all traffic is allowed.
+    /// If rules exist but none match, default is deny.
+    pub fn is_allowed(&mut self, dst_ip: Ipv4Addr, dst_port: u16) -> bool {
         if self.rules.is_empty() {
-            return true; // No rules = allow all
+            return true;
         }
 
-        // Check deny rules first
+        let key = (u32::from(dst_ip), dst_port);
+        if let Some(&cached) = self.decision_cache.get(&key) {
+            return cached;
+        }
+
+        let result = self.evaluate(dst_ip, dst_port);
+
+        // Cap cache size to prevent unbounded growth
+        if self.decision_cache.len() >= 4096 {
+            self.decision_cache.clear();
+        }
+        self.decision_cache.insert(key, result);
+
+        result
+    }
+
+    fn evaluate(&self, dst_ip: Ipv4Addr, dst_port: u16) -> bool {
         for rule in &self.rules {
-            if rule.action == FirewallAction::Deny && rule.matches(dst_ip, dst_port) {
-                return false;
+            if rule.matches(dst_ip, dst_port) {
+                return rule.action == FirewallAction::Allow;
             }
         }
-
-        // Check allow rules
-        for rule in &self.rules {
-            if rule.action == FirewallAction::Allow && rule.matches(dst_ip, dst_port) {
-                return true;
-            }
-        }
-
-        // Default deny if rules exist but none matched
         false
     }
 
@@ -406,17 +433,15 @@ pub async fn handle_vpn_open(
                                 continue;
                             }
                             if data.len() >= 20 {
-                                let dst = Ipv4Addr::new(data[16], data[17], data[18], data[19]);
-                                let dst_port = extract_dst_port(&data);
-
-                                // Enforce per-session firewall
-                                if !firewall.is_allowed(dst, dst_port) {
-                                    firewall.log_blocked(dst, dst_port);
-                                    continue;
+                                // Only parse headers and check firewall if rules exist
+                                if !firewall.rules.is_empty() {
+                                    let dst = Ipv4Addr::new(data[16], data[17], data[18], data[19]);
+                                    let dst_port = extract_dst_port(&data);
+                                    if !firewall.is_allowed(dst, dst_port) {
+                                        firewall.log_blocked(dst, dst_port);
+                                        continue;
+                                    }
                                 }
-
-                                let src = Ipv4Addr::new(data[12], data[13], data[14], data[15]);
-                                tracing::debug!("[VPN] client->TUN: {} -> {}:{} ({} bytes)", src, dst, dst_port, data.len());
                             }
                             match TUN_WRITE_TX.get() {
                                 Some(tx) => { let _ = tx.send(data); }

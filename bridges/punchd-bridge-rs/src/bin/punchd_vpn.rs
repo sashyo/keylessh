@@ -75,6 +75,18 @@ struct Args {
     /// Run in standalone CLI mode (OIDC login, single connection). Default is agent mode.
     #[arg(long, default_value_t = false)]
     standalone: bool,
+
+    /// Run as a Windows Service (used by the service control manager, not manually)
+    #[arg(long, default_value_t = false)]
+    service: bool,
+
+    /// Install as a Windows Service
+    #[arg(long, default_value_t = false)]
+    install_service: bool,
+
+    /// Uninstall the Windows Service
+    #[arg(long, default_value_t = false)]
+    uninstall_service: bool,
 }
 
 /// Saved config file (vpn-config.toml next to the exe)
@@ -106,12 +118,23 @@ struct TcConfig {
     resource: String,
 }
 
-/// Resolve the config file path (next to the exe)
+/// Resolve the config file path.
+/// Windows: C:\ProgramData\punchd-vpn\vpn-config.toml (accessible by service + user)
+/// Linux: next to the exe
 fn config_file_path() -> std::path::PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("vpn-config.toml")))
-        .unwrap_or_else(|| std::path::PathBuf::from("vpn-config.toml"))
+    #[cfg(target_os = "windows")]
+    {
+        let dir = std::path::PathBuf::from(r"C:\ProgramData\punchd-vpn");
+        let _ = std::fs::create_dir_all(&dir);
+        dir.join("vpn-config.toml")
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("vpn-config.toml")))
+            .unwrap_or_else(|| std::path::PathBuf::from("vpn-config.toml"))
+    }
 }
 
 /// Load saved config from vpn-config.toml
@@ -149,6 +172,104 @@ fn merge_args(args: &Args, file_cfg: &VpnFileConfig) -> (String, String, Option<
 
 /// Interactive first-run setup — prompts user in the terminal
 fn run_first_time_setup() -> VpnFileConfig {
+    #[cfg(target_os = "windows")]
+    {
+        run_gui_setup()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        run_cli_setup()
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn run_gui_setup() -> VpnFileConfig {
+    use rfd::{FileDialog, MessageDialog, MessageLevel, MessageButtons};
+
+    // Ask user to select their vpn-config.toml
+    MessageDialog::new()
+        .set_title("Punchd VPN Setup")
+        .set_description("Welcome to Punchd VPN.\n\nPlease select your vpn-config.toml file.")
+        .set_level(MessageLevel::Info)
+        .set_buttons(MessageButtons::Ok)
+        .show();
+
+    let source = FileDialog::new()
+        .set_title("Select vpn-config.toml")
+        .add_filter("TOML Config", &["toml"])
+        .add_filter("All Files", &["*"])
+        .pick_file();
+
+    let source = match source {
+        Some(p) => p,
+        None => {
+            MessageDialog::new()
+                .set_title("Punchd VPN")
+                .set_description("Setup cancelled. No config file selected.")
+                .set_level(MessageLevel::Warning)
+                .set_buttons(MessageButtons::Ok)
+                .show();
+            std::process::exit(0);
+        }
+    };
+
+    // Validate the config
+    let content = match std::fs::read_to_string(&source) {
+        Ok(s) => s,
+        Err(e) => {
+            MessageDialog::new()
+                .set_title("Punchd VPN — Error")
+                .set_description(&format!("Could not read file:\n{e}"))
+                .set_level(MessageLevel::Error)
+                .set_buttons(MessageButtons::Ok)
+                .show();
+            std::process::exit(1);
+        }
+    };
+
+    let cfg: VpnFileConfig = match toml::from_str(&content) {
+        Ok(c) => c,
+        Err(e) => {
+            MessageDialog::new()
+                .set_title("Punchd VPN — Error")
+                .set_description(&format!("Invalid config file:\n{e}"))
+                .set_level(MessageLevel::Error)
+                .set_buttons(MessageButtons::Ok)
+                .show();
+            std::process::exit(1);
+        }
+    };
+
+    if cfg.stun_server.is_none() || cfg.gateway_id.is_none() {
+        MessageDialog::new()
+            .set_title("Punchd VPN — Error")
+            .set_description("Config file is missing required fields:\n- stun_server\n- gateway_id")
+            .set_level(MessageLevel::Error)
+            .set_buttons(MessageButtons::Ok)
+            .show();
+        std::process::exit(1);
+    }
+
+    // Copy to ProgramData
+    let dest = config_file_path();
+    if let Some(parent) = dest.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::copy(&source, &dest) {
+        MessageDialog::new()
+            .set_title("Punchd VPN — Error")
+            .set_description(&format!("Could not save config to {}:\n{e}", dest.display()))
+            .set_level(MessageLevel::Error)
+            .set_buttons(MessageButtons::Ok)
+            .show();
+        std::process::exit(1);
+    }
+
+    cfg
+}
+
+#[cfg(not(target_os = "windows"))]
+fn run_cli_setup() -> VpnFileConfig {
     use std::io::{self, Write};
 
     println!("╔══════════════════════════════════════╗");
@@ -201,16 +322,16 @@ fn run_first_time_setup() -> VpnFileConfig {
         }
     }
 
-    // Save config
-    let path = config_file_path();
+    let dest = config_file_path();
+    if let Some(parent) = dest.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     match toml::to_string_pretty(&cfg) {
         Ok(toml_str) => {
-            if let Err(e) = std::fs::write(&path, &toml_str) {
-                eprintln!("Warning: could not save config to {}: {e}", path.display());
+            if let Err(e) = std::fs::write(&dest, &toml_str) {
+                eprintln!("Warning: could not save config to {}: {e}", dest.display());
             } else {
-                println!();
-                println!("Config saved to: {}", path.display());
-                println!("You can edit this file to change settings.");
+                println!("\nConfig saved to: {}", dest.display());
             }
         }
         Err(e) => eprintln!("Warning: could not serialize config: {e}"),
@@ -223,6 +344,317 @@ fn run_first_time_setup() -> VpnFileConfig {
 // Import the TUN device from the main crate
 #[path = "../vpn/tun_device.rs"]
 mod tun_device;
+
+// ── Windows Service support ───────────────────────────────────────────
+
+const SERVICE_NAME: &str = "punchd-vpn";
+const SERVICE_DISPLAY_NAME: &str = "Punchd VPN Service";
+
+#[cfg(target_os = "windows")]
+mod win_service {
+    use super::*;
+    use windows_service::{
+        define_windows_service,
+        service::{
+            ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus,
+            ServiceType,
+        },
+        service_control_handler::{self, ServiceControlHandlerResult},
+        service_dispatcher,
+    };
+
+    static SERVICE_STOP: std::sync::OnceLock<Arc<Notify>> = std::sync::OnceLock::new();
+
+    define_windows_service!(ffi_service_main, service_main);
+
+    pub fn run_as_service() -> Result<(), String> {
+        service_dispatcher::start(SERVICE_NAME, ffi_service_main)
+            .map_err(|e| format!("Failed to start service dispatcher: {e}"))
+    }
+
+    fn service_main(_arguments: Vec<std::ffi::OsString>) {
+        if let Err(e) = run_service() {
+            tracing::error!("[Service] Fatal error: {e}");
+        }
+    }
+
+    fn run_service() -> Result<(), String> {
+        let stop_notify = Arc::new(Notify::new());
+        SERVICE_STOP.set(stop_notify.clone()).ok();
+
+        let event_handler = move |control_event| -> ServiceControlHandlerResult {
+            match control_event {
+                ServiceControl::Stop | ServiceControl::Shutdown => {
+                    tracing::info!("[Service] Stop requested");
+                    if let Some(n) = SERVICE_STOP.get() {
+                        n.notify_waiters();
+                    }
+                    ServiceControlHandlerResult::NoError
+                }
+                ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
+                _ => ServiceControlHandlerResult::NotImplemented,
+            }
+        };
+
+        let status_handle = service_control_handler::register(SERVICE_NAME, event_handler)
+            .map_err(|e| format!("Failed to register service control handler: {e}"))?;
+
+        // Report running
+        status_handle
+            .set_service_status(ServiceStatus {
+                service_type: ServiceType::OWN_PROCESS,
+                current_state: ServiceState::Running,
+                controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
+                exit_code: ServiceExitCode::Win32(0),
+                checkpoint: 0,
+                wait_hint: std::time::Duration::default(),
+                process_id: None,
+            })
+            .map_err(|e| format!("Failed to set service status: {e}"))?;
+
+        // Build and run the tokio runtime
+        let rt = tokio::runtime::Runtime::new()
+            .map_err(|e| format!("Failed to create tokio runtime: {e}"))?;
+
+        rt.block_on(async {
+            rustls::crypto::ring::default_provider()
+                .install_default()
+                .expect("Failed to install rustls crypto provider");
+
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("punchd_vpn=debug,warn")),
+                )
+                .init();
+
+            tracing::info!("[Service] Punchd VPN service started");
+
+            // Start agent HTTP server
+            tokio::spawn(async {
+                if let Err(e) = run_agent().await {
+                    tracing::error!("Agent error: {e}");
+                }
+            });
+
+            // Auto-connect if config exists
+            let file_cfg = load_file_config();
+            let has_config = file_cfg.stun_server.is_some() && file_cfg.gateway_id.is_some();
+
+            if has_config {
+                let args = Args::parse_from::<[&str; 0], &str>([]);
+                let (stun_server, gateway_id, tc_path, tc_b64, ice_server, turn_server, turn_secret, default_route) =
+                    merge_args(&args, &file_cfg);
+
+                if !stun_server.is_empty() && !gateway_id.is_empty() {
+                    let resolved = ResolvedConfig {
+                        stun_server,
+                        gateway_id,
+                        tc_path,
+                        tc_b64,
+                        ice_server,
+                        turn_server,
+                        turn_secret,
+                        tun_name: "punchd-vpn0".to_string(),
+                        default_route,
+                    };
+
+                    let resolved = Arc::new(resolved);
+                    let stop = stop_notify.clone();
+                    tokio::spawn(async move {
+                        let mut backoff_secs: u64 = 2;
+                        const MAX_BACKOFF: u64 = 60;
+
+                        loop {
+                            tracing::info!("[VPN] Connecting...");
+                            tokio::select! {
+                                result = run_vpn((*resolved).clone()) => {
+                                    match result {
+                                        Ok(()) => {
+                                            tracing::info!("[VPN] Disconnected cleanly");
+                                            backoff_secs = 2;
+                                        }
+                                        Err(e) => {
+                                            tracing::error!("[VPN] Connection error: {e}");
+                                        }
+                                    }
+                                    tracing::info!("[VPN] Reconnecting in {backoff_secs}s...");
+                                    tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                                    backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF);
+                                }
+                                _ = stop.notified() => {
+                                    tracing::info!("[VPN] Service stop — disconnecting");
+                                    break;
+                                }
+                            }
+                        }
+                    });
+                }
+            }
+
+            // Wait for stop signal
+            stop_notify.notified().await;
+            tracing::info!("[Service] Shutting down...");
+        });
+
+        // Report stopped
+        let _ = status_handle.set_service_status(ServiceStatus {
+            service_type: ServiceType::OWN_PROCESS,
+            current_state: ServiceState::Stopped,
+            controls_accepted: ServiceControlAccept::empty(),
+            exit_code: ServiceExitCode::Win32(0),
+            checkpoint: 0,
+            wait_hint: std::time::Duration::default(),
+            process_id: None,
+        });
+
+        Ok(())
+    }
+
+    pub fn install() -> Result<(), String> {
+        use windows_service::service::{ServiceAccess, ServiceErrorControl, ServiceInfo, ServiceStartType};
+        use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+
+        let manager = ServiceManager::local_computer(
+            None::<&str>,
+            ServiceManagerAccess::CREATE_SERVICE | ServiceManagerAccess::CONNECT,
+        ).map_err(|e| format!("Failed to open service manager (run as admin): {e}"))?;
+
+        // If already installed, stop and delete first
+        if let Ok(existing) = manager.open_service(SERVICE_NAME, ServiceAccess::DELETE | ServiceAccess::STOP) {
+            let _ = existing.stop();
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            let _ = existing.delete();
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+
+        let exe_path = std::env::current_exe()
+            .map_err(|e| format!("Failed to get exe path: {e}"))?;
+
+        let service_info = ServiceInfo {
+            name: SERVICE_NAME.into(),
+            display_name: SERVICE_DISPLAY_NAME.into(),
+            service_type: ServiceType::OWN_PROCESS,
+            start_type: ServiceStartType::AutoStart,
+            error_control: ServiceErrorControl::Normal,
+            executable_path: exe_path,
+            launch_arguments: vec!["--service".into()],
+            dependencies: vec![],
+            account_name: None, // LocalSystem
+            account_password: None,
+        };
+
+        let service = manager
+            .create_service(&service_info, ServiceAccess::START | ServiceAccess::CHANGE_CONFIG)
+            .map_err(|e| format!("Failed to create service: {e}"))?;
+
+        // Start it immediately
+        service.start::<&str>(&[])
+            .map_err(|e| format!("Service installed but failed to start: {e}"))?;
+
+        println!("Service '{SERVICE_DISPLAY_NAME}' installed and started.");
+        Ok(())
+    }
+
+    /// Check if we're running with admin privileges
+    pub fn is_elevated() -> bool {
+        use std::ptr;
+        unsafe {
+            let mut token = ptr::null_mut();
+            if windows_service::service_manager::ServiceManager::local_computer(
+                None::<&str>,
+                windows_service::service_manager::ServiceManagerAccess::CONNECT,
+            ).is_ok() {
+                return true;
+            }
+            false
+        }
+    }
+
+    /// Re-launch ourselves as admin (UAC prompt)
+    pub fn elevate_and_install() -> ! {
+        use std::os::windows::ffi::OsStrExt;
+        use std::ffi::OsStr;
+
+        let exe = std::env::current_exe().expect("Failed to get exe path");
+        let exe_wide: Vec<u16> = OsStr::new(&exe).encode_wide().chain(std::iter::once(0)).collect();
+        let args = OsStr::new("--install-service");
+        let args_wide: Vec<u16> = args.encode_wide().chain(std::iter::once(0)).collect();
+        let verb = OsStr::new("runas");
+        let verb_wide: Vec<u16> = verb.encode_wide().chain(std::iter::once(0)).collect();
+
+        #[repr(C)]
+        struct ShellExecuteInfoW {
+            cb_size: u32,
+            f_mask: u32,
+            hwnd: *mut std::ffi::c_void,
+            lp_verb: *const u16,
+            lp_file: *const u16,
+            lp_parameters: *const u16,
+            lp_directory: *const u16,
+            n_show: i32,
+            h_inst_app: *mut std::ffi::c_void,
+            lp_id_list: *mut std::ffi::c_void,
+            lp_class: *const u16,
+            hkey_class: *mut std::ffi::c_void,
+            dw_hot_key: u32,
+            h_icon_or_monitor: *mut std::ffi::c_void,
+            h_process: *mut std::ffi::c_void,
+        }
+
+        extern "system" {
+            fn ShellExecuteExW(info: *mut ShellExecuteInfoW) -> i32;
+        }
+
+        let mut info = ShellExecuteInfoW {
+            cb_size: std::mem::size_of::<ShellExecuteInfoW>() as u32,
+            f_mask: 0,
+            hwnd: ptr::null_mut(),
+            lp_verb: verb_wide.as_ptr(),
+            lp_file: exe_wide.as_ptr(),
+            lp_parameters: args_wide.as_ptr(),
+            lp_directory: ptr::null(),
+            n_show: 1, // SW_SHOWNORMAL
+            h_inst_app: ptr::null_mut(),
+            lp_id_list: ptr::null_mut(),
+            lp_class: ptr::null(),
+            hkey_class: ptr::null_mut(),
+            dw_hot_key: 0,
+            h_icon_or_monitor: ptr::null_mut(),
+            h_process: ptr::null_mut(),
+        };
+
+        unsafe {
+            ShellExecuteExW(&mut info);
+        }
+
+        std::process::exit(0);
+    }
+
+    pub fn uninstall() -> Result<(), String> {
+        use windows_service::service::ServiceAccess;
+        use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+
+        let manager = ServiceManager::local_computer(
+            None::<&str>,
+            ServiceManagerAccess::CONNECT,
+        ).map_err(|e| format!("Failed to open service manager (run as admin): {e}"))?;
+
+        let service = manager
+            .open_service(SERVICE_NAME, ServiceAccess::DELETE | ServiceAccess::STOP)
+            .map_err(|e| format!("Service not found: {e}"))?;
+
+        // Try to stop first
+        let _ = service.stop();
+        std::thread::sleep(std::time::Duration::from_secs(1));
+
+        service.delete()
+            .map_err(|e| format!("Failed to delete service: {e}"))?;
+
+        println!("Service '{SERVICE_DISPLAY_NAME}' uninstalled.");
+        Ok(())
+    }
+}
 
 #[tokio::main]
 async fn main() {
@@ -238,6 +670,104 @@ async fn main() {
         .init();
 
     let args = Args::parse();
+
+    // Handle Windows Service modes
+    #[cfg(target_os = "windows")]
+    {
+        if args.service {
+            // Running as a Windows Service — hand off to the service dispatcher
+            match win_service::run_as_service() {
+                Ok(()) => std::process::exit(0),
+                Err(e) => {
+                    eprintln!("Service error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        if args.install_service {
+            match win_service::install() {
+                Ok(()) => {
+                    rfd::MessageDialog::new()
+                        .set_title("Punchd VPN")
+                        .set_description("Punchd VPN service installed and started.\n\nIt will start automatically on boot.")
+                        .set_level(rfd::MessageLevel::Info)
+                        .set_buttons(rfd::MessageButtons::Ok)
+                        .show();
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    rfd::MessageDialog::new()
+                        .set_title("Punchd VPN — Error")
+                        .set_description(&format!("Failed to install service:\n{e}"))
+                        .set_level(rfd::MessageLevel::Error)
+                        .set_buttons(rfd::MessageButtons::Ok)
+                        .show();
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        if args.uninstall_service {
+            match win_service::uninstall() {
+                Ok(()) => {
+                    rfd::MessageDialog::new()
+                        .set_title("Punchd VPN")
+                        .set_description("Punchd VPN service uninstalled.")
+                        .set_level(rfd::MessageLevel::Info)
+                        .set_buttons(rfd::MessageButtons::Ok)
+                        .show();
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    rfd::MessageDialog::new()
+                        .set_title("Punchd VPN — Error")
+                        .set_description(&format!("Failed to uninstall service:\n{e}"))
+                        .set_level(rfd::MessageLevel::Error)
+                        .set_buttons(rfd::MessageButtons::Ok)
+                        .show();
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        // Double-click (no flags, not standalone): GUI installer
+        if !args.standalone {
+            // Check if config exists — run setup wizard if not
+            let file_cfg = load_file_config();
+            let has_config = file_cfg.stun_server.is_some() && file_cfg.gateway_id.is_some();
+
+            if !has_config {
+                run_first_time_setup();
+            }
+
+            // Install as service (with UAC if needed)
+            if win_service::is_elevated() {
+                match win_service::install() {
+                    Ok(()) => {
+                        rfd::MessageDialog::new()
+                            .set_title("Punchd VPN")
+                            .set_description("Punchd VPN service installed and started.\n\nIt will start automatically on boot.\nConfig: C:\\ProgramData\\punchd-vpn\\vpn-config.toml")
+                            .set_level(rfd::MessageLevel::Info)
+                            .set_buttons(rfd::MessageButtons::Ok)
+                            .show();
+                        std::process::exit(0);
+                    }
+                    Err(e) => {
+                        rfd::MessageDialog::new()
+                            .set_title("Punchd VPN — Error")
+                            .set_description(&format!("Failed to install service:\n{e}"))
+                            .set_level(rfd::MessageLevel::Error)
+                            .set_buttons(rfd::MessageButtons::Ok)
+                            .show();
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                win_service::elevate_and_install();
+            }
+        }
+    }
 
     // Start agent HTTP server in the background (unless --standalone)
     if !args.standalone {
@@ -281,21 +811,44 @@ async fn main() {
                 default_route,
             };
 
-            if let Err(e) = run_vpn(resolved).await {
-                tracing::error!("VPN error: {}", e);
-                if args.standalone {
+            if args.standalone {
+                // Standalone: single attempt, exit on failure
+                if let Err(e) = run_vpn(resolved).await {
+                    tracing::error!("VPN error: {}", e);
                     eprintln!("\nPress Enter to exit...");
                     let _ = std::io::Read::read(&mut std::io::stdin(), &mut [0u8]);
                     std::process::exit(1);
                 }
+            } else {
+                // Agent mode: auto-reconnect with exponential backoff
+                let resolved = Arc::new(resolved);
+                tokio::spawn(async move {
+                    let mut backoff_secs: u64 = 2;
+                    const MAX_BACKOFF: u64 = 60;
+
+                    loop {
+                        tracing::info!("[VPN] Connecting...");
+                        match run_vpn((*resolved).clone()).await {
+                            Ok(()) => {
+                                tracing::info!("[VPN] Disconnected cleanly");
+                                backoff_secs = 2; // reset on clean disconnect
+                            }
+                            Err(e) => {
+                                tracing::error!("[VPN] Connection error: {e}");
+                            }
+                        }
+                        tracing::info!("[VPN] Reconnecting in {backoff_secs}s...");
+                        tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                        backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF);
+                    }
+                });
             }
         }
     }
 
-    // If not standalone and no config to auto-connect, just keep agent running
+    // If not standalone, keep agent running (HTTP server + reconnect loop in background)
     if !args.standalone {
         tracing::info!("Agent running. Waiting for browser connections...");
-        // Keep alive — agent runs in the background task
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
         }
@@ -531,6 +1084,7 @@ async fn run_agent() -> Result<(), String> {
     }
 }
 
+#[derive(Clone)]
 struct ResolvedConfig {
     stun_server: String,
     gateway_id: String,

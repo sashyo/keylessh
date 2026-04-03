@@ -98,7 +98,7 @@ async fn main() {
             .to_string_lossy()
             .to_string()
     });
-    let _stun_reg = stun::stun_client::register(stun::stun_client::StunRegistrationOptions {
+    let stun_reg = stun::stun_client::register(stun::stun_client::StunRegistrationOptions {
         stun_server_url: config.stun_server_url.clone(),
         gateway_id: config.gateway_id.clone(),
         addresses: vec![format!("{}:{}", local_addr, config.listen_port)],
@@ -157,6 +157,33 @@ async fn main() {
             let new_auth = Arc::new(auth::tidecloak::TidecloakAuth::new(&new_tc_config, &new_extra_issuers));
 
             proxy::http_proxy::reload_state(&shared, &new_config, &new_tc_config, new_auth, use_tls);
+
+            // Re-register with signal server so it picks up new backends
+            let hosts_tc_locally = match &new_config.tc_internal_url {
+                None => true,
+                Some(url) => {
+                    let u = url.to_lowercase();
+                    u.contains("localhost") || u.contains("127.0.0.1") || u.contains("[::1]")
+                }
+            };
+            let mut meta = serde_json::json!({
+                "displayName": new_config.display_name,
+                "description": new_config.description,
+                "backends": new_config.backends.iter().map(|b| {
+                    let mut entry = serde_json::json!({
+                        "name": b.name,
+                        "protocol": b.protocol,
+                    });
+                    if b.auth == crate::config::BackendAuth::EdDSA {
+                        entry["auth"] = serde_json::json!("eddsa");
+                    }
+                    entry
+                }).collect::<Vec<_>>(),
+            });
+            if hosts_tc_locally {
+                meta["realm"] = serde_json::json!(new_tc_config.realm);
+            }
+            stun_reg.update_metadata(meta);
         });
     }
     config::watch_config_and_restart();

@@ -53,6 +53,8 @@ tun = { version = "0.7", features = ["async"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 wintun = "0.5"
+windows-service = "0.7"
+rfd = "0.15"
 
 [[bin]]
 name = "punchd-bridge-rs"

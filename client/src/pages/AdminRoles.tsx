@@ -109,6 +109,7 @@ export default function AdminRoles() {
     network: string;
     prefix: string;
     ports: string;
+    priority: string;
   }>>([]);
 
   const normalizeSshRoleName = (value: string) => {
@@ -442,10 +443,11 @@ export default function AdminRoles() {
           const network = rule.network.trim() || "0.0.0.0";
           const prefix = rule.prefix.trim() || "0";
           const ports = rule.ports.trim() || "*";
-          const fwRoleName = `vpn:${vpnGatewayId}:${rule.action}:${network}/${prefix}:${ports}`;
+          const priority = rule.priority?.trim() || "0";
+          const fwRoleName = `vpn:${vpnGatewayId}:${rule.action}:${network}/${prefix}:${ports}:${priority}`;
           // Create each firewall rule as a separate role
           try {
-            await api.admin.roles.create({ name: fwRoleName, description: `VPN firewall: ${rule.action} ${network}/${prefix} ports ${ports}` });
+            await api.admin.roles.create({ name: fwRoleName, description: `VPN firewall: ${rule.action} ${network}/${prefix} ports ${ports} (priority ${priority})` });
           } catch {
             // Role may already exist, that's fine
           }
@@ -1156,7 +1158,7 @@ export default function AdminRoles() {
                           type="button"
                           size="sm"
                           variant="outline"
-                          onClick={() => setVpnFirewallRules([...vpnFirewallRules, { action: "allow", network: "", prefix: "24", ports: "*" }])}
+                          onClick={() => setVpnFirewallRules([...vpnFirewallRules, { action: "allow", network: "", prefix: "24", ports: "*", priority: "0" }])}
                         >
                           <Plus className="h-3 w-3 mr-1" /> Add Rule
                         </Button>
@@ -1169,69 +1171,91 @@ export default function AdminRoles() {
                       )}
 
                       {vpnFirewallRules.map((rule, idx) => (
-                        <div key={idx} className="flex items-center gap-2 p-2 border rounded-md bg-muted/30">
-                          <Select
-                            value={rule.action}
-                            onValueChange={(v) => {
-                              const updated = [...vpnFirewallRules];
-                              updated[idx] = { ...rule, action: v as "allow" | "deny" };
-                              setVpnFirewallRules(updated);
-                            }}
-                          >
-                            <SelectTrigger className="w-24">
-                              <SelectValue />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="allow">Allow</SelectItem>
-                              <SelectItem value="deny">Deny</SelectItem>
-                            </SelectContent>
-                          </Select>
-                          <Input
-                            className="flex-1"
-                            placeholder="Network (e.g. 192.168.0.0)"
-                            value={rule.network}
-                            onChange={(e) => {
-                              const updated = [...vpnFirewallRules];
-                              updated[idx] = { ...rule, network: e.target.value };
-                              setVpnFirewallRules(updated);
-                            }}
-                          />
-                          <span className="text-muted-foreground">/</span>
-                          <Input
-                            className="w-16"
-                            placeholder="24"
-                            value={rule.prefix}
-                            onChange={(e) => {
-                              const updated = [...vpnFirewallRules];
-                              updated[idx] = { ...rule, prefix: e.target.value };
-                              setVpnFirewallRules(updated);
-                            }}
-                          />
-                          <Input
-                            className="w-28"
-                            placeholder="Ports (* or 80,443)"
-                            value={rule.ports}
-                            onChange={(e) => {
-                              const updated = [...vpnFirewallRules];
-                              updated[idx] = { ...rule, ports: e.target.value };
-                              setVpnFirewallRules(updated);
-                            }}
-                          />
-                          <Button
-                            type="button"
-                            size="icon"
-                            variant="ghost"
-                            className="h-8 w-8 shrink-0"
-                            onClick={() => setVpnFirewallRules(vpnFirewallRules.filter((_, i) => i !== idx))}
-                          >
-                            <Trash2 className="h-3 w-3" />
-                          </Button>
+                        <div key={idx} className="p-3 border rounded-md bg-muted/30 space-y-2">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-medium text-muted-foreground">Rule {idx + 1}</span>
+                            <Button
+                              type="button"
+                              size="icon"
+                              variant="ghost"
+                              className="h-6 w-6 shrink-0"
+                              onClick={() => setVpnFirewallRules(vpnFirewallRules.filter((_, i) => i !== idx))}
+                            >
+                              <Trash2 className="h-3 w-3" />
+                            </Button>
+                          </div>
+                          <div className="grid grid-cols-[100px_1fr] gap-2 items-center">
+                            <Label className="text-xs">Action</Label>
+                            <Select
+                              value={rule.action}
+                              onValueChange={(v) => {
+                                const updated = [...vpnFirewallRules];
+                                updated[idx] = { ...rule, action: v as "allow" | "deny" };
+                                setVpnFirewallRules(updated);
+                              }}
+                            >
+                              <SelectTrigger>
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="allow">Allow</SelectItem>
+                                <SelectItem value="deny">Deny</SelectItem>
+                              </SelectContent>
+                            </Select>
+
+                            <Label className="text-xs">Network</Label>
+                            <div className="flex items-center gap-1">
+                              <Input
+                                className="flex-1"
+                                placeholder="192.168.0.0"
+                                value={rule.network}
+                                onChange={(e) => {
+                                  const updated = [...vpnFirewallRules];
+                                  updated[idx] = { ...rule, network: e.target.value };
+                                  setVpnFirewallRules(updated);
+                                }}
+                              />
+                              <span className="text-muted-foreground">/</span>
+                              <Input
+                                className="w-16"
+                                placeholder="24"
+                                value={rule.prefix}
+                                onChange={(e) => {
+                                  const updated = [...vpnFirewallRules];
+                                  updated[idx] = { ...rule, prefix: e.target.value };
+                                  setVpnFirewallRules(updated);
+                                }}
+                              />
+                            </div>
+
+                            <Label className="text-xs">Ports</Label>
+                            <Input
+                              placeholder="* (all) or 80,443"
+                              value={rule.ports}
+                              onChange={(e) => {
+                                const updated = [...vpnFirewallRules];
+                                updated[idx] = { ...rule, ports: e.target.value };
+                                setVpnFirewallRules(updated);
+                              }}
+                            />
+
+                            <Label className="text-xs">Priority</Label>
+                            <Input
+                              placeholder="0"
+                              value={rule.priority}
+                              onChange={(e) => {
+                                const updated = [...vpnFirewallRules];
+                                updated[idx] = { ...rule, priority: e.target.value };
+                                setVpnFirewallRules(updated);
+                              }}
+                            />
+                          </div>
                         </div>
                       ))}
 
                       {vpnFirewallRules.length > 0 && (
                         <p className="text-xs text-muted-foreground">
-                          Deny rules are checked first. If any rules exist, traffic not matching an allow rule is blocked by default.
+                          Rules are evaluated highest priority first. First matching rule wins. If rules exist but none match, traffic is blocked by default.
                         </p>
                       )}
                     </div>
