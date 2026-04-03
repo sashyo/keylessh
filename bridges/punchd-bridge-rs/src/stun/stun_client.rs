@@ -47,6 +47,7 @@ pub struct StunRegistrationOptions {
 #[allow(dead_code)]
 pub struct StunRegistration {
     shutdown_tx: mpsc::Sender<()>,
+    re_register_tx: mpsc::UnboundedSender<serde_json::Value>,
 }
 
 impl StunRegistration {
@@ -54,12 +55,18 @@ impl StunRegistration {
     pub fn close(&self) {
         let _ = self.shutdown_tx.try_send(());
     }
+
+    /// Send updated metadata to the signal server (re-register with new backends etc.)
+    pub fn update_metadata(&self, metadata: serde_json::Value) {
+        let _ = self.re_register_tx.send(metadata);
+    }
 }
 
 /// Register with the STUN signaling server. Returns a handle that can be
 /// used to close the registration.
 pub fn register(options: StunRegistrationOptions) -> StunRegistration {
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
+    let (re_register_tx, mut re_register_rx) = mpsc::unbounded_channel::<serde_json::Value>();
     let options = Arc::new(options);
 
     tokio::spawn(async move {
@@ -108,7 +115,7 @@ pub fn register(options: StunRegistrationOptions) -> StunRegistration {
         }
     });
 
-    StunRegistration { shutdown_tx }
+    StunRegistration { shutdown_tx, re_register_tx }
 }
 
 enum ConnectionResult {
@@ -328,6 +335,23 @@ async fn connect_and_run(
             }
             _ = shutdown_rx.recv() => {
                 break ConnectionResult::Shutdown;
+            }
+            Some(new_metadata) = re_register_rx.recv() => {
+                // Re-register with updated metadata (e.g. new backends after config hot-reload)
+                let register_msg = json!({
+                    "type": "register",
+                    "role": "gateway",
+                    "id": options.gateway_id,
+                    "secret": options.api_secret,
+                    "addresses": options.addresses,
+                    "metadata": new_metadata,
+                });
+                let mut sink = ws_sink.lock().await;
+                if let Err(e) = sink.send(Message::Text(serde_json::to_string(&register_msg).unwrap().into())).await {
+                    tracing::warn!("[STUN-Reg] Re-register failed: {e}");
+                } else {
+                    tracing::info!("[STUN-Reg] Re-registered with updated metadata");
+                }
             }
         }
     };
