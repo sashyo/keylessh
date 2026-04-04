@@ -219,19 +219,8 @@ async fn handle_signaling(socket: WebSocket, client_ip: String, state: AppState)
                     _ => {}
                 }
             }
-            Message::Binary(data) => {
-                // Binary relay frames from gateway (0x52 magic byte)
-                if data.len() >= 4 && data[0] == 0x52 {
-                    let sid_len = ((data[1] as usize) << 8) | (data[2] as usize);
-                    if data.len() >= 3 + sid_len {
-                        let sid = String::from_utf8_lossy(&data[3..3+sid_len]).to_string();
-                        let frame_data = &data[3+sid_len..];
-                        // Forward gateway response to relay WebTransport session
-                        if let Some(session) = state.relay_sessions.get(&sid) {
-                            let _ = session.response_tx.send(frame_data.to_vec());
-                        }
-                    }
-                }
+            Message::Binary(_) => {
+                // Binary messages not used (QUIC relay removed)
             }
             Message::Pong(_) => {}
             Message::Close(_) => break,

@@ -24,8 +24,8 @@ tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 native-tls = "0.2"
 futures-util = "0.3"
 
-# WebTransport/QUIC relay
-wtransport = { version = "0.7", features = ["self-signed"] }
+# WebTransport/QUIC (kept for potential future VPN relay, not used by browser connections)
+# wtransport = { version = "0.7", features = ["self-signed"] }
 
 # HTTP client (for TideCloak proxy)
 reqwest = { version = "0.12", features = ["json"] }

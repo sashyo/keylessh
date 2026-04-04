@@ -64,16 +64,8 @@ async fn main() {
         tracing::info!("[Signal] API Secret: set");
     }
 
-    // Start QUIC relay endpoint (WebTransport on UDP)
-    if let (Some(ref cert), Some(ref key)) = (&state.config.tls_cert_path, &state.config.tls_key_path) {
-        let relay_state = state.clone();
-        let cert = cert.clone();
-        let key = key.clone();
-        let relay_port = state.config.relay_port;
-        tokio::spawn(async move {
-            quic::endpoint::start_relay_endpoint(relay_state, &cert, &key, relay_port).await;
-        });
-    }
+    // QUIC relay removed — browser connections use WebRTC DataChannel.
+    // VPN clients connect directly to the gateway's wtransport endpoint.
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
 
