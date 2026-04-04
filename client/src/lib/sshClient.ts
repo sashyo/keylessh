@@ -523,8 +523,10 @@ export class BrowserSSHClient {
         this.cleanup();
       });
 
-      // Wait for TCP bridge to confirm connection
-      await this.waitForTcpConnection();
+      // Wait for TCP bridge to confirm connection (skip for QUIC — already confirmed via 0x01 byte)
+      if (useWebSocket) {
+        await this.waitForTcpConnection();
+      }
 
       // Create SSH session configuration
       const config = new SshSessionConfiguration(true);
