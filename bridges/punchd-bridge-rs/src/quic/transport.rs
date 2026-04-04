@@ -42,7 +42,8 @@ pub fn make_server_config() -> (ServerConfig, String) {
         .with_single_cert(certs, key)
         .expect("Failed to create TLS config");
 
-    tls_config.alpn_protocols = vec![b"punchd".to_vec()];
+    // WebTransport (browser) uses h3; native punchd clients use "punchd"
+    tls_config.alpn_protocols = vec![b"h3".to_vec(), b"punchd".to_vec()];
 
     let mut transport = TransportConfig::default();
     transport.max_idle_timeout(Some(

@@ -73,69 +73,27 @@ pub fn register(options: StunRegistrationOptions) -> StunRegistration {
     tokio::spawn(async move {
         let mut reconnect_delay_ms: u64 = 1000;
 
-        // Create shared QUIC endpoint ONCE (survives reconnects)
+        // Start WebTransport server ONCE (survives reconnects)
         let quic_port = options.quic_port;
-        let quic_bind: std::net::SocketAddr = format!("0.0.0.0:{quic_port}").parse().unwrap();
-        let (quic_endpoint, quic_cert_hash) = match crate::quic::transport::create_server_endpoint(quic_bind) {
-            Ok((ep, hash)) => {
-                tracing::info!("[QUIC] Shared endpoint listening on 0.0.0.0:{quic_port} (cert: {hash})");
-                (ep, hash)
-            }
+        let wt_server = crate::quic::webtransport::WebTransportServer::new(
+            crate::quic::webtransport::WebTransportServerOptions {
+                port: quic_port,
+                listen_port: options.listen_port,
+                use_tls: options.use_tls,
+                gateway_id: options.gateway_id.clone(),
+                backends: options.backends.clone(),
+                auth: options.auth.clone(),
+                vpn_state: options.vpn_state.clone(),
+            },
+        );
+        let quic_cert_hash = match wt_server.run().await {
+            Ok(hash) => hash,
             Err(e) => {
-                tracing::error!("[QUIC] Failed to create endpoint on port {quic_port}: {e}");
-                // Can't proceed without QUIC — but still allow WebSocket relay
-                // Create a dummy endpoint that will never accept
-                tracing::warn!("[QUIC] QUIC disabled — WebSocket relay only");
-                // Use port 0 as fallback
-                match crate::quic::transport::create_server_endpoint("0.0.0.0:0".parse().unwrap()) {
-                    Ok((ep, hash)) => (ep, hash),
-                    Err(e2) => {
-                        tracing::error!("[QUIC] Fallback endpoint also failed: {e2}");
-                        return;
-                    }
-                }
+                tracing::error!("[WT] Failed to start WebTransport server: {e}");
+                tracing::warn!("[WT] WebTransport disabled — WebSocket relay only");
+                String::new()
             }
         };
-
-        // Run QUIC accept loop in background (persists across reconnects)
-        let quic_ep_accept = quic_endpoint.clone();
-        let quic_opts = options.clone();
-        let quic_accept_task = tokio::spawn(async move {
-            loop {
-                match quic_ep_accept.accept().await {
-                    Some(incoming) => {
-                        let opts = quic_opts.clone();
-                        tokio::spawn(async move {
-                            match incoming.await {
-                                Ok(conn) => {
-                                    let remote = conn.remote_address();
-                                    tracing::info!("[QUIC] Client connected from {remote}");
-                                    let handler = crate::quic::peer_handler::QuicPeerHandler::new(
-                                        crate::quic::peer_handler::QuicPeerHandlerOptions {
-                                            listen_port: opts.listen_port,
-                                            use_tls: opts.use_tls,
-                                            gateway_id: opts.gateway_id.clone(),
-                                            send_signaling: mpsc::unbounded_channel().0, // TODO: wire up if needed
-                                            backends: opts.backends.clone(),
-                                            auth: opts.auth.clone(),
-                                            vpn_state: opts.vpn_state.clone(),
-                                        },
-                                    );
-                                    handler.handle_connection(conn, remote.to_string()).await;
-                                }
-                                Err(e) => {
-                                    tracing::error!("[QUIC] Incoming connection failed: {e}");
-                                }
-                            }
-                        });
-                    }
-                    None => {
-                        tracing::info!("[QUIC] Endpoint closed");
-                        break;
-                    }
-                }
-            }
-        });
 
         loop {
             // Check for shutdown before attempting connection
@@ -179,8 +137,7 @@ pub fn register(options: StunRegistrationOptions) -> StunRegistration {
             reconnect_delay_ms = (reconnect_delay_ms * 2).min(30000);
         }
 
-        quic_accept_task.abort();
-        quic_endpoint.close(0u32.into(), b"shutdown");
+        // WebTransport server runs in background and doesn't need explicit cleanup
     });
 
     StunRegistration { shutdown_tx, re_register_tx }
