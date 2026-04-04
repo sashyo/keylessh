@@ -198,12 +198,10 @@ async fn handle_stream(
             handle_ssh(send, recv, options).await
         }
         stream_type::HTTP => {
-            tracing::info!("[WT] HTTP stream (not yet implemented over WebTransport)");
-            Ok(())
+            handle_http(send, recv, options).await
         }
         stream_type::WEBSOCKET => {
-            tracing::info!("[WT] WS stream (not yet implemented over WebTransport)");
-            Ok(())
+            handle_ws(send, recv, options).await
         }
         other => {
             tracing::warn!("[WT] Unknown stream type 0x{other:02x}");
@@ -311,5 +309,196 @@ async fn handle_ssh(
     }
 
     tracing::info!("[WT] SSH session ended for {host}");
+    Ok(())
+}
+
+/// HTTP tunnel over WebTransport stream.
+/// Protocol: [method_len:u8][method][url_len:u16][url][headers_len:u32][headers_json][body...]
+/// Response: [status:u16][headers_len:u32][headers_json][body...]
+async fn handle_http(
+    mut send: wtransport::SendStream,
+    mut recv: wtransport::RecvStream,
+    options: Arc<WebTransportServerOptions>,
+) -> Result<(), String> {
+    // Read method
+    let mut method_len = [0u8; 1];
+    recv.read_exact(&mut method_len).await.map_err(|e| format!("method len: {e}"))?;
+    let mut method = vec![0u8; method_len[0] as usize];
+    recv.read_exact(&mut method).await.map_err(|e| format!("method: {e}"))?;
+    let method = String::from_utf8_lossy(&method).to_string();
+
+    // Read URL
+    let mut url_len = [0u8; 2];
+    recv.read_exact(&mut url_len).await.map_err(|e| format!("url len: {e}"))?;
+    let url_len = u16::from_be_bytes(url_len) as usize;
+    let mut url = vec![0u8; url_len];
+    recv.read_exact(&mut url).await.map_err(|e| format!("url: {e}"))?;
+    let url = String::from_utf8_lossy(&url).to_string();
+
+    // Read headers JSON
+    let mut headers_len = [0u8; 4];
+    recv.read_exact(&mut headers_len).await.map_err(|e| format!("headers len: {e}"))?;
+    let headers_len = u32::from_be_bytes(headers_len) as usize;
+    let mut headers_json = vec![0u8; headers_len];
+    recv.read_exact(&mut headers_json).await.map_err(|e| format!("headers: {e}"))?;
+
+    // Read body (rest of stream)
+    let mut body = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        match recv.read(&mut buf).await {
+            Ok(Some(n)) if n > 0 => body.extend_from_slice(&buf[..n]),
+            _ => break,
+        }
+    }
+
+    tracing::info!("[WT] HTTP {method} {url}");
+
+    let scheme = if options.use_tls { "https" } else { "http" };
+    let local_url = format!("{scheme}://127.0.0.1:{}{url}", options.listen_port);
+
+    let http_client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+
+    let headers_map: std::collections::HashMap<String, String> =
+        serde_json::from_slice(&headers_json).unwrap_or_default();
+
+    let mut req_builder = match method.as_str() {
+        "GET" => http_client.get(&local_url),
+        "POST" => http_client.post(&local_url),
+        "PUT" => http_client.put(&local_url),
+        "DELETE" => http_client.delete(&local_url),
+        "PATCH" => http_client.patch(&local_url),
+        "HEAD" => http_client.head(&local_url),
+        _ => http_client.get(&local_url),
+    };
+
+    for (k, v) in &headers_map {
+        req_builder = req_builder.header(k.as_str(), v.as_str());
+    }
+    if !body.is_empty() {
+        req_builder = req_builder.body(body);
+    }
+
+    match req_builder.send().await {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            let resp_headers: std::collections::HashMap<String, String> = resp.headers().iter()
+                .filter_map(|(k, v)| v.to_str().ok().map(|v| (k.to_string(), v.to_string())))
+                .collect();
+            let resp_headers_json = serde_json::to_string(&resp_headers).unwrap_or_default();
+            let resp_body = resp.bytes().await.unwrap_or_default();
+
+            let _ = send.write_all(&status.to_be_bytes()).await;
+            let _ = send.write_all(&(resp_headers_json.len() as u32).to_be_bytes()).await;
+            let _ = send.write_all(resp_headers_json.as_bytes()).await;
+            let _ = send.write_all(&resp_body).await;
+        }
+        Err(e) => {
+            tracing::error!("[WT] HTTP proxy error: {e}");
+            let status = 502u16;
+            let resp_headers = serde_json::json!({"content-type": "application/json"}).to_string();
+            let resp_body = serde_json::json!({"error": format!("Proxy error: {e}")}).to_string();
+            let _ = send.write_all(&status.to_be_bytes()).await;
+            let _ = send.write_all(&(resp_headers.len() as u32).to_be_bytes()).await;
+            let _ = send.write_all(resp_headers.as_bytes()).await;
+            let _ = send.write_all(resp_body.as_bytes()).await;
+        }
+    }
+
+    Ok(())
+}
+
+/// WebSocket tunnel over WebTransport stream (RDCleanPath, tcp-forward).
+/// Protocol: [path_len:u16][path] then bidirectional byte bridge to local WS.
+async fn handle_ws(
+    mut send: wtransport::SendStream,
+    mut recv: wtransport::RecvStream,
+    options: Arc<WebTransportServerOptions>,
+) -> Result<(), String> {
+    // Read WS path (length-prefixed)
+    let mut path_len = [0u8; 2];
+    recv.read_exact(&mut path_len).await.map_err(|e| format!("path len: {e}"))?;
+    let path_len = u16::from_be_bytes(path_len) as usize;
+    let mut path = vec![0u8; path_len];
+    recv.read_exact(&mut path).await.map_err(|e| format!("path: {e}"))?;
+    let path = String::from_utf8_lossy(&path).to_string();
+
+    tracing::info!("[WT] WS stream: {path}");
+
+    let (base_path, _) = path.split_once('?').unwrap_or((&path, ""));
+
+    match base_path {
+        "/ws/rdcleanpath" | "/ws/tcp-forward" | "/ws/ssh" => {
+            let scheme = if options.use_tls { "wss" } else { "ws" };
+            let ws_url = format!("{scheme}://127.0.0.1:{}{path}", options.listen_port);
+
+            tracing::info!("[WT] Proxying WS to local: {ws_url}");
+
+            let connector = tokio_tungstenite::Connector::NativeTls(
+                native_tls::TlsConnector::builder()
+                    .danger_accept_invalid_certs(true)
+                    .build()
+                    .unwrap(),
+            );
+
+            let ws_result = tokio_tungstenite::connect_async_tls_with_config(
+                &ws_url, None, false, Some(connector),
+            ).await;
+
+            let (ws_stream, _) = match ws_result {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!("[WT] Local WS connect failed: {e}");
+                    return Err(format!("WS connect failed: {e}"));
+                }
+            };
+
+            let (mut ws_sink, mut ws_stream) = futures_util::StreamExt::split(ws_stream);
+
+            // WebTransport recv → local WS send
+            let wt_to_ws = async {
+                let mut buf = vec![0u8; 65536];
+                loop {
+                    match recv.read(&mut buf).await {
+                        Ok(Some(n)) if n > 0 => {
+                            use futures_util::SinkExt;
+                            if ws_sink.send(tokio_tungstenite::tungstenite::Message::Binary(buf[..n].to_vec().into())).await.is_err() {
+                                break;
+                            }
+                        }
+                        _ => break,
+                    }
+                }
+            };
+
+            // Local WS recv → WebTransport send
+            let ws_to_wt = async {
+                use futures_util::StreamExt;
+                while let Some(Ok(msg)) = ws_stream.next().await {
+                    match msg {
+                        tokio_tungstenite::tungstenite::Message::Binary(data) => {
+                            if send.write_all(&data).await.is_err() { break; }
+                        }
+                        tokio_tungstenite::tungstenite::Message::Text(text) => {
+                            if send.write_all(text.as_bytes()).await.is_err() { break; }
+                        }
+                        tokio_tungstenite::tungstenite::Message::Close(_) => break,
+                        _ => {}
+                    }
+                }
+            };
+
+            tokio::join!(wt_to_ws, ws_to_wt);
+            tracing::info!("[WT] WS stream ended: {path}");
+        }
+        _ => {
+            tracing::warn!("[WT] Unknown WS path: {base_path}");
+        }
+    }
+
     Ok(())
 }
