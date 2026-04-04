@@ -24,4 +24,5 @@ bridges/punchd-bridge-rs/dist/
 # Environment (keep .env.example, ignore local .env)
 .env
 .env.local
-.env.*.localsignal-server-rs/target/
+.env.*.local
+signal-server-rs/target/
