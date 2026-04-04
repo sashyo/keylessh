@@ -710,14 +710,17 @@ signalWss.on("connection", (ws: WebSocket, req) => {
 
     // Check for binary relay frames from gateway (magic byte 0x52 = 'R')
     const buf = Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
-    if (buf.length > 3 && buf[0] === 0x52) {
+    if (buf.length >= 4 && buf[0] === 0x52) {
       // Relay frame: [0x52][sessionId_len:u16][sessionId][stream frame data]
       const sidLen = (buf[1] << 8) | buf[2];
       const sid = buf.subarray(3, 3 + sidLen).toString();
       const frameData = buf.subarray(3 + sidLen);
       const session = relaySessions.get(sid);
-      if (session?.sidecarWs?.readyState === ws.OPEN) {
+      if (session?.sidecarWs?.readyState === 1) { // WebSocket.OPEN
+        console.log(`[Relay] Forwarding ${frameData.length}b response to sidecar for session ${sid.substring(0, 8)}`);
         session.sidecarWs.send(frameData);
+      } else {
+        console.log(`[Relay] No sidecar for session ${sid.substring(0, 8)} (state: ${session?.sidecarWs?.readyState})`);
       }
       return;
     }
