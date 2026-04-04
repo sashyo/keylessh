@@ -168,7 +168,8 @@
     if (relayUrl) {
       try {
         console.log("[QUIC] Connecting to relay for hole-punch:", relayUrl);
-        relayTransport = new WebTransport("https://" + relayUrl);
+        const relayGwParam = pairedGatewayId ? "?gateway=" + encodeURIComponent(pairedGatewayId) : "";
+        relayTransport = new WebTransport("https://" + relayUrl + relayGwParam);
         await Promise.race([
           relayTransport.ready,
           new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 5000)),

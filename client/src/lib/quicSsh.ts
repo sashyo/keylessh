@@ -92,7 +92,8 @@ export async function connectQuicSsh(options: QuicSshOptions): Promise<WebSocket
   if (gatewayInfo.relayUrl) {
     try {
       console.log("[SSH] Connecting to relay for hole-punch:", gatewayInfo.relayUrl);
-      relayTransport = new WebTransport(`https://${gatewayInfo.relayUrl}`);
+      const relayGwParam = gatewayId ? `?gateway=${encodeURIComponent(gatewayId)}` : "";
+      relayTransport = new WebTransport(`https://${gatewayInfo.relayUrl}${relayGwParam}`);
       await Promise.race([
         relayTransport.ready,
         new Promise((_, reject) => setTimeout(() => reject(new Error("Relay timeout")), 5000)),

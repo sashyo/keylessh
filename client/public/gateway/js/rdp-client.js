@@ -434,7 +434,7 @@
     return bytes;
   }
 
-  async function connectQuicForRdp(address, certHash, relayUrl) {
+  async function connectQuicForRdp(address, certHash, relayUrl, gatewayId) {
     // Coordinated hole-punch: connect relay first, trigger punch, then try direct
     var directUrl = "https://" + address;
     var directOptions = {};
@@ -451,7 +451,8 @@
     if (relayUrl) {
       try {
         console.log("[RDP] Connecting to relay for hole-punch:", relayUrl);
-        relayTransport = new WebTransport("https://" + relayUrl);
+        var relayFullUrl = "https://" + relayUrl + "?gateway=" + encodeURIComponent(gatewayId || "");
+        relayTransport = new WebTransport(relayFullUrl);
         await Promise.race([
           relayTransport.ready,
           new Promise(function (_, reject) { setTimeout(function () { reject(new Error("timeout")); }, 5000); }),
@@ -846,7 +847,7 @@
         if (msg.address && msg.certHash) {
           console.log("[RDP] QUIC address:", msg.address, "cert:", msg.certHash.slice(0, 16) + "...");
           if (quicTimeout) { clearTimeout(quicTimeout); quicTimeout = null; }
-          connectQuicForRdp(msg.address, msg.certHash, msg.relayUrl);
+          connectQuicForRdp(msg.address, msg.certHash, msg.relayUrl, msg.gatewayId || pairedGatewayId);
         }
         break;
 

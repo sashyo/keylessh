@@ -526,9 +526,11 @@ relayWss.on("connection", (ws: WebSocket, req) => {
 
   console.log(`[Relay] Sidecar connected: session=${sessionId} clientAddr=${clientAddr}`);
 
-  // Find the target gateway — for now use the first available
-  // TODO: use client's targetGatewayId from signaling to pick the right gateway
-  const gateway = registry.getAvailableGateway();
+  // Find the target gateway — use gatewayId from sidecar query param
+  const targetGatewayId = url.searchParams.get("gateway") || "";
+  const gateway = targetGatewayId
+    ? registry.getGateway(targetGatewayId)
+    : registry.getAvailableGateway();
   if (!gateway) {
     console.log(`[Relay] No gateway available for session ${sessionId}`);
     ws.close(4004, "No gateway available");
@@ -901,7 +903,7 @@ function handleQuicAddress(ws: WebSocket, msg: SignalMessage): void {
   // Forward the full quic_address message to the target peer
   const target = registry.getClient(msg.targetId) || registry.getGateway(msg.targetId);
   if (target) {
-    // Include relay URL so browser can fall back to relayed QUIC
+    // Include relay URL with gatewayId so relay routes to correct gateway
     const relayHost = process.env.RELAY_HOST || "punchd.keylessh.com";
     const relayPort = process.env.RELAY_PORT || "7893";
     safeSend(target.ws, {
@@ -910,6 +912,7 @@ function handleQuicAddress(ws: WebSocket, msg: SignalMessage): void {
       address,
       certHash: (msg as any).certHash,
       relayUrl: `${relayHost}:${relayPort}`,
+      gatewayId: fromId,
     });
   }
 }
