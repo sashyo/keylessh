@@ -526,8 +526,18 @@ relayWss.on("connection", (ws: WebSocket, req) => {
 
   console.log(`[Relay] Sidecar connected: session=${sessionId} clientAddr=${clientAddr}`);
 
-  const session: RelaySession = { sidecarWs: ws, clientAddr };
+  // Find the target gateway — for now use the first available
+  // TODO: use client's targetGatewayId from signaling to pick the right gateway
+  const gateway = registry.getAvailableGateway();
+  if (!gateway) {
+    console.log(`[Relay] No gateway available for session ${sessionId}`);
+    ws.close(4004, "No gateway available");
+    return;
+  }
+
+  const session: RelaySession = { sidecarWs: ws, clientAddr, gatewayId: gateway.id };
   relaySessions.set(sessionId, session);
+  console.log(`[Relay] Session ${sessionId} → gateway ${gateway.id}`);
 
   ws.on("message", (data, isBinary) => {
     if (!isBinary) {
@@ -538,31 +548,35 @@ relayWss.on("connection", (ws: WebSocket, req) => {
           session.clientAddr = msg.address;
           console.log(`[Relay] Browser address for session ${sessionId}: ${msg.address}`);
 
-          // Find which gateway this session targets and trigger hole-punch
-          // For now, tell ALL gateways to punch (the right one will respond)
-          for (const gw of registry.getAllGateways()) {
-            safeSend(gw.ws, {
-              type: "punch",
-              targetAddress: msg.address,
-              sessionId,
-            });
-          }
+          // Tell the target gateway to punch
+          safeSend(gateway.ws, {
+            type: "punch",
+            targetAddress: msg.address,
+            sessionId,
+          });
         }
       } catch {}
       return;
     }
 
-    // Binary frame: forward to gateway's relay WebSocket
-    if (session.gatewayWs?.readyState === ws.OPEN) {
-      session.gatewayWs.send(data);
+    // Binary frame from sidecar (browser → gateway): forward via gateway signaling WS
+    // Wrap as a relay_data message with session ID prefix
+    const sessionIdBuf = Buffer.from(sessionId);
+    const frame = Buffer.concat([
+      Buffer.from([0x52]), // 'R' magic byte for relay frames
+      Buffer.from([(sessionIdBuf.length >> 8) & 0xff, sessionIdBuf.length & 0xff]),
+      sessionIdBuf,
+      Buffer.from(data as ArrayBuffer),
+    ]);
+    if (gateway.ws.readyState === gateway.ws.OPEN) {
+      gateway.ws.send(frame);
     }
   });
 
   ws.on("close", () => {
     relaySessions.delete(sessionId);
-    if (session.gatewayWs?.readyState === ws.OPEN) {
-      session.gatewayWs.close();
-    }
+    // Tell gateway session ended
+    safeSend(gateway.ws, { type: "relay_close", sessionId });
     console.log(`[Relay] Session ${sessionId} sidecar disconnected`);
   });
 });
@@ -690,6 +704,20 @@ signalWss.on("connection", (ws: WebSocket, req) => {
         ws.close(1008, "Rate limit exceeded");
         return;
       }
+    }
+
+    // Check for binary relay frames from gateway (magic byte 0x52 = 'R')
+    const buf = Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
+    if (buf.length > 3 && buf[0] === 0x52) {
+      // Relay frame: [0x52][sessionId_len:u16][sessionId][stream frame data]
+      const sidLen = (buf[1] << 8) | buf[2];
+      const sid = buf.subarray(3, 3 + sidLen).toString();
+      const frameData = buf.subarray(3 + sidLen);
+      const session = relaySessions.get(sid);
+      if (session?.sidecarWs?.readyState === ws.OPEN) {
+        session.sidecarWs.send(frameData);
+      }
+      return;
     }
 
     let msg: SignalMessage;

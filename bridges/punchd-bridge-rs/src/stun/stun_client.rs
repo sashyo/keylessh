@@ -401,7 +401,12 @@ async fn connect_and_run(
                                 // Signal server requests UDP hole-punch to a browser's address
                                 // (coordinated via the QUIC relay sidecar)
                                 if let Some(target) = parsed["targetAddress"].as_str() {
-                                    let target = target.replace("::ffff:", "");
+                                    // Normalize: strip IPv6 prefix and brackets
+                                    // e.g. "[::ffff:122.199.56.35]:61967" → "122.199.56.35:61967"
+                                    let target = target
+                                        .replace("::ffff:", "")
+                                        .replace('[', "")
+                                        .replace(']', "");
                                     if let Ok(addr) = target.parse::<std::net::SocketAddr>() {
                                         tracing::info!("[STUN] Coordinated punch to {addr}");
                                         for _ in 0..5 {
@@ -445,6 +450,25 @@ async fn connect_and_run(
                                 );
                             }
                             _ => {}
+                        }
+                    }
+                    Some(Ok(Message::Binary(data))) => {
+                        // Binary relay frame: [0x52][sessionId_len:u16][sessionId][stream frame]
+                        // Stream frame: [stream_id:u32][flags:u8][payload]
+                        if data.len() > 3 && data[0] == 0x52 {
+                            let sid_len = ((data[1] as usize) << 8) | (data[2] as usize);
+                            if data.len() > 3 + sid_len + 5 {
+                                let session_id = String::from_utf8_lossy(&data[3..3+sid_len]).to_string();
+                                let frame = &data[3+sid_len..];
+                                let stream_id = u32::from_be_bytes([frame[0], frame[1], frame[2], frame[3]]);
+                                let flags = frame[4];
+                                let payload = &frame[5..];
+
+                                crate::quic::relay_handler::handle_relay_frame(
+                                    &session_id, stream_id, flags, payload,
+                                    options.clone(), ws_sink.clone(), punch_socket,
+                                ).await;
+                            }
                         }
                     }
                     Some(Ok(Message::Pong(_))) => {
