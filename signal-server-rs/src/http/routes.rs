@@ -44,10 +44,11 @@ pub async fn gateways(State(state): State<AppState>) -> Json<Value> {
                     "description": gw.metadata.description,
                     "backends": gw.metadata.backends,
                     "addresses": gw.addresses,
+                    "clientCount": gw.paired_clients.len(),
                     "online": true,
                 })
             })
         })
         .collect();
-    Json(json!(gateways))
+    Json(json!({ "gateways": gateways }))
 }
