@@ -446,8 +446,9 @@
       }];
     }
 
-    // Step 1: Connect to relay to trigger hole-punch
+    // Step 1: Connect to relay, pre-authenticate, trigger hole-punch
     var relayTransport = null;
+    var relayAuthenticated = false;
     if (relayUrl) {
       try {
         console.log("[RDP] Connecting to relay for hole-punch:", relayUrl);
@@ -457,10 +458,32 @@
           relayTransport.ready,
           new Promise(function (_, reject) { setTimeout(function () { reject(new Error("timeout")); }, 5000); }),
         ]);
-        console.log("[RDP] Relay connected — hole-punch triggered, waiting 2s...");
+        console.log("[RDP] Relay connected — pre-authenticating...");
+
+        // Pre-authenticate on relay so it's ready to use as fallback
+        var relayAuthStream = await relayTransport.createBidirectionalStream();
+        var relayAuthWriter = relayAuthStream.writable.getWriter();
+        var relayAuthReader = relayAuthStream.readable.getReader();
+        var tokenBytes = new TextEncoder().encode(sessionToken);
+        var authHeader = new Uint8Array(1 + 2 + tokenBytes.length);
+        authHeader[0] = STREAM_AUTH;
+        authHeader[1] = (tokenBytes.length >> 8) & 0xff;
+        authHeader[2] = tokenBytes.length & 0xff;
+        authHeader.set(tokenBytes, 3);
+        await relayAuthWriter.write(authHeader);
+        await relayAuthWriter.close();
+        var relayAuthResp = await relayAuthReader.read();
+        var relayResp = new TextDecoder().decode(relayAuthResp.value);
+        relayAuthReader.releaseLock();
+        if (relayResp === "OK") {
+          relayAuthenticated = true;
+          console.log("[RDP] Relay pre-authenticated! Waiting 2s for hole-punch...");
+        } else {
+          console.warn("[RDP] Relay auth failed:", relayResp);
+        }
         await new Promise(function (resolve) { setTimeout(resolve, 2000); });
       } catch (relayErr) {
-        console.warn("[RDP] Relay connect failed:", relayErr);
+        console.warn("[RDP] Relay connect/auth failed:", relayErr);
         relayTransport = null;
       }
     }
@@ -493,29 +516,33 @@
       }
     }
 
-    // Authenticate on whichever transport connected
+    // Authenticate on whichever transport connected (skip if relay already authed)
     try {
-      var authStream = await quicTransport.createBidirectionalStream();
-      var authWriter = authStream.writable.getWriter();
-      var authReader = authStream.readable.getReader();
+      if (quicTransport === relayTransport && relayAuthenticated) {
+        console.log("[RDP] Relay already authenticated, skipping auth");
+      } else {
+        var authStream = await quicTransport.createBidirectionalStream();
+        var authWriter = authStream.writable.getWriter();
+        var authReader = authStream.readable.getReader();
 
-      var tokenBytes = new TextEncoder().encode(sessionToken);
-      var authHeader = new Uint8Array(1 + 2 + tokenBytes.length);
-      authHeader[0] = STREAM_AUTH;
-      authHeader[1] = (tokenBytes.length >> 8) & 0xff;
-      authHeader[2] = tokenBytes.length & 0xff;
-      authHeader.set(tokenBytes, 3);
+        var tokenBytes2 = new TextEncoder().encode(sessionToken);
+        var authHeader2 = new Uint8Array(1 + 2 + tokenBytes2.length);
+        authHeader2[0] = STREAM_AUTH;
+        authHeader2[1] = (tokenBytes2.length >> 8) & 0xff;
+        authHeader2[2] = tokenBytes2.length & 0xff;
+        authHeader2.set(tokenBytes2, 3);
 
-      await authWriter.write(authHeader);
-      await authWriter.close();
+        await authWriter.write(authHeader2);
+        await authWriter.close();
 
-      var authResp = await authReader.read();
-      var resp = new TextDecoder().decode(authResp.value);
-      if (resp !== "OK") {
-        throw new Error("Auth rejected: " + resp);
+        var authResp2 = await authReader.read();
+        var resp2 = new TextDecoder().decode(authResp2.value);
+        if (resp2 !== "OK") {
+          throw new Error("Auth rejected: " + resp2);
+        }
+        authReader.releaseLock();
+        console.log("[RDP] QUIC authenticated");
       }
-      authReader.releaseLock();
-      console.log("[RDP] QUIC authenticated");
 
       quicActive = true;
       installQuicWebSocketShim();

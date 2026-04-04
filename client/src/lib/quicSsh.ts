@@ -87,8 +87,9 @@ export async function connectQuicSsh(options: QuicSshOptions): Promise<WebSocket
     }];
   }
 
-  // Connect to relay first to trigger coordinated hole-punch
+  // Connect to relay first, pre-authenticate, trigger hole-punch
   let relayTransport: WebTransport | null = null;
+  let relayAuthenticated = false;
   if (gatewayInfo.relayUrl) {
     try {
       console.log("[SSH] Connecting to relay for hole-punch:", gatewayInfo.relayUrl);
@@ -98,11 +99,32 @@ export async function connectQuicSsh(options: QuicSshOptions): Promise<WebSocket
         relayTransport.ready,
         new Promise((_, reject) => setTimeout(() => reject(new Error("Relay timeout")), 5000)),
       ]);
-      console.log("[SSH] Relay connected — hole-punch triggered, waiting 2s...");
-      // Wait for gateway to send punch packets through NAT
+      console.log("[SSH] Relay connected — pre-authenticating...");
+
+      // Pre-authenticate on relay to keep it alive and ready as fallback
+      const relayAuthStream = await relayTransport.createBidirectionalStream();
+      const relayAuthWriter = relayAuthStream.writable.getWriter();
+      const relayAuthReader = relayAuthStream.readable.getReader();
+      const relayTokenBytes = new TextEncoder().encode(token);
+      const relayAuthHeader = new Uint8Array(1 + 2 + relayTokenBytes.length);
+      relayAuthHeader[0] = STREAM_AUTH;
+      relayAuthHeader[1] = (relayTokenBytes.length >> 8) & 0xff;
+      relayAuthHeader[2] = relayTokenBytes.length & 0xff;
+      relayAuthHeader.set(relayTokenBytes, 3);
+      await relayAuthWriter.write(relayAuthHeader);
+      await relayAuthWriter.close();
+      const { value: relayAuthResp } = await relayAuthReader.read();
+      const relayResp = new TextDecoder().decode(relayAuthResp);
+      relayAuthReader.releaseLock();
+      if (relayResp === "OK") {
+        relayAuthenticated = true;
+        console.log("[SSH] Relay pre-authenticated! Waiting 2s for hole-punch...");
+      } else {
+        console.warn("[SSH] Relay auth failed:", relayResp);
+      }
       await new Promise(resolve => setTimeout(resolve, 2000));
     } catch (relayErr) {
-      console.warn("[SSH] Relay connect failed:", relayErr);
+      console.warn("[SSH] Relay connect/auth failed:", relayErr);
       relayTransport = null;
     }
   }
