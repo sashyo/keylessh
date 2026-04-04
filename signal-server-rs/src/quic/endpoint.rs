@@ -140,6 +140,7 @@ async fn handle_session(
             Ok((send, recv)) => {
                 let stream_id = next_stream_id;
                 next_stream_id += 1;
+                tracing::info!("[Relay] Stream {stream_id} accepted for session {session_id}");
 
                 let (stream_tx, stream_rx) = mpsc::unbounded_channel::<Vec<u8>>();
                 {
@@ -190,6 +191,7 @@ async fn relay_stream(
         loop {
             match recv.read(&mut buf).await {
                 Ok(Some(n)) if n > 0 => {
+                    tracing::info!("[Relay] Stream {stream_id} browser→gw: {n}b");
                     send_to_gateway_binary(&state, &gateway_id, &session_id, stream_id, FLAG_DATA, &buf[..n]);
                 }
                 _ => break,
