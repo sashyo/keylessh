@@ -37,8 +37,11 @@ async fn main() {
         .route("/health", get(http::routes::health))
         .route("/webrtc-config", get(http::routes::webrtc_config))
         .route("/api/gateways", get(http::routes::gateways))
-        // WebSocket signaling (catch-all for WS upgrade)
-        .fallback(get(signaling::handler::ws_handler))
+        .route("/ws/ssh", get(proxy::ssh::ssh_ws_handler))
+        // WebSocket signaling on root path
+        .route("/", get(signaling::handler::ws_handler))
+        // Everything else: HTTP relay to gateway
+        .fallback(relay::http_relay::relay_handler)
         .layer(cors)
         .with_state(state.clone());
 
@@ -51,6 +54,17 @@ async fn main() {
 
     if !state.config.api_secret.is_empty() {
         tracing::info!("[Signal] API Secret: set");
+    }
+
+    // Start QUIC relay endpoint (WebTransport on UDP)
+    if let (Some(ref cert), Some(ref key)) = (&state.config.tls_cert_path, &state.config.tls_key_path) {
+        let relay_state = state.clone();
+        let cert = cert.clone();
+        let key = key.clone();
+        let relay_port = state.config.relay_port;
+        tokio::spawn(async move {
+            quic::endpoint::start_relay_endpoint(relay_state, &cert, &key, relay_port).await;
+        });
     }
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));

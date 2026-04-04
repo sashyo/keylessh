@@ -16,6 +16,10 @@ pub async fn ws_handler(
     ws.on_upgrade(move |socket| handle_signaling(socket, client_ip, state))
 }
 
+pub async fn handle_signaling_public(socket: WebSocket, client_ip: String, state: AppState) {
+    handle_signaling(socket, client_ip, state).await;
+}
+
 async fn handle_signaling(socket: WebSocket, client_ip: String, state: AppState) {
     let (mut ws_sender, mut ws_receiver) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
