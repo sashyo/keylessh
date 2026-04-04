@@ -34,6 +34,15 @@
   var RECONNECT_DELAY = 5000;
   var MAX_RECONNECT_DELAY = 60000;
 
+  // QUIC stream type bytes (must match gateway's stream_type constants)
+  var STREAM_AUTH = 0x01;
+  var STREAM_WEBSOCKET = 0x03;
+
+  // QUIC/WebTransport state
+  var quicTransport = null;
+  var quicActive = false;
+  var quicTimeout = null;
+
   // Save native WebSocket before shim (signaling uses it directly)
   var NativeWebSocket = window.WebSocket;
 
@@ -415,6 +424,202 @@
     console.log("[RDP] WebSocket shim installed");
   }
 
+  // ── QUIC/WebTransport for RDP ──────────────────────────────────
+
+  function hexToBytes(hex) {
+    var bytes = new Uint8Array(hex.length / 2);
+    for (var i = 0; i < hex.length; i += 2) {
+      bytes[i / 2] = parseInt(hex.substr(i, 2), 16);
+    }
+    return bytes;
+  }
+
+  async function connectQuicForRdp(address, certHash) {
+    var url = "https://" + address;
+    console.log("[RDP] Connecting WebTransport to", url);
+
+    var options = {};
+    if (certHash) {
+      var hashBytes = hexToBytes(certHash);
+      options.serverCertificateHashes = [{
+        algorithm: "sha-256",
+        value: hashBytes.buffer,
+      }];
+    }
+
+    try {
+      quicTransport = new WebTransport(url, options);
+      await quicTransport.ready;
+      console.log("[RDP] WebTransport connected!");
+
+      // Authenticate
+      var authStream = await quicTransport.createBidirectionalStream();
+      var authWriter = authStream.writable.getWriter();
+      var authReader = authStream.readable.getReader();
+
+      var tokenBytes = new TextEncoder().encode(sessionToken);
+      var authHeader = new Uint8Array(1 + 2 + tokenBytes.length);
+      authHeader[0] = STREAM_AUTH;
+      authHeader[1] = (tokenBytes.length >> 8) & 0xff;
+      authHeader[2] = tokenBytes.length & 0xff;
+      authHeader.set(tokenBytes, 3);
+
+      await authWriter.write(authHeader);
+      await authWriter.close();
+
+      var authResp = await authReader.read();
+      var resp = new TextDecoder().decode(authResp.value);
+      if (resp !== "OK") {
+        throw new Error("Auth rejected: " + resp);
+      }
+      authReader.releaseLock();
+      console.log("[RDP] QUIC authenticated");
+
+      quicActive = true;
+      installQuicWebSocketShim();
+      setStatus("connecting", "QUIC connected — ready for RDP");
+
+      // Show connect form / auto-connect
+      showConnectForm();
+
+    } catch (e) {
+      console.warn("[RDP] QUIC failed, falling back to WebRTC:", e);
+      quicTransport = null;
+      quicActive = false;
+      startWebRTC();
+    }
+  }
+
+  function installQuicWebSocketShim() {
+    window.WebSocket = function (url, protocols) {
+      var parsed = new URL(url, window.location.origin);
+      var parsedPort = parsed.port || (parsed.protocol === "wss:" ? "443" : "80");
+      var locPort = window.location.port || (window.location.protocol === "https:" ? "443" : "80");
+      var sameHost = parsed.hostname === window.location.hostname && parsedPort === locPort;
+
+      if (!sameHost || !quicTransport) {
+        return new NativeWebSocket(url, protocols);
+      }
+
+      console.log("[RDP] QUIC WebSocket shim intercepting:", url);
+      return new QuicRdpWebSocket(url, protocols);
+    };
+    window.WebSocket.CONNECTING = 0;
+    window.WebSocket.OPEN = 1;
+    window.WebSocket.CLOSING = 2;
+    window.WebSocket.CLOSED = 3;
+    window.WebSocket.prototype = NativeWebSocket.prototype;
+    console.log("[RDP] QUIC WebSocket shim installed");
+  }
+
+  function QuicRdpWebSocket(url, protocols) {
+    this.readyState = 0;
+    this.protocol = "";
+    this.extensions = "";
+    this.bufferedAmount = 0;
+    this.binaryType = "arraybuffer";
+    this.url = url;
+    this.onopen = null;
+    this.onmessage = null;
+    this.onclose = null;
+    this.onerror = null;
+    this._listeners = {};
+    this._writer = null;
+    this._reader = null;
+
+    var parsed = new URL(url, window.location.origin);
+    var wsPath = parsed.pathname + parsed.search;
+    var self = this;
+
+    quicTransport.createBidirectionalStream().then(async function (stream) {
+      self._writer = stream.writable.getWriter();
+      self._reader = stream.readable.getReader();
+
+      // Send: [type=WEBSOCKET][path_len:u16][path]
+      var pathBytes = new TextEncoder().encode(wsPath);
+      var header = new Uint8Array(1 + 2 + pathBytes.length);
+      header[0] = STREAM_WEBSOCKET;
+      header[1] = (pathBytes.length >> 8) & 0xff;
+      header[2] = pathBytes.length & 0xff;
+      header.set(pathBytes, 3);
+      await self._writer.write(header);
+
+      self.readyState = 1;
+      self.protocol = (Array.isArray(protocols) ? protocols[0] : protocols) || "";
+      self._dispatch("open", new Event("open"));
+
+      // Read loop
+      self._readLoop();
+    }).catch(function (err) {
+      console.error("[RDP] QUIC WS stream failed:", err);
+      self._dispatch("error", new Event("error"));
+      self.readyState = 3;
+      self._dispatch("close", new CloseEvent("close", { code: 1006, reason: err.message }));
+    });
+  }
+
+  QuicRdpWebSocket.prototype._readLoop = async function () {
+    try {
+      while (this.readyState === 1) {
+        var result = await this._reader.read();
+        if (result.done) break;
+        var payload = this.binaryType === "arraybuffer"
+          ? result.value.buffer.slice(result.value.byteOffset, result.value.byteOffset + result.value.byteLength)
+          : new Blob([result.value]);
+        this._dispatch("message", new MessageEvent("message", { data: payload }));
+      }
+    } catch (e) {
+      if (this.readyState < 2) {
+        console.warn("[RDP] QUIC WS read error:", e);
+      }
+    }
+    if (this.readyState < 3) {
+      this.readyState = 3;
+      this._dispatch("close", new CloseEvent("close", { code: 1000, reason: "" }));
+    }
+  };
+
+  QuicRdpWebSocket.prototype.send = function (data) {
+    if (this.readyState !== 1 || !this._writer) {
+      throw new DOMException("WebSocket not open", "InvalidStateError");
+    }
+    var bytes;
+    if (typeof data === "string") {
+      bytes = new TextEncoder().encode(data);
+    } else if (data instanceof ArrayBuffer) {
+      bytes = new Uint8Array(data);
+    } else if (ArrayBuffer.isView(data)) {
+      bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+    } else {
+      return;
+    }
+    this._writer.write(bytes).catch(function () {});
+  };
+
+  QuicRdpWebSocket.prototype.close = function (code, reason) {
+    if (this.readyState >= 2) return;
+    this.readyState = 2;
+    if (this._writer) {
+      this._writer.close().catch(function () {});
+    }
+  };
+
+  QuicRdpWebSocket.prototype.addEventListener = function (type, fn) {
+    if (!this._listeners[type]) this._listeners[type] = [];
+    this._listeners[type].push(fn);
+  };
+
+  QuicRdpWebSocket.prototype.removeEventListener = function (type, fn) {
+    if (!this._listeners[type]) return;
+    this._listeners[type] = this._listeners[type].filter(function (f) { return f !== fn; });
+  };
+
+  QuicRdpWebSocket.prototype._dispatch = function (type, event) {
+    if (typeof this["on" + type] === "function") this["on" + type](event);
+    var listeners = this._listeners[type];
+    if (listeners) listeners.forEach(function (fn) { fn(event); });
+  };
+
   // ── Initialization ────────────────────────────────────────────
 
   async function init() {
@@ -583,7 +788,26 @@
       case "paired":
         pairedGatewayId = msg.gateway && msg.gateway.id;
         console.log("[RDP] Paired with gateway:", pairedGatewayId);
-        startWebRTC();
+        // Don't start WebRTC yet — wait for quic_address (with timeout)
+        if (typeof WebTransport !== "undefined") {
+          console.log("[RDP] Waiting for QUIC address (5s timeout, then WebRTC)...");
+          quicTimeout = setTimeout(function () {
+            if (!quicActive) {
+              console.log("[RDP] No QUIC address received, falling back to WebRTC");
+              startWebRTC();
+            }
+          }, 5000);
+        } else {
+          startWebRTC();
+        }
+        break;
+
+      case "quic_address":
+        if (msg.address && msg.certHash) {
+          console.log("[RDP] QUIC address:", msg.address, "cert:", msg.certHash.slice(0, 16) + "...");
+          if (quicTimeout) { clearTimeout(quicTimeout); quicTimeout = null; }
+          connectQuicForRdp(msg.address, msg.certHash);
+        }
         break;
 
       case "sdp_answer":
@@ -1180,6 +1404,12 @@
       try { peerConnection.onicecandidate = null; peerConnection.onconnectionstatechange = null; peerConnection.close(); } catch (e) {}
       peerConnection = null;
     }
+    if (quicTransport) {
+      try { quicTransport.close(); } catch (e) {}
+      quicTransport = null;
+      quicActive = false;
+    }
+    if (quicTimeout) { clearTimeout(quicTimeout); quicTimeout = null; }
     pairedGatewayId = null;
     bulkEnabled = false;
   }
