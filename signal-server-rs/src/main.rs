@@ -23,6 +23,11 @@ async fn main() {
         )
         .init();
 
+    // Install rustls crypto provider
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
+
     // Load .env file if present (same as Node.js deploy.sh generates)
     dotenvy::dotenv().ok();
 
