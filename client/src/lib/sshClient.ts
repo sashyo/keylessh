@@ -484,25 +484,24 @@ export class BrowserSSHClient {
 
       const keyPair = auth.keyPair;
 
-      // Connect via QUIC (WebTransport) with WebSocket fallback
+      // Connect via WebRTC DataChannel (P2P like RDP) with WebSocket fallback
       let useWebSocket = true;
-      if (this.options.gatewayUrl && typeof WebTransport !== "undefined") {
+      if (this.options.gatewayUrl) {
         try {
-          const { connectQuicSsh } = await import("./quicSsh");
+          const { connectWebRtcSsh } = await import("./webrtcSsh");
           const token = localStorage.getItem("access_token") || "";
-          this.websocket = await connectQuicSsh({
+          this.websocket = await connectWebRtcSsh({
             signalUrl: this.options.gatewayUrl,
             gatewayId: this.options.gatewayId || this.options.serverId,
-            backendName: this.options.host,
-            token,
             host: this.options.host,
             port: this.options.port,
+            token,
           });
           this.websocket.binaryType = "arraybuffer";
           useWebSocket = false;
-          console.log("[SSH] Connected via QUIC WebTransport");
-        } catch (quicErr) {
-          console.warn("[SSH] QUIC failed, falling back to WebSocket:", quicErr);
+          console.log("[SSH] Connected via WebRTC DataChannel");
+        } catch (webrtcErr) {
+          console.warn("[SSH] WebRTC failed, falling back to WebSocket:", webrtcErr);
         }
       }
       if (useWebSocket) {
@@ -523,10 +522,8 @@ export class BrowserSSHClient {
         this.cleanup();
       });
 
-      // Wait for TCP bridge to confirm connection (skip for QUIC — already confirmed via 0x01 byte)
-      if (useWebSocket) {
-        await this.waitForTcpConnection();
-      }
+      // Wait for TCP bridge to confirm connection
+      await this.waitForTcpConnection();
 
       // Create SSH session configuration
       const config = new SshSessionConfiguration(true);

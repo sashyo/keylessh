@@ -34,14 +34,7 @@
   var RECONNECT_DELAY = 5000;
   var MAX_RECONNECT_DELAY = 60000;
 
-  // QUIC stream type bytes (must match gateway's stream_type constants)
-  var STREAM_AUTH = 0x01;
-  var STREAM_WEBSOCKET = 0x03;
-
-  // QUIC/WebTransport state
-  var quicTransport = null;
-  var quicActive = false;
-  var quicTimeout = null;
+  // (QUIC removed — using WebRTC DataChannel for all browser connections)
 
   // Save native WebSocket before shim (signaling uses it directly)
   var NativeWebSocket = window.WebSocket;
@@ -914,26 +907,7 @@
       case "paired":
         pairedGatewayId = msg.gateway && msg.gateway.id;
         console.log("[RDP] Paired with gateway:", pairedGatewayId);
-        // Don't start WebRTC yet — wait for quic_address (with timeout)
-        if (typeof WebTransport !== "undefined") {
-          console.log("[RDP] Waiting for QUIC address (5s timeout, then WebRTC)...");
-          quicTimeout = setTimeout(function () {
-            if (!quicActive) {
-              console.log("[RDP] No QUIC address received, falling back to WebRTC");
-              startWebRTC();
-            }
-          }, 5000);
-        } else {
-          startWebRTC();
-        }
-        break;
-
-      case "quic_address":
-        if (msg.address && msg.certHash) {
-          console.log("[RDP] QUIC address:", msg.address, "cert:", msg.certHash.slice(0, 16) + "...");
-          if (quicTimeout) { clearTimeout(quicTimeout); quicTimeout = null; }
-          connectQuicForRdp(msg.address, msg.certHash, msg.relayUrl, msg.gatewayId || pairedGatewayId);
-        }
+        startWebRTC();
         break;
 
       case "sdp_answer":
@@ -1531,12 +1505,6 @@
       try { peerConnection.onicecandidate = null; peerConnection.onconnectionstatechange = null; peerConnection.close(); } catch (e) {}
       peerConnection = null;
     }
-    if (quicTransport) {
-      try { quicTransport.close(); } catch (e) {}
-      quicTransport = null;
-      quicActive = false;
-    }
-    if (quicTimeout) { clearTimeout(quicTimeout); quicTimeout = null; }
     pairedGatewayId = null;
     bulkEnabled = false;
   }
