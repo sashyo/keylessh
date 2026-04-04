@@ -226,11 +226,9 @@ async fn handle_signaling(socket: WebSocket, client_ip: String, state: AppState)
                     if data.len() >= 3 + sid_len {
                         let sid = String::from_utf8_lossy(&data[3..3+sid_len]).to_string();
                         let frame_data = &data[3+sid_len..];
-                        // Forward to relay session's sidecar (in-process now)
+                        // Forward gateway response to relay WebTransport session
                         if let Some(session) = state.relay_sessions.get(&sid) {
-                            // TODO: forward to WebTransport stream
-                            let _ = session;
-                            let _ = frame_data;
+                            let _ = session.response_tx.send(frame_data.to_vec());
                         }
                     }
                 }

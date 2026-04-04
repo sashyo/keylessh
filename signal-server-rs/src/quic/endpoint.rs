@@ -102,15 +102,35 @@ async fn handle_session(
         }).to_string().into()
     ));
 
-    // Store relay session
+    // Create response channel for gateway → browser frames
+    let (response_tx, mut response_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+
+    // Store relay session with response channel
     state.relay_sessions.insert(session_id.clone(), crate::state::RelaySession {
         gateway_id: gw_id.clone(),
         client_addr: punch_addr,
+        response_tx,
     });
 
     let session_state = Arc::new(Mutex::new(SessionState {
         streams: HashMap::new(),
     }));
+
+    // Spawn task to dispatch gateway responses to the correct WebTransport streams
+    let ss_for_dispatch = session_state.clone();
+    let dispatch_task = tokio::spawn(async move {
+        while let Some(frame) = response_rx.recv().await {
+            if frame.len() < 5 { continue; }
+            let stream_id = u32::from_be_bytes([frame[0], frame[1], frame[2], frame[3]]);
+            let _flags = frame[4];
+            let payload = &frame[5..];
+
+            let ss = ss_for_dispatch.lock().await;
+            if let Some(stream) = ss.streams.get(&stream_id) {
+                let _ = stream.tx.send(payload.to_vec());
+            }
+        }
+    });
 
     // Accept bidi streams from browser
     let mut next_stream_id: u32 = 0;
@@ -149,6 +169,7 @@ async fn handle_session(
         }
     }
 
+    dispatch_task.abort();
     state.relay_sessions.remove(&session_id);
     Ok(())
 }
