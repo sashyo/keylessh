@@ -16,6 +16,7 @@ data/recordings/
 
 # Rust build artifacts
 bridges/punchd-bridge-rs/target/
+signal-server/quic-relay/target/
 bridges/punchd-bridge-rs/wix/*.msi
 bridges/punchd-bridge-rs/wix/punchd-vpn.exe
 bridges/punchd-bridge-rs/dist/

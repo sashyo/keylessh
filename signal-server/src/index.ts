@@ -482,6 +482,7 @@ const server = useTls
 
 const signalWss = new WebSocketServer({ noServer: true, maxPayload: 5 * 1024 * 1024 });
 const sshWss = new WebSocketServer({ noServer: true, maxPayload: 1 * 1024 * 1024 });
+const relayWss = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024 });
 
 server.on("upgrade", (req, socket, head) => {
   const url = req.url || "";
@@ -489,11 +490,81 @@ server.on("upgrade", (req, socket, head) => {
     sshWss.handleUpgrade(req, socket, head, (ws) => {
       sshWss.emit("connection", ws, req);
     });
+  } else if (url.startsWith("/ws/quic-relay")) {
+    relayWss.handleUpgrade(req, socket, head, (ws) => {
+      relayWss.emit("connection", ws, req);
+    });
   } else {
     signalWss.handleUpgrade(req, socket, head, (ws) => {
       signalWss.emit("connection", ws, req);
     });
   }
+});
+
+// ── QUIC Relay Handler ───────────────────────────────────────────
+// Connects the relay sidecar to the target gateway for stream forwarding.
+// Also triggers coordinated hole-punching: when the relay reports the browser's
+// source address, we tell the gateway to send UDP punch packets to that address.
+
+interface RelaySession {
+  sidecarWs: WebSocket;
+  gatewayWs?: WebSocket;
+  clientAddr: string;
+  gatewayId?: string;
+}
+const relaySessions = new Map<string, RelaySession>();
+
+relayWss.on("connection", (ws: WebSocket, req) => {
+  const url = new URL(req.url || "", `http://${req.headers.host}`);
+  const sessionId = url.searchParams.get("session") || "";
+  const clientAddr = url.searchParams.get("clientAddr") || "";
+
+  if (!sessionId) {
+    ws.close(4000, "Missing session ID");
+    return;
+  }
+
+  console.log(`[Relay] Sidecar connected: session=${sessionId} clientAddr=${clientAddr}`);
+
+  const session: RelaySession = { sidecarWs: ws, clientAddr };
+  relaySessions.set(sessionId, session);
+
+  ws.on("message", (data, isBinary) => {
+    if (!isBinary) {
+      // JSON control message from sidecar
+      try {
+        const msg = JSON.parse(data.toString());
+        if (msg.type === "client_address") {
+          session.clientAddr = msg.address;
+          console.log(`[Relay] Browser address for session ${sessionId}: ${msg.address}`);
+
+          // Find which gateway this session targets and trigger hole-punch
+          // For now, tell ALL gateways to punch (the right one will respond)
+          for (const gw of registry.getAllGateways()) {
+            safeSend(gw.ws, {
+              type: "punch",
+              targetAddress: msg.address,
+              sessionId,
+            });
+          }
+        }
+      } catch {}
+      return;
+    }
+
+    // Binary frame: forward to gateway's relay WebSocket
+    if (session.gatewayWs?.readyState === ws.OPEN) {
+      session.gatewayWs.send(data);
+    }
+  });
+
+  ws.on("close", () => {
+    relaySessions.delete(sessionId);
+    if (session.gatewayWs?.readyState === ws.OPEN) {
+      session.gatewayWs.close();
+    }
+    console.log(`[Relay] Session ${sessionId} sidecar disconnected`);
+  });
 });
 
 // ── SSH WebSocket Proxy ────────────────────────────────────────
@@ -802,11 +873,15 @@ function handleQuicAddress(ws: WebSocket, msg: SignalMessage): void {
   // Forward the full quic_address message to the target peer
   const target = registry.getClient(msg.targetId) || registry.getGateway(msg.targetId);
   if (target) {
+    // Include relay URL so browser can fall back to relayed QUIC
+    const relayHost = process.env.RELAY_HOST || "punchd.keylessh.com";
+    const relayPort = process.env.RELAY_PORT || "7893";
     safeSend(target.ws, {
       type: "quic_address",
       fromId,
       address,
       certHash: (msg as any).certHash,
+      relayUrl: `${relayHost}:${relayPort}`,
     });
   }
 }

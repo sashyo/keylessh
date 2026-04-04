@@ -434,25 +434,56 @@
     return bytes;
   }
 
-  async function connectQuicForRdp(address, certHash) {
-    var url = "https://" + address;
-    console.log("[RDP] Connecting WebTransport to", url);
+  async function connectQuicForRdp(address, certHash, relayUrl) {
+    // Try direct QUIC first, then relay, then WebRTC
+    var directUrl = "https://" + address;
+    console.log("[RDP] Trying direct QUIC:", directUrl);
 
-    var options = {};
+    var directOptions = {};
     if (certHash) {
       var hashBytes = hexToBytes(certHash);
-      options.serverCertificateHashes = [{
+      directOptions.serverCertificateHashes = [{
         algorithm: "sha-256",
         value: hashBytes.buffer,
       }];
     }
 
     try {
-      quicTransport = new WebTransport(url, options);
-      await quicTransport.ready;
-      console.log("[RDP] WebTransport connected!");
+      var directTransport = new WebTransport(directUrl, directOptions);
+      await Promise.race([
+        directTransport.ready,
+        new Promise(function (_, reject) { setTimeout(function () { reject(new Error("timeout")); }, 5000); }),
+      ]);
+      quicTransport = directTransport;
+      console.log("[RDP] Direct QUIC connected!");
+    } catch (directErr) {
+      console.warn("[RDP] Direct QUIC failed:", directErr);
 
-      // Authenticate
+      // Try relay (trusted LE cert, no hash pinning)
+      if (relayUrl) {
+        try {
+          console.log("[RDP] Trying QUIC relay:", relayUrl);
+          var relayTransport = new WebTransport("https://" + relayUrl);
+          await relayTransport.ready;
+          quicTransport = relayTransport;
+          console.log("[RDP] Connected via QUIC relay!");
+        } catch (relayErr) {
+          console.warn("[RDP] QUIC relay also failed:", relayErr);
+          quicTransport = null;
+          quicActive = false;
+          startWebRTC();
+          return;
+        }
+      } else {
+        quicTransport = null;
+        quicActive = false;
+        startWebRTC();
+        return;
+      }
+    }
+
+    // Authenticate on whichever transport connected
+    try {
       var authStream = await quicTransport.createBidirectionalStream();
       var authWriter = authStream.writable.getWriter();
       var authReader = authStream.readable.getReader();
@@ -478,12 +509,11 @@
       quicActive = true;
       installQuicWebSocketShim();
       setStatus("connecting", "QUIC connected — ready for RDP");
-
-      // Show connect form / auto-connect
       showConnectForm();
 
-    } catch (e) {
-      console.warn("[RDP] QUIC failed, falling back to WebRTC:", e);
+    } catch (authErr) {
+      console.warn("[RDP] QUIC auth failed, falling back to WebRTC:", authErr);
+      if (quicTransport) { try { quicTransport.close(); } catch (e) {} }
       quicTransport = null;
       quicActive = false;
       startWebRTC();
@@ -806,7 +836,7 @@
         if (msg.address && msg.certHash) {
           console.log("[RDP] QUIC address:", msg.address, "cert:", msg.certHash.slice(0, 16) + "...");
           if (quicTimeout) { clearTimeout(quicTimeout); quicTimeout = null; }
-          connectQuicForRdp(msg.address, msg.certHash);
+          connectQuicForRdp(msg.address, msg.certHash, msg.relayUrl);
         }
         break;
 

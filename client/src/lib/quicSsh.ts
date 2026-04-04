@@ -37,7 +37,7 @@ export async function connectQuicSsh(options: QuicSshOptions): Promise<WebSocket
   const sigWs = new WebSocket(signalingUrl);
 
   // Step 2: Register and wait for quic_address
-  const gatewayInfo = await new Promise<{ address: string; certHash?: string }>((resolve, reject) => {
+  const gatewayInfo = await new Promise<{ address: string; certHash?: string; relayUrl?: string }>((resolve, reject) => {
     const timeout = setTimeout(() => {
       sigWs.close();
       reject(new Error("Timeout waiting for gateway QUIC address"));
@@ -58,7 +58,7 @@ export async function connectQuicSsh(options: QuicSshOptions): Promise<WebSocket
         const msg = JSON.parse(event.data);
         if (msg.type === "quic_address" && msg.address) {
           clearTimeout(timeout);
-          resolve({ address: msg.address, certHash: msg.certHash });
+          resolve({ address: msg.address, certHash: msg.certHash, relayUrl: msg.relayUrl });
         } else if (msg.type === "error") {
           clearTimeout(timeout);
           reject(new Error(msg.message || "Signaling error"));
@@ -74,19 +74,42 @@ export async function connectQuicSsh(options: QuicSshOptions): Promise<WebSocket
 
   sigWs.close();
 
-  // Step 3: Open WebTransport to gateway
-  const url = `https://${gatewayInfo.address}`;
-  const transportOptions: any = {};
+  // Step 3: Try direct QUIC to gateway, fall back to relay
+  let transport: WebTransport;
+
+  // Try direct first (with cert hash pinning for self-signed cert)
+  const directUrl = `https://${gatewayInfo.address}`;
+  const directOptions: any = {};
   if (gatewayInfo.certHash) {
     const hashBytes = hexToBytes(gatewayInfo.certHash);
-    transportOptions.serverCertificateHashes = [{
+    directOptions.serverCertificateHashes = [{
       algorithm: "sha-256",
       value: hashBytes.buffer,
     }];
   }
 
-  const transport = new WebTransport(url, transportOptions);
-  await transport.ready;
+  try {
+    const directTransport = new WebTransport(directUrl, directOptions);
+    await Promise.race([
+      directTransport.ready,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("Direct QUIC timeout")), 5000)),
+    ]);
+    transport = directTransport;
+    console.log("[SSH] Direct QUIC connected to", gatewayInfo.address);
+  } catch (directErr) {
+    console.warn("[SSH] Direct QUIC failed:", directErr);
+
+    // Fall back to relay (trusted LE cert, no hash pinning needed)
+    if (gatewayInfo.relayUrl) {
+      console.log("[SSH] Trying QUIC relay:", gatewayInfo.relayUrl);
+      const relayTransport = new WebTransport(`https://${gatewayInfo.relayUrl}`);
+      await relayTransport.ready;
+      transport = relayTransport;
+      console.log("[SSH] Connected via QUIC relay");
+    } else {
+      throw directErr; // No relay available, fall back to WebSocket
+    }
+  }
 
   // Step 4: Auth stream
   const authStream = await transport.createBidirectionalStream();

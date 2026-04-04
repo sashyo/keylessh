@@ -395,8 +395,21 @@ async fn connect_and_run(
                                     (parsed["fromId"].as_str(), parsed["address"].as_str())
                                 {
                                     tracing::info!("[QUIC] Client {from_id} QUIC address: {addr}");
-                                    // The QUIC endpoint is already listening —
-                                    // client will connect to our address, we accept
+                                }
+                            }
+                            "punch" => {
+                                // Signal server requests UDP hole-punch to a browser's address
+                                // (coordinated via the QUIC relay sidecar)
+                                if let Some(target) = parsed["targetAddress"].as_str() {
+                                    let target = target.replace("::ffff:", "");
+                                    if let Ok(addr) = target.parse::<std::net::SocketAddr>() {
+                                        tracing::info!("[STUN] Coordinated punch to {addr}");
+                                        for _ in 0..5 {
+                                            let _ = punch_socket.send_to(b"punch", addr);
+                                        }
+                                    } else {
+                                        tracing::warn!("[STUN] Invalid punch target: {target}");
+                                    }
                                 }
                             }
                             "sdp_offer" => {

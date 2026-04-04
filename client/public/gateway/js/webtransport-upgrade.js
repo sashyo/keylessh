@@ -132,13 +132,13 @@
         break;
 
       case "quic_address":
-        // Gateway sent its QUIC address + cert hash
+        // Gateway sent its QUIC address + cert hash + relay URL
         if (msg.address && msg.certHash) {
           console.log("[QUIC] Gateway QUIC address:", msg.address, "cert:", msg.certHash.slice(0, 16) + "...");
-          connectWebTransport(msg.address, msg.certHash);
+          connectWebTransport(msg.address, msg.certHash, msg.relayUrl);
         } else if (msg.address) {
           console.log("[QUIC] Gateway QUIC address:", msg.address, "(no cert hash — trying direct)");
-          connectWebTransport(msg.address, null);
+          connectWebTransport(msg.address, null, msg.relayUrl);
         }
         break;
 
@@ -150,27 +150,58 @@
 
   // ── WebTransport Connection ────────────────────────────────────
 
-  async function connectWebTransport(address, certHash) {
+  async function connectWebTransport(address, certHash, relayUrl) {
     cleanup();
 
-    // Build URL — WebTransport needs https://
-    const url = "https://" + address;
-    console.log("[QUIC] Connecting WebTransport to", url);
+    // Try direct QUIC first
+    const directUrl = "https://" + address;
+    console.log("[QUIC] Trying direct WebTransport:", directUrl);
 
-    const options = {};
+    const directOptions = {};
     if (certHash) {
-      // Pin the self-signed cert hash so browser accepts it
       const hashBytes = hexToBytes(certHash);
-      options.serverCertificateHashes = [{
+      directOptions.serverCertificateHashes = [{
         algorithm: "sha-256",
         value: hashBytes.buffer,
       }];
     }
 
     try {
-      transport = new WebTransport(url, options);
-      await transport.ready;
-      console.log("[QUIC] WebTransport connected!");
+      const directTransport = new WebTransport(directUrl, directOptions);
+      await Promise.race([
+        directTransport.ready,
+        new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 5000)),
+      ]);
+      transport = directTransport;
+      console.log("[QUIC] Direct WebTransport connected!");
+    } catch (directErr) {
+      console.warn("[QUIC] Direct WebTransport failed:", directErr);
+
+      // Try relay (trusted LE cert)
+      if (relayUrl) {
+        try {
+          console.log("[QUIC] Trying relay:", relayUrl);
+          const relayTransport = new WebTransport("https://" + relayUrl);
+          await relayTransport.ready;
+          transport = relayTransport;
+          console.log("[QUIC] Connected via relay!");
+        } catch (relayErr) {
+          console.warn("[QUIC] Relay also failed:", relayErr);
+          window.__quicActive = false;
+          window.__quicFailed = true;
+          cleanup();
+          return;
+        }
+      } else {
+        console.log("[QUIC] No relay available, falling back to WebRTC...");
+        window.__quicActive = false;
+        window.__quicFailed = true;
+        cleanup();
+        return;
+      }
+    }
+
+    try {
       reconnectAttempts = 0;
       window.__quicActive = true;
 
@@ -184,8 +215,7 @@
       installWebSocketShim();
 
     } catch (e) {
-      console.error("[QUIC] WebTransport failed:", e);
-      console.log("[QUIC] Falling back to WebRTC...");
+      console.error("[QUIC] Post-connect setup failed:", e);
       window.__quicActive = false;
       window.__quicFailed = true;
       cleanup();
