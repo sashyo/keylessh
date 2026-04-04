@@ -346,15 +346,27 @@ async fn handle_ws_relay(
     let (mut ws_sink_local, mut ws_stream_local) = futures_util::StreamExt::split(local_ws);
 
     // Bridge: relay rx → local WS, local WS → relay tx
+    // Browser sends length-prefixed messages: [len:u32 BE][data]
+    let mut recv_buf: Vec<u8> = Vec::new();
+
     loop {
         tokio::select! {
             // Relay → local WS (browser data → local server)
+            // Reassemble length-prefixed messages from the QUIC stream
             data = rx.recv() => {
                 match data {
                     Some(data) => {
-                        use futures_util::SinkExt;
-                        if ws_sink_local.send(tokio_tungstenite::tungstenite::Message::Binary(data.into())).await.is_err() {
-                            break;
+                        recv_buf.extend_from_slice(&data);
+                        // Process complete frames
+                        while recv_buf.len() >= 4 {
+                            let msg_len = u32::from_be_bytes([recv_buf[0], recv_buf[1], recv_buf[2], recv_buf[3]]) as usize;
+                            if recv_buf.len() < 4 + msg_len { break; }
+                            let msg_data = recv_buf[4..4+msg_len].to_vec();
+                            recv_buf = recv_buf[4+msg_len..].to_vec();
+                            use futures_util::SinkExt;
+                            if ws_sink_local.send(tokio_tungstenite::tungstenite::Message::Binary(msg_data.into())).await.is_err() {
+                                return;
+                            }
                         }
                     }
                     None => break,
@@ -365,13 +377,18 @@ async fn handle_ws_relay(
             msg = futures_util::StreamExt::next(&mut ws_stream_local) => {
                 match msg {
                     Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(data))) => {
-                        let mut framed = Vec::with_capacity(1 + data.len());
+                        // Length-prefixed frame: [len:u32][type:u8=0x00][data]
+                        let msg_len = (1 + data.len()) as u32;
+                        let mut framed = Vec::with_capacity(4 + 1 + data.len());
+                        framed.extend_from_slice(&msg_len.to_be_bytes());
                         framed.push(0x00);
                         framed.extend_from_slice(&data);
                         send_relay_response(&ws_sink, &session_id, stream_id, &framed).await;
                     }
                     Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) => {
-                        let mut framed = Vec::with_capacity(1 + text.len());
+                        let msg_len = (1 + text.len()) as u32;
+                        let mut framed = Vec::with_capacity(4 + 1 + text.len());
+                        framed.extend_from_slice(&msg_len.to_be_bytes());
                         framed.push(0x01);
                         framed.extend_from_slice(text.as_bytes());
                         send_relay_response(&ws_sink, &session_id, stream_id, &framed).await;

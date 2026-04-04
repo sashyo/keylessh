@@ -627,28 +627,44 @@
   }
 
   QuicRdpWebSocket.prototype._readLoop = async function () {
+    // Buffer for reassembling length-prefixed frames from the QUIC stream
+    // Format: [len:u32 BE][type:u8 0x00=binary/0x01=text][data]
+    var buffer = new Uint8Array(0);
+
     try {
       while (this.readyState === 1) {
         var result = await this._reader.read();
         if (result.done) break;
-        var raw = result.value;
-        if (raw.length === 0) continue;
 
-        // Relay WS frames are prefixed: 0x00 = binary, 0x01 = text
-        var typePrefix = raw[0];
-        var content = raw.subarray(1);
+        // Append to buffer
+        var newBuf = new Uint8Array(buffer.length + result.value.length);
+        newBuf.set(buffer);
+        newBuf.set(result.value, buffer.length);
+        buffer = newBuf;
 
-        var payload;
-        if (typePrefix === 0x01) {
-          // Text message (e.g. JSON from tcp-forward handler)
-          payload = new TextDecoder().decode(content);
-        } else {
-          // Binary message (RDP data)
-          payload = this.binaryType === "arraybuffer"
-            ? content.buffer.slice(content.byteOffset, content.byteOffset + content.byteLength)
-            : new Blob([content]);
+        // Process complete frames
+        while (buffer.length >= 4) {
+          var msgLen = (buffer[0] << 24) | (buffer[1] << 16) | (buffer[2] << 8) | buffer[3];
+          if (buffer.length < 4 + msgLen) break; // incomplete frame
+
+          var typePrefix = buffer[4];
+          var content = buffer.subarray(5, 4 + msgLen);
+
+          var payload;
+          if (typePrefix === 0x01) {
+            // Text message
+            payload = new TextDecoder().decode(content);
+          } else {
+            // Binary message
+            payload = this.binaryType === "arraybuffer"
+              ? content.buffer.slice(content.byteOffset, content.byteOffset + content.byteLength)
+              : new Blob([content]);
+          }
+          this._dispatch("message", new MessageEvent("message", { data: payload }));
+
+          // Advance buffer
+          buffer = buffer.subarray(4 + msgLen);
         }
-        this._dispatch("message", new MessageEvent("message", { data: payload }));
       }
     } catch (e) {
       if (this.readyState < 2) {
@@ -675,7 +691,14 @@
     } else {
       return;
     }
-    this._writer.write(bytes).catch(function () {});
+    // Length-prefix each message: [len:u32 BE][data] to preserve message boundaries
+    var framed = new Uint8Array(4 + bytes.length);
+    framed[0] = (bytes.length >> 24) & 0xff;
+    framed[1] = (bytes.length >> 16) & 0xff;
+    framed[2] = (bytes.length >> 8) & 0xff;
+    framed[3] = bytes.length & 0xff;
+    framed.set(bytes, 4);
+    this._writer.write(framed).catch(function () {});
   };
 
   QuicRdpWebSocket.prototype.close = function (code, reason) {
