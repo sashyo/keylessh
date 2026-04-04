@@ -1140,6 +1140,7 @@
       showReconnectPanel("Session ended");
       return;
     }
+    autoConnectSpinner.classList.add("hidden");
     connectForm.classList.remove("hidden");
     rdpCanvas.classList.add("hidden");
     connectBtn.disabled = false;
