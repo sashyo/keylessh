@@ -126,6 +126,50 @@ pub fn register(options: StunRegistrationOptions) -> StunRegistration {
             }
         };
 
+        // Start a separate quinn endpoint for native VPN clients (ALPN: "punchd")
+        let vpn_quic_port = quic_port + 1; // 7894
+        let vpn_bind: std::net::SocketAddr = format!("0.0.0.0:{vpn_quic_port}").parse().unwrap();
+        match crate::quic::transport::create_server_endpoint(vpn_bind) {
+            Ok((endpoint, _vpn_cert_hash)) => {
+                tracing::info!("[QUIC] Native VPN endpoint listening on 0.0.0.0:{vpn_quic_port}");
+                let opts = options.clone();
+                tokio::spawn(async move {
+                    loop {
+                        match endpoint.accept().await {
+                            Some(incoming) => {
+                                let opts = opts.clone();
+                                tokio::spawn(async move {
+                                    match incoming.await {
+                                        Ok(conn) => {
+                                            let remote = conn.remote_address();
+                                            tracing::info!("[QUIC] Native VPN client connected from {remote}");
+                                            let handler = crate::quic::peer_handler::QuicPeerHandler::new(
+                                                crate::quic::peer_handler::QuicPeerHandlerOptions {
+                                                    listen_port: opts.listen_port,
+                                                    use_tls: opts.use_tls,
+                                                    gateway_id: opts.gateway_id.clone(),
+                                                    send_signaling: tokio::sync::mpsc::unbounded_channel().0,
+                                                    backends: opts.backends.clone(),
+                                                    auth: opts.auth.clone(),
+                                                    vpn_state: opts.vpn_state.clone(),
+                                                },
+                                            );
+                                            handler.handle_connection(conn, remote.to_string()).await;
+                                        }
+                                        Err(e) => tracing::error!("[QUIC] VPN connection failed: {e}"),
+                                    }
+                                });
+                            }
+                            None => break,
+                        }
+                    }
+                });
+            }
+            Err(e) => {
+                tracing::error!("[QUIC] Failed to start VPN endpoint on port {vpn_quic_port}: {e}");
+            }
+        }
+
         loop {
             // Check for shutdown before attempting connection
             if shutdown_rx.try_recv().is_ok() {
