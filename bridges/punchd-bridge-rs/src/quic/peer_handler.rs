@@ -259,6 +259,9 @@ async fn handle_bidi_stream(
         stream_type::SSH => {
             handle_ssh_stream(send, recv, options, client_id).await;
         }
+        stream_type::VPN => {
+            handle_vpn_stream(send, recv, options, peer_state, client_id).await;
+        }
         other => {
             tracing::warn!("[QUIC] Unknown stream type 0x{other:02x} from {client_id}");
         }
@@ -526,6 +529,67 @@ async fn handle_ssh_stream(
 
     tokio::join!(quic_to_tcp, tcp_to_quic);
     tracing::info!("[QUIC] SSH stream ended: {addr}");
+}
+
+/// VPN control stream — handle vpn_open request, set up VPN session.
+async fn handle_vpn_stream(
+    mut send: SendStream,
+    mut recv: RecvStream,
+    options: Arc<QuicPeerHandlerOptions>,
+    peer_state: Arc<Mutex<PeerState>>,
+    client_id: String,
+) {
+    // Read length-prefixed JSON: [len:u32][json]
+    let mut len_buf = [0u8; 4];
+    if recv.read_exact(&mut len_buf).await.is_err() { return; }
+    let len = u32::from_be_bytes(len_buf) as usize;
+    if len > 65536 { return; }
+    let mut buf = vec![0u8; len];
+    if recv.read_exact(&mut buf).await.is_err() { return; }
+
+    let req: serde_json::Value = match serde_json::from_slice(&buf) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    let req_type = req["type"].as_str().unwrap_or("");
+    tracing::info!("[QUIC] VPN control: {req_type} from {client_id}");
+
+    if req_type == "vpn_open" {
+        // Allocate IP from pool
+        let (client_ip, server_ip) = if let Some(ref vpn_state) = options.vpn_state {
+            let mut vs = vpn_state.lock().await;
+            let ip = vs.pool.allocate().unwrap_or("10.66.0.2".parse().unwrap());
+            (ip.to_string(), "10.66.0.1".to_string())
+        } else {
+            ("10.66.0.2".to_string(), "10.66.0.1".to_string())
+        };
+
+        // Send vpn_opened response
+        let resp = serde_json::json!({
+            "type": "vpn_opened",
+            "clientIp": client_ip,
+            "serverIp": server_ip,
+            "mtu": 1400,
+        });
+        let resp_bytes = resp.to_string();
+        let _ = send.write_all(&(resp_bytes.len() as u32).to_be_bytes()).await;
+        let _ = send.write_all(resp_bytes.as_bytes()).await;
+
+        tracing::info!("[QUIC] VPN session opened for {client_id}: client={client_ip} server={server_ip}");
+
+        // Keep control stream alive
+        let mut ctrl_buf = [0u8; 4096];
+        loop {
+            match recv.read(&mut ctrl_buf).await {
+                Ok(Some(0)) | Err(_) => break,
+                Ok(Some(_n)) => { /* control messages */ }
+                Ok(None) => break,
+            }
+        }
+
+        tracing::info!("[QUIC] VPN session closed for {client_id}");
+    }
 }
 
 /// Handle a VPN datagram (unreliable IP packet).
