@@ -121,13 +121,56 @@ impl QuicPeerHandler {
             }
         };
 
+        // Read DPoP proof (length-prefixed: u16 big-endian + proof bytes, 0 = no DPoP)
+        let dpop_proof = if recv.read_exact(&mut len_buf).await.is_ok() {
+            let dpop_len = u16::from_be_bytes(len_buf) as usize;
+            if dpop_len > 0 && dpop_len <= 8192 {
+                let mut dpop_buf = vec![0u8; dpop_len];
+                if recv.read_exact(&mut dpop_buf).await.is_ok() {
+                    String::from_utf8(dpop_buf).ok()
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None // Old client without DPoP support
+        };
+
         // Verify JWT
         if let Some(ref auth) = self.options.auth {
             match auth.verify_token(&token).await {
                 Some(payload) => {
                     let user = payload.sub.as_deref().unwrap_or("unknown");
-                    tracing::info!("[QUIC] Authenticated: {user} (client: {client_id})");
-                    // Send auth OK
+
+                    // Verify DPoP proof if token has cnf.jkt (DPoP-bound)
+                    let expected_jkt = crate::auth::dpop::extract_cnf_jkt(&token);
+                    if let Some(ref jkt) = expected_jkt {
+                        match &dpop_proof {
+                            Some(proof) => {
+                                let verifier = crate::auth::dpop::DPoPVerifier::new();
+                                if let Err(e) = verifier.verify_proof(proof, "POST", "quic://gateway/auth", Some(jkt)) {
+                                    tracing::warn!("[QUIC] DPoP verification failed for {user}: {e}");
+                                    let _ = send.write_all(b"DENIED").await;
+                                    let _ = send.finish();
+                                    conn.close(4u32.into(), b"dpop failed");
+                                    return;
+                                }
+                                tracing::info!("[QUIC] Authenticated with DPoP: {user} (client: {client_id})");
+                            }
+                            None => {
+                                tracing::warn!("[QUIC] Token requires DPoP but no proof provided for {user}");
+                                let _ = send.write_all(b"DENIED").await;
+                                let _ = send.finish();
+                                conn.close(4u32.into(), b"dpop required");
+                                return;
+                            }
+                        }
+                    } else {
+                        tracing::info!("[QUIC] Authenticated: {user} (client: {client_id})");
+                    }
+
                     let _ = send.write_all(b"OK").await;
                     let _ = send.finish();
                 }

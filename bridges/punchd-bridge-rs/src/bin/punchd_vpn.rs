@@ -361,6 +361,9 @@ mod quic_transport;
 #[path = "../quic/turn_client.rs"]
 mod turn_client;
 
+#[path = "../vpn/webview_auth.rs"]
+mod webview_auth;
+
 // ── Windows Service support ───────────────────────────────────────────
 
 const SERVICE_NAME: &str = "punchd-vpn";
@@ -1250,11 +1253,37 @@ fn generate_dpop_proof_with_nonce(method: &str, url: &str, nonce: &str) -> Resul
 }
 
 async fn oidc_login(_tc: &TcConfig) -> Result<String, String> {
-    // Open the KeyleSSH web app's VPN auth page.
-    // If user is logged in, it sends the token immediately.
-    // If not, it opens a login popup, waits for auth, then sends the token.
     let app_url = std::env::var("SERVER_URL")
         .unwrap_or_else(|_| "https://demo.keylessh.com".to_string());
+
+    // If WebView is running in background, it may have a refreshed token already
+    if let Some(token) = webview_auth::get_latest_token() {
+        tracing::info!("Using refreshed token from WebView");
+        return Ok(token);
+    }
+
+    // Try WebView first (full DPoP support via embedded Heimdall)
+    let wv_available = webview_auth::webview_available();
+    tracing::info!("[Auth] WebView available: {wv_available}");
+    if wv_available {
+        tracing::info!("Opening embedded login window (WebView)...");
+        match webview_auth::webview_oidc_login(&app_url).await {
+            Ok(token) => return Ok(token),
+            Err(e) => {
+                tracing::warn!("WebView auth failed, falling back to browser: {e}");
+            }
+        }
+    }
+
+    // Fallback: open external browser + localhost callback server
+    browser_oidc_login(&app_url).await
+}
+
+/// Browser-based OIDC login fallback.
+/// Opens vpn-auth.html in the system browser, which reads localStorage
+/// for the access_token and POSTs it to a localhost callback server.
+/// Note: DPoP is NOT supported in this mode (token is a plain JWT).
+async fn browser_oidc_login(app_url: &str) -> Result<String, String> {
     let login_url = format!(
         "{}/vpn-auth.html?callback=http://localhost:{}/token",
         app_url.trim_end_matches('/'),
@@ -1274,8 +1303,6 @@ async fn oidc_login(_tc: &TcConfig) -> Result<String, String> {
 
     tracing::info!("Waiting for login callback on port {CALLBACK_PORT}...");
 
-    // Accept one connection
-    // Wait for the vpn-auth.html page to POST the token
     loop {
         let (stream, _) = tokio::time::timeout(Duration::from_secs(120), listener.accept())
             .await
@@ -2011,11 +2038,27 @@ async fn run_vpn_quic(cfg: ResolvedConfig) -> Result<(), String> {
 
     tracing::info!("[QUIC-VPN] QUIC connected to gateway");
 
-    // Auth stream: send JWT
+    // Auth stream: send JWT + DPoP proof
     let (mut auth_send, mut auth_recv) = conn.open_bi().await
         .map_err(|e| format!("Failed to open auth stream: {e}"))?;
 
-    // [type=0x01][token_len:u16][token_bytes]
+    // Try to generate a DPoP proof via WebView (if available)
+    let dpop_proof = match webview_auth::request_dpop_proof("POST", "quic://gateway/auth").await {
+        Ok(proof) if !proof.starts_with("ERROR:") => {
+            tracing::info!("[QUIC-VPN] DPoP proof generated");
+            Some(proof)
+        }
+        Ok(err) => {
+            tracing::warn!("[QUIC-VPN] DPoP proof failed: {err}");
+            None
+        }
+        Err(e) => {
+            tracing::debug!("[QUIC-VPN] DPoP not available: {e}");
+            None
+        }
+    };
+
+    // [type=0x01][token_len:u16][token_bytes][dpop_len:u16][dpop_bytes]
     auth_send.write_all(&[0x01u8 /* AUTH */]).await
         .map_err(|e| format!("Auth write error: {e}"))?;
     let token_bytes = token.as_bytes();
@@ -2023,6 +2066,18 @@ async fn run_vpn_quic(cfg: ResolvedConfig) -> Result<(), String> {
         .map_err(|e| format!("Auth write error: {e}"))?;
     auth_send.write_all(token_bytes).await
         .map_err(|e| format!("Auth write error: {e}"))?;
+
+    // DPoP proof (0 length = no DPoP)
+    if let Some(ref proof) = dpop_proof {
+        let proof_bytes = proof.as_bytes();
+        auth_send.write_all(&(proof_bytes.len() as u16).to_be_bytes()).await
+            .map_err(|e| format!("Auth write error: {e}"))?;
+        auth_send.write_all(proof_bytes).await
+            .map_err(|e| format!("Auth write error: {e}"))?;
+    } else {
+        auth_send.write_all(&0u16.to_be_bytes()).await
+            .map_err(|e| format!("Auth write error: {e}"))?;
+    }
     auth_send.finish().map_err(|e| format!("Auth finish error: {e}"))?;
 
     // Read auth response

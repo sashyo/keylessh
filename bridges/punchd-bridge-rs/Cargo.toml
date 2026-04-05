@@ -50,6 +50,12 @@ clap = { version = "4", features = ["derive"] }
 notify = { version = "7", default-features = false, features = ["macos_fsevent"] }
 arc-swap = "1"
 ipnet = "2"
+wry = { version = "0.55", optional = true }
+tao = { version = "0.35", optional = true }
+
+[features]
+default = []
+webview = ["wry", "tao"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 tun = { version = "0.7", features = ["async"] }
