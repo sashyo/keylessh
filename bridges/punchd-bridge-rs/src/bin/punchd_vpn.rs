@@ -1935,18 +1935,31 @@ async fn run_vpn_quic(cfg: ResolvedConfig) -> Result<(), String> {
 
     // Send UDP punch packets to the gateway's address (opens NAT pinhole)
     // The gateway also punches us (via the "punch" signaling message)
+    // Send punch packets to the gateway to open OUR NAT pinhole
+    // This must happen before the gateway's punch arrives, so both NATs are open
     tracing::info!("[QUIC-VPN] Sending punch packets to {gateway_addr}...");
-    let punch_sock = quic_endpoint.local_addr()
-        .map_err(|e| format!("Local addr error: {e}"))?;
-    // Use a raw UDP socket clone for punching (quinn owns the main socket)
-    // Actually, we can't clone quinn's socket. Instead, the STUN request already
-    // opened a pinhole for the STUN server. The gateway's punch to our address
-    // opens the gateway's NAT for us. We just need to try connecting.
-    // For portal-tunneler style: both sides send simultaneously.
-    // Quinn's connect() sends the Initial packet which IS the punch from our side.
 
-    // Wait a moment for the gateway to send its punch packets
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Send our quic_address to the gateway (triggers gateway to punch us)
+    // Then immediately start punching from our side
+    {
+        let mut sink = ws_sink.lock().await;
+        let _ = sink.send(Message::Text(serde_json::json!({
+            "type": "quic_address",
+            "targetId": cfg.gateway_id,
+            "fromId": peer_id,
+            "address": public_addr.to_string(),
+        }).to_string())).await;
+    }
+
+    // Use quinn's rebind trick: the QUIC endpoint can't send raw UDP, but
+    // we can use connect() as a punch — it sends a QUIC Initial packet.
+    // Send multiple rapid connect attempts to punch the NAT:
+    for i in 0..3 {
+        let _ = quic_endpoint.connect(gateway_addr, "punchd-gateway");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // Small delay to let gateway's return punch arrive
+    tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Try direct QUIC connection (our connect = our punch)
     tracing::info!("[QUIC-VPN] Connecting QUIC to {gateway_addr}...");
