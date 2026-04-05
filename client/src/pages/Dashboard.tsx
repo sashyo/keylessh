@@ -9,8 +9,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
-import { Server, Terminal, Clock, Activity, ArrowRight, HelpCircle, AlertCircle, X, Globe, ExternalLink, Search, LayoutGrid, List, Monitor, Network } from "lucide-react";
-import { useCallback, useMemo, useState } from "react";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Server, Terminal, Clock, Activity, ArrowRight, HelpCircle, AlertCircle, X, Globe, ExternalLink, Search, LayoutGrid, List, Monitor, Network, Plus, Trash2, Router, Wifi, WifiOff, RefreshCw } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Input } from "@/components/ui/input";
 import type { ServerWithAccess, ActiveSession } from "@shared/schema";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
@@ -724,6 +725,261 @@ function SessionItem({ session, onTerminate }: { session: ActiveSession; onTermi
   );
 }
 
+// ── Local Gateways (offline/LAN mode) ─────────────────────────────
+
+const LOCAL_GW_STORAGE_KEY = "keylessh.localGateways.v1";
+
+interface LocalGateway {
+  id: string;
+  name: string;
+  url: string;  // e.g. https://192.168.0.10:7891
+  online?: boolean;
+  backends?: { name: string; protocol?: string; sshUsernames?: string[]; rdpUsernames?: string[] }[];
+  lastChecked?: number;
+}
+
+function loadLocalGateways(): LocalGateway[] {
+  try {
+    const raw = localStorage.getItem(LOCAL_GW_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch { return []; }
+}
+
+function saveLocalGateways(gateways: LocalGateway[]) {
+  localStorage.setItem(LOCAL_GW_STORAGE_KEY, JSON.stringify(gateways));
+}
+
+async function probeGateway(url: string): Promise<{ online: boolean; backends: LocalGateway["backends"]; id?: string; name?: string }> {
+  try {
+    const base = url.replace(/\/$/, "");
+    const resp = await fetch(`${base}/api/info`, { signal: AbortSignal.timeout(5000) });
+    if (!resp.ok) return { online: false, backends: [] };
+    const info = await resp.json();
+    const backends = info.backends || [];
+    return { online: true, backends, id: info.gatewayId, name: info.displayName };
+  } catch {
+    return { online: false, backends: [] };
+  }
+}
+
+function GatewaysTab() {
+  const [, setLocation] = useLocation();
+  const [gateways, setGateways] = useState<LocalGateway[]>(loadLocalGateways);
+  const [addOpen, setAddOpen] = useState(false);
+  const [addUrl, setAddUrl] = useState("");
+  const [addName, setAddName] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [probing, setProbing] = useState<string | null>(null);
+
+  // Persist on change
+  useEffect(() => { saveLocalGateways(gateways); }, [gateways]);
+
+  // Probe all gateways on mount
+  useEffect(() => {
+    gateways.forEach((gw) => {
+      probeGateway(gw.url).then((result) => {
+        setGateways((prev) => prev.map((g) =>
+          g.id === gw.id ? { ...g, online: result.online, backends: result.backends, lastChecked: Date.now() } : g
+        ));
+      });
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const handleAdd = async () => {
+    if (!addUrl.trim()) return;
+    setAdding(true);
+    const result = await probeGateway(addUrl.trim());
+    const id = result.id || `local-${Date.now()}`;
+    const name = addName.trim() || result.name || new URL(addUrl.trim()).hostname;
+    setGateways((prev) => [...prev, {
+      id,
+      name,
+      url: addUrl.trim().replace(/\/$/, ""),
+      online: result.online,
+      backends: result.backends,
+      lastChecked: Date.now(),
+    }]);
+    setAddUrl("");
+    setAddName("");
+    setAdding(false);
+    setAddOpen(false);
+  };
+
+  const handleRemove = (id: string) => {
+    setGateways((prev) => prev.filter((g) => g.id !== id));
+  };
+
+  const handleProbe = async (id: string) => {
+    const gw = gateways.find((g) => g.id === id);
+    if (!gw) return;
+    setProbing(id);
+    const result = await probeGateway(gw.url);
+    setGateways((prev) => prev.map((g) =>
+      g.id === id ? { ...g, online: result.online, backends: result.backends, lastChecked: Date.now() } : g
+    ));
+    setProbing(null);
+  };
+
+  const handleConnect = (gw: LocalGateway, backend: { name: string; protocol?: string; sshUsernames?: string[] }, sshUser?: string) => {
+    if (backend.protocol === "ssh" && sshUser) {
+      setLocation(`/app/console?gatewayUrl=${encodeURIComponent(gw.url)}&backend=${encodeURIComponent(backend.name)}&gateway=${encodeURIComponent(gw.id)}&user=${encodeURIComponent(sshUser)}`);
+    } else if (backend.protocol === "rdp") {
+      const token = localStorage.getItem("access_token") || "";
+      window.open(`${gw.url}/rdp/${encodeURIComponent(backend.name)}?token=${encodeURIComponent(token)}`, "_blank");
+    } else {
+      const token = localStorage.getItem("access_token") || "";
+      const params = new URLSearchParams({ gateway: gw.id, backend: backend.name });
+      if (token) params.set("token", token);
+      window.open(`${gw.url}/api/select?${params.toString()}`, "_blank");
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h2 className="text-base sm:text-lg font-medium flex items-center gap-2 text-foreground">
+          <Router className="h-5 w-5 text-[hsl(var(--neon-purple))]" />
+          Local Gateways
+        </h2>
+        <Button size="sm" onClick={() => setAddOpen(true)} className="gap-1.5">
+          <Plus className="h-4 w-4" />
+          Add Gateway
+        </Button>
+      </div>
+
+      <p className="text-sm text-muted-foreground">
+        Connect to gateways on your local network or offline gateways that aren't registered with a signal server.
+      </p>
+
+      {gateways.length === 0 && (
+        <Card>
+          <CardContent className="py-8 text-center text-muted-foreground">
+            <Router className="h-10 w-10 mx-auto mb-3 opacity-30" />
+            <p className="text-sm">No local gateways added yet.</p>
+            <p className="text-xs mt-1">Add a gateway URL to connect directly without a signal server.</p>
+          </CardContent>
+        </Card>
+      )}
+
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        {gateways.map((gw) => (
+          <Card key={gw.id} className="cyber-card">
+            <CardHeader className="pb-3">
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border ${gw.online ? "bg-[hsl(var(--neon-green)/0.15)] border-[hsl(var(--neon-green)/0.3)]" : "bg-muted border-border"}`}>
+                    {gw.online ? <Wifi className="h-5 w-5 text-[hsl(var(--neon-green))]" /> : <WifiOff className="h-5 w-5 text-muted-foreground" />}
+                  </div>
+                  <div className="min-w-0">
+                    <CardTitle className="text-base truncate">{gw.name}</CardTitle>
+                    <CardDescription className="font-mono text-xs truncate">{gw.url}</CardDescription>
+                  </div>
+                </div>
+                <div className="flex items-center gap-1">
+                  <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => handleProbe(gw.id)} disabled={probing === gw.id} title="Refresh">
+                    <RefreshCw className={`h-4 w-4 ${probing === gw.id ? "animate-spin" : ""}`} />
+                  </Button>
+                  <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive" onClick={() => handleRemove(gw.id)} title="Remove">
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              {!gw.online && (
+                <Badge variant="secondary" className="text-xs">Offline</Badge>
+              )}
+              {gw.online && gw.backends && gw.backends.length > 0 && (
+                <div className="space-y-2">
+                  {gw.backends.map((backend) => (
+                    <LocalBackendItem key={backend.name} gw={gw} backend={backend} onConnect={handleConnect} />
+                  ))}
+                </div>
+              )}
+              {gw.online && (!gw.backends || gw.backends.length === 0) && (
+                <p className="text-xs text-muted-foreground">No backends configured on this gateway.</p>
+              )}
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+
+      {/* Add Gateway Dialog */}
+      <Dialog open={addOpen} onOpenChange={setAddOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Add Local Gateway</DialogTitle>
+            <DialogDescription>
+              Enter the URL of a gateway on your local network.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div className="space-y-2">
+              <Label htmlFor="gw-url">Gateway URL</Label>
+              <Input
+                id="gw-url"
+                placeholder="https://192.168.0.10:7891"
+                value={addUrl}
+                onChange={(e) => setAddUrl(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleAdd()}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="gw-name">Display Name (optional)</Label>
+              <Input
+                id="gw-name"
+                placeholder="Office Gateway"
+                value={addName}
+                onChange={(e) => setAddName(e.target.value)}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setAddOpen(false)}>Cancel</Button>
+            <Button onClick={handleAdd} disabled={adding || !addUrl.trim()}>
+              {adding ? "Connecting..." : "Add Gateway"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+function LocalBackendItem({ gw, backend, onConnect }: {
+  gw: LocalGateway;
+  backend: NonNullable<LocalGateway["backends"]>[number];
+  onConnect: (gw: LocalGateway, backend: any, sshUser?: string) => void;
+}) {
+  const isSsh = backend.protocol === "ssh";
+  const sshUsernames = backend.sshUsernames || [];
+  const [selectedUser, setSelectedUser] = useState(sshUsernames[0] || "");
+
+  return (
+    <div className="flex items-center gap-2 p-2 rounded-md bg-muted/50">
+      {isSsh ? <Terminal className="h-4 w-4 text-[hsl(var(--neon-cyan))] shrink-0" /> : <Globe className="h-4 w-4 text-[hsl(var(--neon-purple))] shrink-0" />}
+      <span className="text-sm flex-1 truncate">{backend.name}</span>
+      <Badge variant="outline" className="text-xs">{backend.protocol || "http"}</Badge>
+      {isSsh && sshUsernames.length > 0 && (
+        <Select value={selectedUser} onValueChange={setSelectedUser}>
+          <SelectTrigger className="w-[100px] h-7 text-xs">
+            <SelectValue placeholder="User" />
+          </SelectTrigger>
+          <SelectContent>
+            {sshUsernames.map((u) => (
+              <SelectItem key={u} value={u}>{u}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      )}
+      <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => onConnect(gw, backend, selectedUser)} disabled={isSsh && !selectedUser}>
+        Connect
+      </Button>
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const { user } = useAuth();
 
@@ -898,6 +1154,20 @@ export default function Dashboard() {
         </div>
       )}
 
+      <Tabs defaultValue="services" className="space-y-4">
+        <TabsList>
+          <TabsTrigger value="services" className="gap-1.5">
+            <Server className="h-4 w-4" />
+            Services
+            {allServices.length > 0 && <Badge variant="secondary" className="ml-1 text-xs">{allServices.length}</Badge>}
+          </TabsTrigger>
+          <TabsTrigger value="gateways" className="gap-1.5">
+            <Router className="h-4 w-4" />
+            Gateways
+          </TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="services">
       <div className="space-y-4">
         <div className="flex items-center justify-between">
           <h2 className="text-base sm:text-lg font-medium flex items-center gap-2 text-foreground">
@@ -1042,6 +1312,12 @@ export default function Dashboard() {
           </Card>
         )}
       </div>
+        </TabsContent>
+
+        <TabsContent value="gateways">
+          <GatewaysTab />
+        </TabsContent>
+      </Tabs>
 
       {recentSessions.length > 0 && (
         <div className="space-y-4">

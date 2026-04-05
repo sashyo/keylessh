@@ -768,6 +768,27 @@ pub fn build_proxy_state(
     })
 }
 
+// ── Gateway info endpoint for local discovery ───────────────────
+
+async fn handle_api_info(
+    State(state): State<SharedState>,
+) -> axum::Json<serde_json::Value> {
+    let s = state.load();
+    let backends: Vec<serde_json::Value> = s.config.backends.iter().map(|b| {
+        serde_json::json!({
+            "name": b.name,
+            "protocol": b.protocol,
+        })
+    }).collect();
+
+    axum::Json(serde_json::json!({
+        "status": "ok",
+        "gatewayId": s.gateway_id,
+        "displayName": s.config.display_name,
+        "backends": backends,
+    }))
+}
+
 // ── Router builder ───────────────────────────────────────────────
 
 /// Shared handle for hot-reloading ProxyState.
@@ -790,6 +811,7 @@ pub fn build_router(state: Arc<ProxyState>) -> (Router, SharedState) {
         .route("/ws/rdcleanpath", get(handle_rdcleanpath_ws))
         .route("/ws/tcp-forward", get(handle_tcp_forward_ws))
         .route("/ws/ssh", get(handle_ssh_ws))
+        .route("/api/info", get(handle_api_info))
         .fallback(any(handle_request))
         .with_state(shared.clone());
 
