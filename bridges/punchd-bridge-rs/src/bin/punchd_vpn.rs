@@ -1781,22 +1781,22 @@ async fn run_vpn_quic(cfg: ResolvedConfig) -> Result<(), String> {
     }
     tracing::info!("[QUIC-VPN] Registered as: {peer_id}");
 
-    // Create QUIC client endpoint
-    let quic_endpoint = quic_transport::create_client_endpoint()?;
-    let local_addr = quic_endpoint.local_addr().unwrap();
-    tracing::info!("[QUIC-VPN] QUIC endpoint on {local_addr}");
+    // Bind ONE UDP socket for STUN + QUIC (same port = same NAT pinhole)
+    let std_socket = std::net::UdpSocket::bind("0.0.0.0:0")
+        .map_err(|e| format!("UDP socket bind error: {e}"))?;
+    std_socket.set_nonblocking(true).map_err(|e| format!("Nonblocking error: {e}"))?;
+    let local_addr = std_socket.local_addr().map_err(|e| format!("Local addr error: {e}"))?;
+    tracing::info!("[QUIC-VPN] UDP socket bound on {local_addr}");
 
-    // Resolve public address via STUN (if configured)
+    // Resolve public address via STUN on the same socket
+    let stun_socket_clone = std_socket.try_clone().map_err(|e| format!("Clone error: {e}"))?;
     let public_addr = if let Some(ref ice) = cfg.ice_server {
         let stun_addr = ice.trim_start_matches("stun:");
-        // Create a temp socket for STUN resolution
-        let stun_sock = match tokio::net::UdpSocket::bind("0.0.0.0:0").await {
-            Ok(s) => s,
-            Err(e) => return Err(format!("STUN socket bind error: {e}")),
-        };
-        match quic_transport::stun_resolve(&stun_sock, stun_addr).await {
+        let tokio_sock = tokio::net::UdpSocket::from_std(stun_socket_clone)
+            .map_err(|e| format!("Tokio socket error: {e}"))?;
+        match quic_transport::stun_resolve(&tokio_sock, stun_addr).await {
             Ok(addr) => {
-                tracing::info!("[QUIC-VPN] STUN resolved: {addr}");
+                tracing::info!("[QUIC-VPN] STUN resolved: {addr} (same socket as QUIC)");
                 addr
             }
             Err(e) => {
@@ -1807,6 +1807,17 @@ async fn run_vpn_quic(cfg: ResolvedConfig) -> Result<(), String> {
     } else {
         local_addr
     };
+
+    // Create QUIC client endpoint on the SAME socket (preserves NAT pinhole)
+    let runtime = quinn::default_runtime().ok_or("No async runtime")?;
+    let mut quic_endpoint = quinn::Endpoint::new_with_abstract_socket(
+        quinn::EndpointConfig::default(),
+        None,
+        runtime.wrap_udp_socket(std_socket).map_err(|e| format!("Wrap socket error: {e}"))?,
+        runtime,
+    ).map_err(|e| format!("QUIC endpoint error: {e}"))?;
+    quic_endpoint.set_default_client_config(quic_transport::make_client_config());
+    tracing::info!("[QUIC-VPN] QUIC endpoint on same socket as STUN");
 
     // Wait for pairing and gateway's QUIC address
     let gateway_addr: Arc<Mutex<Option<std::net::SocketAddr>>> = Arc::new(Mutex::new(None));
@@ -1871,7 +1882,22 @@ async fn run_vpn_quic(cfg: ResolvedConfig) -> Result<(), String> {
     let gateway_addr = gateway_addr.lock().await
         .ok_or_else(|| "No gateway address received".to_string())?;
 
-    // Try direct QUIC connection first, fall back to TURN relay
+    // Send UDP punch packets to the gateway's address (opens NAT pinhole)
+    // The gateway also punches us (via the "punch" signaling message)
+    tracing::info!("[QUIC-VPN] Sending punch packets to {gateway_addr}...");
+    let punch_sock = quic_endpoint.local_addr()
+        .map_err(|e| format!("Local addr error: {e}"))?;
+    // Use a raw UDP socket clone for punching (quinn owns the main socket)
+    // Actually, we can't clone quinn's socket. Instead, the STUN request already
+    // opened a pinhole for the STUN server. The gateway's punch to our address
+    // opens the gateway's NAT for us. We just need to try connecting.
+    // For portal-tunneler style: both sides send simultaneously.
+    // Quinn's connect() sends the Initial packet which IS the punch from our side.
+
+    // Wait a moment for the gateway to send its punch packets
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Try direct QUIC connection (our connect = our punch)
     tracing::info!("[QUIC-VPN] Connecting QUIC to {gateway_addr}...");
     let conn = match tokio::time::timeout(
         Duration::from_secs(5),

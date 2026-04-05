@@ -390,11 +390,22 @@ async fn connect_and_run(
                                 }
                             }
                             "quic_address" => {
-                                // Client sent their QUIC address — used for hole-punching
+                                // Client sent their QUIC address — punch to open NAT pinhole
                                 if let (Some(from_id), Some(addr)) =
                                     (parsed["fromId"].as_str(), parsed["address"].as_str())
                                 {
                                     tracing::info!("[QUIC] Client {from_id} QUIC address: {addr}");
+                                    // Send UDP punch packets to the client's address
+                                    let addr_clean = addr
+                                        .replace("::ffff:", "")
+                                        .replace('[', "")
+                                        .replace(']', "");
+                                    if let Ok(target) = addr_clean.parse::<std::net::SocketAddr>() {
+                                        tracing::info!("[STUN] Punching client {from_id} at {target}");
+                                        for _ in 0..5 {
+                                            let _ = punch_socket.send_to(b"punch", target);
+                                        }
+                                    }
                                 }
                             }
                             "punch" => {
