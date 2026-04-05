@@ -145,6 +145,7 @@ async fn handle_signaling(socket: WebSocket, client_ip: String, state: AppState)
                             .or_else(|| registered_id.as_deref())
                             .unwrap_or("unknown")
                             .to_string();
+                        tracing::info!("[Signal] candidate from {from} targetId={target} is_gateway={is_gateway}");
 
                         // If no targetId, resolve from pairing
                         if target.is_empty() {
