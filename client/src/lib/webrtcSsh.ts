@@ -116,13 +116,20 @@ export async function connectWebRtcSsh(options: WebRtcSshOptions): Promise<WebSo
             // Listen for ALL messages on control channel
             control.onmessage = (msgEvent) => {
               try {
-                // Skip binary messages (bulk data fast-path)
-                if (typeof msgEvent.data !== "string") {
-                  console.log("[SSH-WebRTC] DC binary message, length:", msgEvent.data.byteLength || msgEvent.data.size);
+                // Gateway may send as binary ArrayBuffer — decode to string
+                let text: string;
+                if (typeof msgEvent.data === "string") {
+                  text = msgEvent.data;
+                } else if (msgEvent.data instanceof ArrayBuffer) {
+                  text = new TextDecoder().decode(msgEvent.data);
+                } else if (msgEvent.data instanceof Blob) {
+                  // Can't decode Blob synchronously — skip
+                  return;
+                } else {
                   return;
                 }
-                console.log("[SSH-WebRTC] DC message:", msgEvent.data.substring(0, 120));
-                const data = JSON.parse(msgEvent.data);
+                console.log("[SSH-WebRTC] DC message:", text.substring(0, 120));
+                const data = JSON.parse(text);
 
                 // Gateway sends capabilities first — ignore
                 if (data.type === "capabilities") return;
