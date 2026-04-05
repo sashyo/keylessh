@@ -30,7 +30,6 @@ use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 const VPN_TUNNEL_MAGIC: u8 = 0x04;
-const CALLBACK_PORT: u16 = 19876;
 const AGENT_PORT: u16 = 19877;
 
 #[derive(Parser, Debug)]
@@ -1262,118 +1261,9 @@ async fn oidc_login(_tc: &TcConfig) -> Result<String, String> {
         return Ok(token);
     }
 
-    // Try WebView first (full DPoP support via embedded Heimdall)
-    let wv_available = webview_auth::webview_available();
-    tracing::info!("[Auth] WebView available: {wv_available}");
-    if wv_available {
-        tracing::info!("Opening embedded login window (WebView)...");
-        match webview_auth::webview_oidc_login(&app_url).await {
-            Ok(token) => return Ok(token),
-            Err(e) => {
-                tracing::warn!("WebView auth failed, falling back to browser: {e}");
-            }
-        }
-    }
-
-    // Fallback: open external browser + localhost callback server
-    browser_oidc_login(&app_url).await
-}
-
-/// Browser-based OIDC login fallback.
-/// Opens vpn-auth.html in the system browser, which reads localStorage
-/// for the access_token and POSTs it to a localhost callback server.
-/// Note: DPoP is NOT supported in this mode (token is a plain JWT).
-async fn browser_oidc_login(app_url: &str) -> Result<String, String> {
-    let login_url = format!(
-        "{}/vpn-auth.html?callback=http://localhost:{}/token",
-        app_url.trim_end_matches('/'),
-        CALLBACK_PORT,
-    );
-
-    tracing::info!("Opening browser for login...");
-    tracing::info!("If the browser doesn't open, visit:");
-    tracing::info!("  {}", login_url);
-
-    open_browser(&login_url);
-
-    // Start local HTTP server to receive the callback
-    let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], CALLBACK_PORT)))
-        .await
-        .map_err(|e| format!("Failed to bind callback server on port {CALLBACK_PORT}: {e}"))?;
-
-    tracing::info!("Waiting for login callback on port {CALLBACK_PORT}...");
-
-    loop {
-        let (stream, _) = tokio::time::timeout(Duration::from_secs(120), listener.accept())
-            .await
-            .map_err(|_| "Login timeout (120s)".to_string())?
-            .map_err(|e| format!("Accept error: {e}"))?;
-
-        let mut stream = stream;
-        let mut buf = vec![0u8; 16384];
-        let n = tokio::io::AsyncReadExt::read(&mut stream, &mut buf)
-            .await
-            .map_err(|e| format!("Read error: {e}"))?;
-        let request = String::from_utf8_lossy(&buf[..n]).to_string();
-        let first_line = request.lines().next().unwrap_or("");
-
-        // Handle CORS preflight
-        if first_line.starts_with("OPTIONS") {
-            let resp = "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-            let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, resp.as_bytes()).await;
-            continue;
-        }
-
-        // Extract token from POST body
-        let mut token = None;
-        if let Some(body_start) = request.find("\r\n\r\n") {
-            let body = request[body_start + 4..].trim();
-            if !body.is_empty() {
-                token = Some(body.to_string());
-            }
-        }
-
-        let resp = "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK";
-        let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, resp.as_bytes()).await;
-
-        if let Some(t) = token {
-            if !t.is_empty() {
-                tracing::info!("Token received from browser!");
-                return Ok(t);
-            }
-        }
-    }
-}
-
-fn urldecoded(s: &str) -> String {
-    url::form_urlencoded::parse(s.as_bytes())
-        .next()
-        .map(|(k, v)| {
-            if v.is_empty() {
-                k.to_string()
-            } else {
-                format!("{k}={v}")
-            }
-        })
-        .unwrap_or_else(|| s.to_string())
-}
-
-fn open_browser(url: &str) {
-    #[cfg(target_os = "windows")]
-    {
-        // Use rundll32 to open URL — cmd /C start breaks on & in URLs
-        let _ = std::process::Command::new("rundll32")
-            .args(["url.dll,FileProtocolHandler", url])
-            .spawn();
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("open").arg(url).spawn();
-    }
+    // Open embedded WebView for OIDC login (full DPoP via Heimdall)
+    tracing::info!("Opening embedded login window (WebView)...");
+    webview_auth::webview_oidc_login(&app_url).await
 }
 
 // ── VPN connection ──────────────────────────────────────────────────
