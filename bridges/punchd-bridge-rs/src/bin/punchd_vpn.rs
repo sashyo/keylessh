@@ -742,8 +742,9 @@ async fn main() {
             }
         }
 
-        // Double-click (no flags, not standalone): GUI installer
-        if !args.standalone {
+        // Double-click or exe run: check config, then run as agent
+        // Use --install-service flag explicitly to install as Windows Service
+        if !args.standalone && !args.install_service {
             // Check if config exists — run setup wizard if not
             let file_cfg = load_file_config();
             let has_config = file_cfg.stun_server.is_some() && file_cfg.gateway_id.is_some();
@@ -751,8 +752,10 @@ async fn main() {
             if !has_config {
                 run_first_time_setup();
             }
+            // Skip service install — just fall through to agent mode below
+        }
 
-            // Install as service (with UAC if needed)
+        if args.install_service {
             if win_service::is_elevated() {
                 match win_service::install() {
                     Ok(()) => {
