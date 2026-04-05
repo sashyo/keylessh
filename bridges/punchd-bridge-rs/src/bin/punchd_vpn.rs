@@ -1132,6 +1132,58 @@ fn load_tc_config(tc_path: &Option<String>, tc_b64: &Option<String>) -> Result<T
     serde_json::from_str(&json_str).map_err(|e| format!("Invalid config: {e}"))
 }
 
+/// Generate a DPoP proof JWT (required by TideCloak for token exchange).
+/// Uses an ephemeral Ed25519 keypair.
+fn generate_dpop_proof(method: &str, url: &str) -> Result<String, String> {
+    use ring::signature::{Ed25519KeyPair, KeyPair};
+    use base64::Engine;
+    let b64url = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    // Generate ephemeral Ed25519 key
+    let rng = ring::rand::SystemRandom::new();
+    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng)
+        .map_err(|e| format!("Key gen error: {e}"))?;
+    let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())
+        .map_err(|e| format!("Key load error: {e}"))?;
+
+    // Public key in JWK format
+    let pub_key_bytes = key_pair.public_key().as_ref();
+    let x = b64url.encode(pub_key_bytes);
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    // DPoP JWT header
+    let header = serde_json::json!({
+        "typ": "dpop+jwt",
+        "alg": "EdDSA",
+        "jwk": {
+            "kty": "OKP",
+            "crv": "Ed25519",
+            "x": x,
+        }
+    });
+
+    // DPoP JWT payload
+    let payload = serde_json::json!({
+        "jti": uuid::Uuid::new_v4().to_string(),
+        "htm": method,
+        "htu": url,
+        "iat": now,
+    });
+
+    let header_b64 = b64url.encode(serde_json::to_string(&header).unwrap().as_bytes());
+    let payload_b64 = b64url.encode(serde_json::to_string(&payload).unwrap().as_bytes());
+    let signing_input = format!("{header_b64}.{payload_b64}");
+
+    let signature = key_pair.sign(signing_input.as_bytes());
+    let sig_b64 = b64url.encode(signature.as_ref());
+
+    Ok(format!("{signing_input}.{sig_b64}"))
+}
+
 async fn oidc_login(tc: &TcConfig) -> Result<String, String> {
     let base = tc.auth_server_url.trim_end_matches('/');
     let realm_path = format!("{base}/realms/{}/protocol/openid-connect", tc.realm);
@@ -1213,6 +1265,9 @@ async fn oidc_login(tc: &TcConfig) -> Result<String, String> {
     let code = code.ok_or("No authorization code in callback")?;
     tracing::info!("Authorization code received, exchanging for token...");
 
+    // Generate DPoP proof (required by TideCloak)
+    let dpop_proof = generate_dpop_proof("POST", &token_url)?;
+
     // Exchange code for tokens
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
@@ -1229,6 +1284,7 @@ async fn oidc_login(tc: &TcConfig) -> Result<String, String> {
     let resp = client
         .post(&token_url)
         .header("Content-Type", "application/x-www-form-urlencoded")
+        .header("DPoP", &dpop_proof)
         .body(body)
         .send()
         .await
