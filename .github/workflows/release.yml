@@ -27,6 +27,12 @@ jobs:
           cargo build --release --bin punchd-vpn --target x86_64-pc-windows-gnu --features webview
           Copy-Item target/x86_64-pc-windows-gnu/release/punchd-vpn.exe wix/
           Copy-Item webview2/WebView2Loader_amd64.dll wix/WebView2Loader.dll
+      - name: Compile custom actions DLL (MSVC)
+        working-directory: bridges/punchd-bridge-rs/wix
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=amd64
+          cl /LD /O2 ca\PunchdCA.c ca\PunchdCA.def /Fe:ca\PunchdCA.dll /link msi.lib advapi32.lib shell32.lib user32.lib ole32.lib
       - name: Install WiX
         run: |
           dotnet tool install --global wix --version 6.0.2
