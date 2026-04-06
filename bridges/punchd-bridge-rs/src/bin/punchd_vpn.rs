@@ -952,12 +952,37 @@ async fn run_agent() -> Result<(), String> {
 
         tokio::spawn(async move {
             let mut stream = stream;
+
+            // Read headers + possibly partial body
             let mut buf = vec![0u8; 65536];
-            let n = match tokio::io::AsyncReadExt::read(&mut stream, &mut buf).await {
-                Ok(n) => n,
-                Err(_) => return,
-            };
-            let request = String::from_utf8_lossy(&buf[..n]).to_string();
+            let mut total = 0;
+            loop {
+                let n = match tokio::io::AsyncReadExt::read(&mut stream, &mut buf[total..]).await {
+                    Ok(0) => break,
+                    Ok(n) => n,
+                    Err(_) => break,
+                };
+                total += n;
+                // Check if we have the full headers
+                let data = &buf[..total];
+                if let Some(header_end) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+                    // Parse Content-Length from headers
+                    let headers = String::from_utf8_lossy(&data[..header_end]).to_lowercase();
+                    let content_length: usize = headers.lines()
+                        .find(|l| l.starts_with("content-length:"))
+                        .and_then(|l| l.split(':').nth(1))
+                        .and_then(|v| v.trim().parse().ok())
+                        .unwrap_or(0);
+                    let body_start = header_end + 4;
+                    let body_received = total - body_start;
+                    if body_received >= content_length {
+                        break; // Got full body
+                    }
+                }
+                if total >= buf.len() { break; }
+            }
+
+            let request = String::from_utf8_lossy(&buf[..total]).to_string();
             let first_line = request.lines().next().unwrap_or("");
             let method = first_line.split_whitespace().next().unwrap_or("");
             let path = first_line.split_whitespace().nth(1).unwrap_or("");
