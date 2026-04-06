@@ -76,7 +76,7 @@ mod platform {
             tun_config
                 .address(config.address)
                 .netmask(config.netmask)
-                .mtu(config.mtu as i32)
+                .mtu(config.mtu)
                 .up();
             let dev = tun::create_as_async(&tun_config)
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;

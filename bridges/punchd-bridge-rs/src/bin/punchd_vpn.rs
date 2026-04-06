@@ -1,12 +1,13 @@
 ///! punchd-vpn: VPN client that tunnels IP traffic through a punchd-bridge-rs gateway.
 ///!
-///! Creates a local TUN interface and routes IP packets through a WebRTC
-///! DataChannel to a punchd-bridge gateway, which forwards them to its LAN.
+///! Creates a local TUN interface and routes IP packets through a QUIC P2P
+///! tunnel to a punchd-bridge gateway, which forwards them to its LAN.
+///! Authentication uses TideCloak OIDC with DPoP via embedded WebView2.
 ///!
 ///! Usage:
 ///!   punchd-vpn --stun-server wss://stun.example.com --gateway-id my-gateway --config tidecloak.json
 
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,18 +17,8 @@ use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::json;
-use tokio::sync::{mpsc, Mutex, Notify};
+use tokio::sync::{Mutex, Notify};
 use tokio_tungstenite::tungstenite::Message;
-use webrtc::api::interceptor_registry::register_default_interceptors;
-use webrtc::api::media_engine::MediaEngine;
-use webrtc::api::setting_engine::SettingEngine;
-use webrtc::api::APIBuilder;
-use webrtc::data_channel::data_channel_message::DataChannelMessage;
-use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
-use webrtc::ice_transport::ice_server::RTCIceServer;
-use webrtc::interceptor::registry::Registry;
-use webrtc::peer_connection::configuration::RTCConfiguration;
-use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 const VPN_TUNNEL_MAGIC: u8 = 0x04;
 const AGENT_PORT: u16 = 19877;
