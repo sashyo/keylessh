@@ -358,24 +358,36 @@ function RdpEndpointCard({ endpoint, backend }: { endpoint: GatewayEndpoint; bac
 }
 
 function CustomConnectionCard({ endpoint }: { endpoint: GatewayEndpoint }) {
+  const [, setLocation] = useLocation();
   const [open, setOpen] = useState(false);
-  const [protocol, setProtocol] = useState<"rdp" | "web">("rdp");
+  const [protocol, setProtocol] = useState<"rdp" | "ssh" | "web">("rdp");
   const [host, setHost] = useState("");
-  const [port, setPort] = useState(protocol === "rdp" ? "3389" : "443");
+  const [port, setPort] = useState("3389");
+  const [sshUser, setSshUser] = useState("");
   const [noAuth, setNoAuth] = useState(false);
   const [eddsa, setEddsa] = useState(false);
   const [stripAuth, setStripAuth] = useState(false);
 
+  const defaultPort = protocol === "rdp" ? "3389" : protocol === "ssh" ? "22" : "443";
+
   const handleConnect = () => {
     if (!host.trim()) return;
-    const url = endpoint.signalServerUrl.replace(/\/$/, "");
+    const url = endpoint.directUrl || endpoint.signalServerUrl.replace(/\/$/, "");
     const token = localStorage.getItem("access_token") || "";
-    const target = `${host.trim()}:${port || (protocol === "rdp" ? "3389" : "443")}`;
+    const target = `${host.trim()}:${port || defaultPort}`;
     const flags = [
       noAuth ? "noauth" : "",
       eddsa ? "eddsa" : "",
       stripAuth ? "stripauth" : "",
     ].filter(Boolean).join(";");
+
+    if (protocol === "ssh") {
+      const user = sshUser.trim() || "root";
+      const backendName = `ssh://${target}`;
+      setLocation(`/app/console?gatewayUrl=${encodeURIComponent(url)}&backend=${encodeURIComponent(backendName)}&gateway=${encodeURIComponent(endpoint.id)}&user=${encodeURIComponent(user)}`);
+      setOpen(false);
+      return;
+    }
 
     const params = new URLSearchParams({
       gateway: endpoint.id,
@@ -451,14 +463,19 @@ function CustomConnectionCard({ endpoint }: { endpoint: GatewayEndpoint }) {
             <div className="space-y-2">
               <Label>Protocol</Label>
               <Select value={protocol} onValueChange={(v) => {
-                const p = v as "rdp" | "web";
+                const p = v as "rdp" | "ssh" | "web";
                 setProtocol(p);
-                setPort(p === "rdp" ? "3389" : "443");
+                setPort(p === "rdp" ? "3389" : p === "ssh" ? "22" : "443");
               }}>
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
+                  <SelectItem value="ssh">
+                    <div className="flex items-center gap-2">
+                      <Terminal className="h-3.5 w-3.5" /> SSH
+                    </div>
+                  </SelectItem>
                   <SelectItem value="rdp">
                     <div className="flex items-center gap-2">
                       <Monitor className="h-3.5 w-3.5" /> Remote Desktop (RDP)
@@ -494,6 +511,18 @@ function CustomConnectionCard({ endpoint }: { endpoint: GatewayEndpoint }) {
             </div>
           </div>
 
+          {protocol === "ssh" && (
+            <div className="space-y-2">
+              <Label>SSH Username</Label>
+              <Input
+                value={sshUser}
+                onChange={(e) => setSshUser(e.target.value)}
+                placeholder="root"
+                onKeyDown={(e) => e.key === "Enter" && handleConnect()}
+              />
+            </div>
+          )}
+
           {protocol === "rdp" && (
             <div className="space-y-2">
               <Label className="text-xs text-muted-foreground">Connection Options</Label>
@@ -516,9 +545,11 @@ function CustomConnectionCard({ endpoint }: { endpoint: GatewayEndpoint }) {
 
           <DialogFooter>
             <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
-            <Button onClick={handleConnect} disabled={!host.trim()}>
+            <Button onClick={handleConnect} disabled={!host.trim() || (protocol === "ssh" && !sshUser.trim())}>
               {protocol === "rdp" ? (
                 <><Monitor className="h-4 w-4 mr-2" /> Connect RDP</>
+              ) : protocol === "ssh" ? (
+                <><Terminal className="h-4 w-4 mr-2" /> SSH as {sshUser || "..."}</>
               ) : (
                 <><Globe className="h-4 w-4 mr-2" /> Connect</>
               )}
