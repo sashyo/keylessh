@@ -232,12 +232,18 @@ export async function getUsersWithRoles(
 
   if (appClient?.id && roles.length > 0) {
     const roleUserPairs = await Promise.all(
-      roles.map(async (role) => {
-        const members = await tcFetch<UserRepresentation[]>(
-          `/clients/${appClient.id}/roles/${encodeURIComponent(role.name!)}/users`
-        ).catch(() => []);
-        return { roleName: role.name!, userIds: members.map(u => u.id!) };
-      })
+      roles
+        .filter((role) => {
+          // Skip member listing for VPN firewall roles (colons/slashes break the URL path)
+          const name = role.name || "";
+          return !(name.includes(":allow:") || name.includes(":deny:"));
+        })
+        .map(async (role) => {
+          const members = await tcFetch<UserRepresentation[]>(
+            `/clients/${appClient.id}/roles/${encodeURIComponent(role.name!)}/users`
+          ).catch(() => []);
+          return { roleName: role.name!, userIds: members.map(u => u.id!) };
+        })
     );
 
     for (const { roleName, userIds } of roleUserPairs) {
