@@ -413,23 +413,16 @@ async function getClientIdForRole(roleName: string): Promise<string> {
 
 /// Look up a role by name without putting the name in the URL path.
 /// Keycloak's GET /roles/{name} breaks on colons/slashes in role names.
-/// Instead, list all roles (cached) and find the match.
-let _rolesCache: { clientUuid: string; roles: RoleRepresentation[]; ts: number } | null = null;
-
-async function findRoleByName(clientUuid: string, roleName: string): Promise<RoleRepresentation> {
-  // Cache for 30 seconds
-  if (!_rolesCache || _rolesCache.clientUuid !== clientUuid || Date.now() - _rolesCache.ts > 30_000) {
-    const roles = await tcFetch<RoleRepresentation[]>(`/clients/${clientUuid}/roles`);
-    _rolesCache = { clientUuid, roles, ts: Date.now() };
-  }
-  const role = _rolesCache.roles.find((r) => r.name === roleName);
+/// Uses the cached roles list from getClientRoles().
+async function findRoleByName(_clientUuid: string, roleName: string): Promise<RoleRepresentation> {
+  let roles = await getClientRoles();
+  let role = roles.find((r) => r.name === roleName);
   if (!role) {
-    // Cache miss — force refresh and retry
-    const roles = await tcFetch<RoleRepresentation[]>(`/clients/${clientUuid}/roles`);
-    _rolesCache = { clientUuid, roles, ts: Date.now() };
-    const retry = roles.find((r) => r.name === roleName);
-    if (!retry) throw new Error(`Role '${roleName}' not found`);
-    return retry;
+    // Cache miss — invalidate and retry
+    invalidateRolesCache();
+    roles = await getClientRoles();
+    role = roles.find((r) => r.name === roleName);
+    if (!role) throw new Error(`Role '${roleName}' not found`);
   }
   return role;
 }
