@@ -393,12 +393,14 @@ export async function deleteRole(roleName: string): Promise<{ approvalCreated: b
   const client = await getClientByClientId(clientIdStr);
   if (!client) throw new Error(`Client '${clientIdStr}' not found`);
 
-  await tcFetch(`/clients/${client.id}/roles/${roleName}`, { method: "DELETE" });
+  // Use role ID for deletion (role name with colons/slashes breaks URL path)
+  const role = await findRoleByName(client.id, roleName);
+  await tcFetch(`/roles-by-id/${role.id}`, { method: "DELETE" });
   invalidateRolesCache();
 
   // Check if role still exists (approval created instead of immediate delete)
   try {
-    await tcFetch(`/clients/${client.id}/roles/${roleName}`);
+    await findRoleByName(client.id, roleName);
     return { approvalCreated: true, message: "Approval request created" };
   } catch {
     return { approvalCreated: false };
