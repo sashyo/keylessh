@@ -303,7 +303,7 @@ mod imp {
             })();
         "#;
 
-        let login_url = format!("{}/login", config.app_url.trim_end_matches('/'));
+        let login_url = format!("{}/app", config.app_url.trim_end_matches('/'));
         let proxy_clone = proxy.clone();
 
         // WebView2 data directory — must be writable (not Program Files)
