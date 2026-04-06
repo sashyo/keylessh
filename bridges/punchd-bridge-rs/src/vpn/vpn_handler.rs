@@ -171,7 +171,7 @@ pub struct SessionFirewall {
 impl SessionFirewall {
     pub fn new(mut rules: Vec<FirewallRule>) -> Self {
         // Sort by priority ascending — lowest number evaluated first
-        rules.sort_by(|a, b| a.priority.cmp(&b.priority));
+        rules.sort_by(|a, b| b.priority.cmp(&a.priority)); // highest priority first
         Self {
             rules,
             decision_cache: std::collections::HashMap::with_capacity(64),
