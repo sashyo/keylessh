@@ -1772,7 +1772,7 @@ struct VpnConfig {
 fn install_route(cidr: &str, gateway: &str) {
     let parts: Vec<&str> = cidr.split('/').collect();
     if parts.len() != 2 { return; }
-    let network = parts[0];
+    let _network = parts[0];
     let prefix: u32 = parts[1].parse().unwrap_or(24);
 
     #[cfg(target_os = "windows")]
@@ -1780,11 +1780,23 @@ fn install_route(cidr: &str, gateway: &str) {
         let mask = if prefix == 0 { 0u32 } else { !0u32 << (32 - prefix) };
         let m = mask.to_be_bytes();
         let mask_str = format!("{}.{}.{}.{}", m[0], m[1], m[2], m[3]);
+
+        // Find the TUN interface index so the route goes through the VPN, not the LAN
+        let if_index = find_tun_interface_index();
+        let mut args = vec!["add".to_string(), _network.to_string(), "MASK".to_string(), mask_str, gateway.to_string()];
+        if let Some(idx) = if_index {
+            args.push("IF".to_string());
+            args.push(idx.to_string());
+        }
+        // Low metric so VPN route wins over LAN
+        args.push("METRIC".to_string());
+        args.push("5".to_string());
+
         let status = std::process::Command::new("route")
-            .args(["add", network, "MASK", &mask_str, gateway])
+            .args(&args)
             .status();
         match status {
-            Ok(s) if s.success() => tracing::info!("[VPN] Route added: {} via {}", cidr, gateway),
+            Ok(s) if s.success() => tracing::info!("[VPN] Route added: {} via {} (IF {:?}, metric 5)", cidr, gateway, if_index),
             Ok(s) => tracing::warn!("[VPN] Failed to add route {} (exit {})", cidr, s),
             Err(e) => tracing::warn!("[VPN] Failed to add route {}: {}", cidr, e),
         }
@@ -1809,6 +1821,24 @@ fn install_route(cidr: &str, gateway: &str) {
 }
 
 /// Remove a previously installed route.
+/// Find the Windows interface index for the punchd TUN adapter.
+#[cfg(target_os = "windows")]
+fn find_tun_interface_index() -> Option<u32> {
+    let output = std::process::Command::new("netsh")
+        .args(["interface", "ipv4", "show", "interfaces"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    for line in text.lines() {
+        if line.contains("punchd") {
+            // Format: "  Idx  Met  MTU  State  Name"
+            let idx_str = line.split_whitespace().next()?;
+            return idx_str.parse().ok();
+        }
+    }
+    None
+}
+
 fn remove_route(cidr: &str) {
     let parts: Vec<&str> = cidr.split('/').collect();
     if parts.len() != 2 { return; }
