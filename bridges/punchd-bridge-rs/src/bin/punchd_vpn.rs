@@ -1073,12 +1073,15 @@ async fn run_agent() -> Result<(), String> {
                                     let state_clone = state.clone();
                                     let tun_clone = tun_name.clone();
 
+                                    // Read TideCloak config from vpn-config.toml
+                                    let file_cfg = load_file_config();
+
                                     let handle = tokio::spawn(async move {
                                         let cfg = ResolvedConfig {
                                             stun_server,
                                             gateway_id: gw_id.clone(),
-                                            tc_path: None,
-                                            tc_b64: None,
+                                            tc_path: file_cfg.tidecloak_config_path.clone(),
+                                            tc_b64: file_cfg.tidecloak_config_b64.clone(),
                                             ice_server,
                                             turn_server,
                                             turn_secret,
