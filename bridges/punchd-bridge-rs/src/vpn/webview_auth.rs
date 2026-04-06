@@ -357,7 +357,7 @@ mod imp {
                 }
             })
             .with_devtools(cfg!(debug_assertions))
-            .build_as_child(&window)
+            .build(&window)
             .map_err(|e| format!("Failed to create webview: {e}"))?;
 
         event_loop.run(move |event, _, control_flow| {
