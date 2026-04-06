@@ -50,7 +50,7 @@ RUN > C:\build.cmd echo @echo off `
  && >> C:\build.cmd echo cd /d C:\src `
  && >> C:\build.cmd echo if errorlevel 1 exit /b %%errorlevel%% `
  && >> C:\build.cmd echo echo === Step 1: Build punchd-vpn.exe === `
- && >> C:\build.cmd echo cargo build --release --bin punchd-vpn `
+ && >> C:\build.cmd echo cargo build --release --features webview --bin punchd-vpn `
  && >> C:\build.cmd echo if errorlevel 1 exit /b %%errorlevel%% `
  && >> C:\build.cmd echo copy target\release\punchd-vpn.exe wix\punchd-vpn.exe `
  && >> C:\build.cmd echo echo === Step 2: Compile custom actions DLL === `
