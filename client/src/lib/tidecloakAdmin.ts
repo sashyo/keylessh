@@ -1,11 +1,13 @@
 /**
- * Client-side TideCloak Admin API — calls TideCloak directly from the browser
- * using appFetch (DPoP-secured).
+ * Client-side TideCloak Admin API — proxied through our server for CORS + filtering.
  *
- * Requires TideCloak CORS to allow the app origin.
+ * Double DPoP:
+ *   1. appFetch signs DPoP proof for our server (auto)
+ *   2. tcProxy generates DPoP proof for TideCloak URL
  */
 import { IAMService } from "@tidecloak/js";
 import { appFetch } from "./appFetch";
+import { tcProxyFetch } from "./tcProxy";
 
 // Lazy-loaded config from /api/auth/config
 let _config: { realm: string; "auth-server-url": string; resource: string } | null = null;
@@ -29,39 +31,26 @@ async function getClientId() {
 }
 
 /**
- * Fetch wrapper for TideCloak admin API calls from the browser.
- * Uses appFetch which handles DPoP proof generation.
+ * Fetch wrapper for TideCloak admin API — proxied through our server.
+ * Server validates DPoP proof #1, forwards DPoP proof #2 to TideCloak,
+ * processes the response, then returns it to the browser.
  */
 async function tcFetch<T = any>(path: string, options: RequestInit = {}): Promise<T> {
   const base = await getTcUrl();
   const url = `${base}${path}`;
+  const method = (options.method || "GET").toUpperCase();
 
-  // secureFetch only adds DPoP when it sees Authorization: Bearer <our token>
-  const token = await IAMService.getToken();
-  const response = await appFetch(url, {
-    ...options,
-    headers: {
-      accept: "application/json",
-      Authorization: `Bearer ${token}`,
-      ...((options.headers as Record<string, string>) || {}),
-    },
-  });
-
-  if (!response.ok) {
-    const errorBody = await response.text().catch(() => response.statusText);
-    console.error(`[tcFetch] ${options.method || "GET"} ${url} → ${response.status}:`, errorBody);
-    throw new Error(`TideCloak API error: ${response.status} ${errorBody}`);
+  // Parse body if it's a string
+  let body: any = undefined;
+  if (options.body) {
+    try {
+      body = typeof options.body === "string" ? JSON.parse(options.body) : options.body;
+    } catch {
+      body = options.body;
+    }
   }
 
-  // Some endpoints return no body (204, or empty 200)
-  const text = await response.text();
-  if (!text) return undefined as T;
-
-  try {
-    return JSON.parse(text) as T;
-  } catch {
-    return text as T;
-  }
+  return tcProxyFetch<T>(url, method, body);
 }
 
 // ============================================
@@ -397,7 +386,7 @@ export async function updateRole(roleRep: { name: string; description?: string }
 export async function deleteRole(roleName: string): Promise<{ approvalCreated: boolean; message?: string }> {
   const clientIdStr = await getClientId();
   const client = await getClientByClientId(clientIdStr);
-  if (!client) throw new Error(`Client '${clientIdStr}' not found`);
+  if (!client?.id) throw new Error(`Client '${clientIdStr}' not found`);
 
   // Use role ID for deletion (role name with colons/slashes breaks URL path)
   const role = await findRoleByName(client.id, roleName);

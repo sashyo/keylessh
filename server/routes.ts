@@ -131,6 +131,7 @@ import {
 } from "./lib/tidecloakApi";
 import type { ChangeSetRequest, AccessApproval } from "./lib/auth/keycloakTypes";
 import { getAllowedSshUsersFromToken } from "./lib/auth/sshUsers";
+import { getAuthOverrideUrl } from "./lib/auth/tidecloakConfig";
 import { parseDestRolesFromToken, hasDestAccess } from "./lib/auth/destRoles";
 import { verifyTideCloakToken } from "./lib/auth/tideJWT";
 
@@ -192,6 +193,99 @@ export async function registerRoutes(
   app.get("/api/health", (_req, res) => {
     res.json({ status: "ok", timestamp: new Date().toISOString() });
   });
+
+  // ============================================
+  // TideCloak Admin Proxy (DPoP-authenticated)
+  // Browser signs two DPoP proofs:
+  //   1. DPoP header → validates identity with our server
+  //   2. X-TC-DPoP header → forwarded to TideCloak
+  // Server processes TideCloak response before returning to browser.
+  // ============================================
+
+  app.post(
+    "/api/tc-proxy",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const { url, method, body, headers: fwdHeaders } = req.body;
+
+        if (!url || !method) {
+          res.status(400).json({ error: "Missing url or method" });
+          return;
+        }
+
+        // Security: only allow proxying to our TideCloak server
+        const tcBaseUrl = getAuthOverrideUrl() || "";
+        if (!url.startsWith(tcBaseUrl) && !url.startsWith(tcBaseUrl.replace("http://", "https://"))) {
+          res.status(403).json({ error: "Proxy target must be the configured TideCloak server" });
+          return;
+        }
+
+        // Get the DPoP proof intended for TideCloak (signed with htu = TideCloak URL)
+        const tcDpopProof = req.headers["x-tc-dpop"] as string | undefined;
+        const tcToken = req.accessToken;
+
+        // Build headers for TideCloak request
+        const tcHeaders: Record<string, string> = {
+          "Content-Type": "application/json",
+        };
+
+        if (tcDpopProof && tcToken) {
+          // DPoP mode: forward the browser's DPoP proof to TideCloak
+          tcHeaders["Authorization"] = `DPoP ${tcToken}`;
+          tcHeaders["DPoP"] = tcDpopProof;
+        } else if (tcToken) {
+          // Bearer fallback
+          tcHeaders["Authorization"] = `Bearer ${tcToken}`;
+        }
+
+        // Forward any additional headers the browser specified
+        if (fwdHeaders) {
+          for (const [key, value] of Object.entries(fwdHeaders)) {
+            const k = key.toLowerCase();
+            // Don't override auth/dpop headers or host
+            if (k !== "authorization" && k !== "dpop" && k !== "host" && k !== "content-length") {
+              tcHeaders[key] = String(value);
+            }
+          }
+        }
+
+        // Make the request to TideCloak
+        const tcResponse = await fetch(url, {
+          method: method.toUpperCase(),
+          headers: tcHeaders,
+          body: method.toUpperCase() !== "GET" && method.toUpperCase() !== "HEAD" && body
+            ? JSON.stringify(body)
+            : undefined,
+        });
+
+        const responseText = await tcResponse.text();
+
+        // Log for audit
+        const user = req.user?.username || "unknown";
+        if (!tcResponse.ok) {
+          console.warn(`[TC-Proxy] ${user} ${method} ${url} → ${tcResponse.status}: ${responseText.substring(0, 200)}`);
+        } else {
+          console.log(`[TC-Proxy] ${user} ${method} ${url} → ${tcResponse.status}`);
+        }
+
+        // Parse response and return to browser
+        // Server can filter/transform the data here before sending
+        let responseData: any;
+        try {
+          responseData = JSON.parse(responseText);
+        } catch {
+          responseData = responseText;
+        }
+
+        res.status(tcResponse.status).json(responseData);
+      } catch (error) {
+        console.error(`[TC-Proxy] Error:`, error);
+        res.status(502).json({ error: "Failed to proxy request to TideCloak" });
+      }
+    }
+  );
 
   // ============================================
   // Stripe Webhook (unauthenticated, must come before auth middleware)
@@ -3103,7 +3197,7 @@ export async function registerRoutes(
         const requests = await GetRoleChangeRequests(token);
 
         // Transform to match frontend expectations
-        const approvals: AccessApproval[] = requests.map((req) => ({
+        const approvals = requests.map((req) => ({
           id: req.retrievalInfo.changeSetId,
           requestType: req.data.actionType || req.data.action,
           status: req.data.status,
