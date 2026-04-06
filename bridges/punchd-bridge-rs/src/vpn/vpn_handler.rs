@@ -101,15 +101,24 @@ impl FirewallRule {
         let network: Ipv4Addr = net_parts[0].parse().ok()?;
         let prefix: u8 = net_parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(32);
 
-        // Parse ports
+        // Parse ports: supports individual (80,443), ranges (3000-4000), or mixed (80,443,3000-4000)
         let port_idx = net_idx + 1;
         let ports = if parts.len() <= port_idx || parts[port_idx] == "*" {
             PortMatch::Any
         } else {
-            let port_list: Vec<u16> = parts[port_idx]
-                .split(',')
-                .filter_map(|p| p.trim().parse().ok())
-                .collect();
+            let mut port_list: Vec<u16> = Vec::new();
+            for segment in parts[port_idx].split(',') {
+                let segment = segment.trim();
+                if let Some((start, end)) = segment.split_once('-') {
+                    if let (Ok(s), Ok(e)) = (start.trim().parse::<u16>(), end.trim().parse::<u16>()) {
+                        for p in s..=e {
+                            port_list.push(p);
+                        }
+                    }
+                } else if let Ok(p) = segment.parse::<u16>() {
+                    port_list.push(p);
+                }
+            }
             if port_list.is_empty() {
                 PortMatch::Any
             } else {
