@@ -511,26 +511,28 @@ function CustomConnectionCard({ endpoint }: { endpoint: GatewayEndpoint }) {
             </div>
           </div>
 
-          {protocol === "ssh" && (
+          {(protocol === "ssh" || (protocol === "rdp" && eddsa)) && (
             <div className="space-y-2">
-              <Label>SSH Username</Label>
+              <Label>{protocol === "ssh" ? "SSH Username" : "RDP Username"}</Label>
               <Input
                 value={sshUser}
                 onChange={(e) => setSshUser(e.target.value)}
-                placeholder="root"
+                placeholder={protocol === "ssh" ? "root" : "Administrator"}
                 onKeyDown={(e) => e.key === "Enter" && handleConnect()}
               />
             </div>
           )}
 
-          {protocol === "rdp" && (
+          {(protocol === "rdp" || protocol === "web") && (
             <div className="space-y-2">
               <Label className="text-xs text-muted-foreground">Connection Options</Label>
               <div className="flex flex-wrap gap-4">
-                <label className="flex items-center gap-2 text-sm cursor-pointer">
-                  <input type="checkbox" checked={eddsa} onChange={(e) => setEddsa(e.target.checked)} className="rounded" />
-                  Passwordless (EdDSA)
-                </label>
+                {protocol === "rdp" && (
+                  <label className="flex items-center gap-2 text-sm cursor-pointer">
+                    <input type="checkbox" checked={eddsa} onChange={(e) => setEddsa(e.target.checked)} className="rounded" />
+                    Passwordless (EdDSA)
+                  </label>
+                )}
                 <label className="flex items-center gap-2 text-sm cursor-pointer">
                   <input type="checkbox" checked={noAuth} onChange={(e) => setNoAuth(e.target.checked)} className="rounded" />
                   No Auth
