@@ -16,7 +16,6 @@ import type {
 
 import { IAMService } from "@tidecloak/js";
 import { appFetch } from "./appFetch";
-import { generateTcDPoPProof } from "./tcProxy";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 
@@ -25,6 +24,11 @@ function toAbsoluteUrl(path: string): string {
   return `${window.location.origin}${path}`;
 }
 
+/**
+ * API request to our server. DPoP proof (browser → server) is handled
+ * automatically by appFetch/secureFetch. DPoP proofs for TideCloak
+ * are requested by the server via the DPoP signer WebSocket.
+ */
 async function apiRequest<T>(
   endpoint: string,
   options: RequestInit = {}
@@ -36,68 +40,6 @@ async function apiRequest<T>(
     ...(token && { Authorization: `Bearer ${token}` }),
     ...options.headers,
   };
-
-  const response = await appFetch(toAbsoluteUrl(`${API_BASE}${endpoint}`), {
-    ...options,
-    headers,
-  });
-
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ message: "Request failed" }));
-    throw new Error(error.message || `HTTP ${response.status}`);
-  }
-
-  if (response.status === 204) {
-    return undefined as T;
-  }
-
-  return response.json();
-}
-
-// Lazy-loaded TideCloak admin base URL
-let _tcAdminUrl: string | null = null;
-async function getTcAdminUrl(): Promise<string> {
-  if (!_tcAdminUrl) {
-    const res = await fetch("/api/auth/config");
-    const cfg = await res.json();
-    _tcAdminUrl = `${(cfg["auth-server-url"] || cfg.url || "").replace(/\/+$/, "")}/admin/realms/${cfg.realm}`;
-  }
-  return _tcAdminUrl;
-}
-
-/**
- * API request for admin endpoints that call TideCloak.
- * Signs a second DPoP proof (X-TC-DPoP) for the TideCloak URL
- * so the server can forward it with proper DPoP binding.
- *
- * @param endpoint - Our server endpoint (e.g., /api/admin/users)
- * @param tcPath - TideCloak admin path this endpoint calls (e.g., /users)
- * @param tcMethod - HTTP method the server uses for TideCloak (defaults to same as endpoint)
- */
-async function tcApiRequest<T>(
-  endpoint: string,
-  options: RequestInit = {},
-  tcPath?: string,
-  tcMethod?: string,
-): Promise<T> {
-  const token = await IAMService.getToken();
-  const method = (options.method || "GET").toUpperCase();
-
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    ...(token && { Authorization: `Bearer ${token}` }),
-    ...((options.headers as Record<string, string>) || {}),
-  };
-
-  // Generate DPoP proof #2 for TideCloak
-  if (tcPath) {
-    const tcBase = await getTcAdminUrl();
-    const tcUrl = `${tcBase}${tcPath}`;
-    const proof = await generateTcDPoPProof(tcUrl, tcMethod || method);
-    if (proof) {
-      headers["X-TC-DPoP"] = proof;
-    }
-  }
 
   const response = await appFetch(toAbsoluteUrl(`${API_BASE}${endpoint}`), {
     ...options,
@@ -227,29 +169,29 @@ export const api = {
         apiRequest<void>(`/api/admin/signal-servers/${id}`, { method: "DELETE" }),
     },
     users: {
-      list: () => tcApiRequest<AdminUser[]>("/api/admin/users", {}, "/users"),
+      list: () => apiRequest<AdminUser[]>("/api/admin/users"),
       add: (data: { username: string; firstName: string; lastName: string; email: string }) =>
-        tcApiRequest<{ message: string }>("/api/admin/users/add", { method: "POST", body: JSON.stringify(data) }, "/users", "POST"),
+        apiRequest<{ message: string }>("/api/admin/users/add", { method: "POST", body: JSON.stringify(data) }),
       updateProfile: (data: { id: string; firstName: string; lastName: string; email: string }) =>
-        tcApiRequest<{ message: string }>("/api/admin/users", { method: "PUT", body: JSON.stringify(data) }, `/users/${data.id}`, "PUT"),
+        apiRequest<{ message: string }>("/api/admin/users", { method: "PUT", body: JSON.stringify(data) }),
       updateRoles: (data: { id: string; rolesToAdd?: string[]; rolesToRemove?: string[] }) =>
-        tcApiRequest<{ message: string }>("/api/admin/users", { method: "POST", body: JSON.stringify(data) }, `/users/${data.id}/role-mappings`, "POST"),
+        apiRequest<{ message: string }>("/api/admin/users", { method: "POST", body: JSON.stringify(data) }),
       delete: (userId: string) =>
-        tcApiRequest<{ success: boolean }>(`/api/admin/users?userId=${userId}`, { method: "DELETE" }, `/users/${userId}`, "DELETE"),
+        apiRequest<{ success: boolean }>(`/api/admin/users?userId=${userId}`, { method: "DELETE" }),
       getTideLinkUrl: (userId: string, redirectUri?: string) =>
-        tcApiRequest<{ linkUrl: string }>(`/api/admin/users/tide?userId=${userId}&redirect_uri=${encodeURIComponent(redirectUri || window.location.origin)}`, {}, "/tideAdminResources/get-required-action-link", "POST"),
+        apiRequest<{ linkUrl: string }>(`/api/admin/users/tide?userId=${userId}&redirect_uri=${encodeURIComponent(redirectUri || window.location.origin)}`),
       setEnabled: (userId: string, enabled: boolean) =>
-        tcApiRequest<{ success: boolean; enabled: boolean }>(`/api/admin/users/${userId}/enabled`, { method: "PUT", body: JSON.stringify({ enabled }) }, `/users/${userId}`, "PUT"),
+        apiRequest<{ success: boolean; enabled: boolean }>(`/api/admin/users/${userId}/enabled`, { method: "PUT", body: JSON.stringify({ enabled }) }),
     },
     roles: {
-      list: () => tcApiRequest<{ roles: AdminRole[] }>("/api/admin/roles", {}, "/clients"),
-      listAll: () => tcApiRequest<{ roles: AdminRole[] }>("/api/admin/roles/all", {}, "/clients"),
+      list: () => apiRequest<{ roles: AdminRole[] }>("/api/admin/roles"),
+      listAll: () => apiRequest<{ roles: AdminRole[] }>("/api/admin/roles/all"),
       create: (data: { name: string; description?: string; policy?: SshPolicyConfig }) =>
-        tcApiRequest<{ success: string }>("/api/admin/roles", { method: "POST", body: JSON.stringify(data) }, "/clients", "POST"),
+        apiRequest<{ success: string }>("/api/admin/roles", { method: "POST", body: JSON.stringify(data) }),
       update: (data: { name: string; description?: string }) =>
-        tcApiRequest<{ success: string }>("/api/admin/roles", { method: "PUT", body: JSON.stringify(data) }, "/roles-by-id", "PUT"),
+        apiRequest<{ success: string }>("/api/admin/roles", { method: "PUT", body: JSON.stringify(data) }),
       delete: (roleName: string) =>
-        tcApiRequest<{ success: string; approvalCreated: boolean }>(`/api/admin/roles?roleName=${encodeURIComponent(roleName)}`, { method: "DELETE" }, "/roles-by-id", "DELETE"),
+        apiRequest<{ success: string; approvalCreated: boolean }>(`/api/admin/roles?roleName=${encodeURIComponent(roleName)}`, { method: "DELETE" }),
       policies: {
         list: () => apiRequest<{ policies: SshPolicyResponse[] }>("/api/admin/roles/policies"),
         get: (roleName: string) =>
@@ -300,41 +242,41 @@ export const api = {
     },
     logs: {
       access: (limit?: number, offset?: number) =>
-        tcApiRequest<TidecloakEvent[]>(`/api/admin/logs/access?limit=${limit || 100}&offset=${offset || 0}`, {}, "/events"),
+        apiRequest<TidecloakEvent[]>(`/api/admin/logs/access?limit=${limit || 100}&offset=${offset || 0}`),
       fileOperations: (limit?: number, offset?: number) =>
         apiRequest<{ operations: FileOperationLog[]; total: number }>(
           `/api/admin/logs/file-operations?limit=${limit || 100}&offset=${offset || 0}`
         ),
     },
     accessApprovals: {
-      list: () => tcApiRequest<AccessApproval[]>("/api/admin/access-approvals", {}, "/tide-admin/change-set/users/requests"),
+      list: () => apiRequest<AccessApproval[]>("/api/admin/access-approvals"),
       getRaw: (changeSet: ChangeSetRequest) =>
-        tcApiRequest<{ rawRequests: any }>("/api/admin/access-approvals/raw", { method: "POST", body: JSON.stringify({ changeSet }) }, "/tide-admin/change-set/sign/batch", "POST"),
+        apiRequest<{ rawRequests: any }>("/api/admin/access-approvals/raw", { method: "POST", body: JSON.stringify({ changeSet }) }),
       approve: (changeSet: ChangeSetRequest, signedRequest?: string) =>
-        tcApiRequest<{ message: string }>("/api/admin/access-approvals/approve", { method: "POST", body: JSON.stringify({ changeSet, signedRequest }) }, "/tideAdminResources/add-review", "POST"),
+        apiRequest<{ message: string }>("/api/admin/access-approvals/approve", { method: "POST", body: JSON.stringify({ changeSet, signedRequest }) }),
       approveWithId: (changeSetId: string, actionType: string, changeSetType: string, signedRequest: string) =>
-        tcApiRequest<{ message: string }>("/api/admin/access-approvals/approve-with-id", { method: "POST", body: JSON.stringify({ changeSetId, actionType, changeSetType, signedRequest }) }, "/tideAdminResources/add-review", "POST"),
+        apiRequest<{ message: string }>("/api/admin/access-approvals/approve-with-id", { method: "POST", body: JSON.stringify({ changeSetId, actionType, changeSetType, signedRequest }) }),
       reject: (changeSet: ChangeSetRequest) =>
-        tcApiRequest<{ message: string }>("/api/admin/access-approvals/reject", { method: "POST", body: JSON.stringify({ changeSet }) }, "/tideAdminResources/add-rejection", "POST"),
+        apiRequest<{ message: string }>("/api/admin/access-approvals/reject", { method: "POST", body: JSON.stringify({ changeSet }) }),
       commit: (changeSet: ChangeSetRequest) =>
-        tcApiRequest<{ message: string }>("/api/admin/access-approvals/commit", { method: "POST", body: JSON.stringify({ changeSet }) }, "/tide-admin/change-set/commit", "POST"),
+        apiRequest<{ message: string }>("/api/admin/access-approvals/commit", { method: "POST", body: JSON.stringify({ changeSet }) }),
       cancel: (changeSet: ChangeSetRequest) =>
-        tcApiRequest<{ message: string }>("/api/admin/access-approvals/cancel", { method: "POST", body: JSON.stringify({ changeSet }) }, "/tide-admin/change-set/cancel", "POST"),
+        apiRequest<{ message: string }>("/api/admin/access-approvals/cancel", { method: "POST", body: JSON.stringify({ changeSet }) }),
     },
     roleApprovals: {
-      list: () => tcApiRequest<RoleApproval[]>("/api/admin/role-approvals", {}, "/tide-admin/change-set/roles/requests"),
+      list: () => apiRequest<RoleApproval[]>("/api/admin/role-approvals"),
       getRaw: (changeSet: ChangeSetRequest) =>
-        tcApiRequest<{ rawRequests: any }>("/api/admin/role-approvals/raw", { method: "POST", body: JSON.stringify({ changeSet }) }, "/tide-admin/change-set/sign/batch", "POST"),
+        apiRequest<{ rawRequests: any }>("/api/admin/role-approvals/raw", { method: "POST", body: JSON.stringify({ changeSet }) }),
       approve: (changeSet: ChangeSetRequest, signedRequest?: string) =>
-        tcApiRequest<{ message: string }>("/api/admin/role-approvals/approve", { method: "POST", body: JSON.stringify({ changeSet, signedRequest }) }, "/tideAdminResources/add-review", "POST"),
+        apiRequest<{ message: string }>("/api/admin/role-approvals/approve", { method: "POST", body: JSON.stringify({ changeSet, signedRequest }) }),
       approveWithId: (changeSetId: string, actionType: string, changeSetType: string, signedRequest: string) =>
-        tcApiRequest<{ message: string }>("/api/admin/role-approvals/approve-with-id", { method: "POST", body: JSON.stringify({ changeSetId, actionType, changeSetType, signedRequest }) }, "/tideAdminResources/add-review", "POST"),
+        apiRequest<{ message: string }>("/api/admin/role-approvals/approve-with-id", { method: "POST", body: JSON.stringify({ changeSetId, actionType, changeSetType, signedRequest }) }),
       reject: (changeSet: ChangeSetRequest) =>
-        tcApiRequest<{ message: string }>("/api/admin/role-approvals/reject", { method: "POST", body: JSON.stringify({ changeSet }) }, "/tideAdminResources/add-rejection", "POST"),
+        apiRequest<{ message: string }>("/api/admin/role-approvals/reject", { method: "POST", body: JSON.stringify({ changeSet }) }),
       commit: (changeSet: ChangeSetRequest) =>
-        tcApiRequest<{ message: string }>("/api/admin/role-approvals/commit", { method: "POST", body: JSON.stringify({ changeSet }) }, "/tide-admin/change-set/commit", "POST"),
+        apiRequest<{ message: string }>("/api/admin/role-approvals/commit", { method: "POST", body: JSON.stringify({ changeSet }) }),
       cancel: (changeSet: ChangeSetRequest) =>
-        tcApiRequest<{ message: string }>("/api/admin/role-approvals/cancel", { method: "POST", body: JSON.stringify({ changeSet }) }, "/tide-admin/change-set/cancel", "POST"),
+        apiRequest<{ message: string }>("/api/admin/role-approvals/cancel", { method: "POST", body: JSON.stringify({ changeSet }) }),
     },
     sshPolicies: {
       listPending: () =>

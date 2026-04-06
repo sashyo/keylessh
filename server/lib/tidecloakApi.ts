@@ -8,41 +8,66 @@ import {
 } from "./auth/keycloakTypes";
 import { Roles } from "@shared/config/roles";
 import { getAuthOverrideUrl, getRealm, getResource } from "./auth/tidecloakConfig";
+import { requestDPoPProof } from "./dpopSigner";
 
 // ============================================
-// Request-scoped DPoP context
-// When the browser sends X-TC-DPoP, the middleware stores it here
-// so all TideCloak API calls within the request use DPoP auth.
+// Request-scoped context — stores the authenticated user's ID
+// so TideCloak API calls can request DPoP proofs via WebSocket.
 // ============================================
 
-interface TcDPoPContext {
+interface TcRequestContext {
   token: string;
-  dpopProof?: string;
+  userId: string;
 }
 
-const tcDPoPStorage = new AsyncLocalStorage<TcDPoPContext>();
+const tcRequestStorage = new AsyncLocalStorage<TcRequestContext>();
 
-/** Middleware: extract X-TC-DPoP and token, store in async context */
+/** Middleware: store token and userId in async context for TideCloak calls */
 export function withTcDPoP(req: any, _res: any, next: any) {
-  const dpopProof = req.headers["x-tc-dpop"] as string | undefined;
   const token = req.accessToken as string | undefined;
-  if (token) {
-    tcDPoPStorage.run({ token, dpopProof }, next);
+  const userId = req.tokenPayload?.sub as string | undefined;
+  if (token && userId) {
+    tcRequestStorage.run({ token, userId }, next);
   } else {
     next();
   }
 }
 
-/** Build Authorization headers for TideCloak — uses DPoP if available */
-export function tcAuthHeaders(token: string): Record<string, string> {
-  const ctx = tcDPoPStorage.getStore();
-  if (ctx?.dpopProof) {
-    return {
-      Authorization: `DPoP ${ctx.token}`,
-      DPoP: ctx.dpopProof,
-    };
+/**
+ * Build Authorization headers for a TideCloak API call.
+ * If a DPoP signer is connected, requests a fresh proof for the specific URL.
+ * Falls back to Bearer token if no signer is available.
+ */
+export async function tcAuthHeaders(token: string, url?: string, method?: string): Promise<Record<string, string>> {
+  const ctx = tcRequestStorage.getStore();
+  if (ctx && url && method) {
+    const proof = await requestDPoPProof(ctx.userId, url, method);
+    if (proof) {
+      return {
+        Authorization: `DPoP ${ctx.token}`,
+        DPoP: proof,
+      };
+    }
   }
   return { Authorization: `Bearer ${token}` };
+}
+
+/** Sync version for backwards compatibility — Bearer only */
+export function tcAuthHeadersSync(token: string): Record<string, string> {
+  return { Authorization: `Bearer ${token}` };
+}
+
+/** Fetch wrapper that handles async DPoP auth headers */
+async function tcFetch(url: string, token: string, options: RequestInit = {}): Promise<Response> {
+  const method = (options.method || "GET").toUpperCase();
+  const authHeaders = await tcAuthHeaders(token, url, method);
+  return fetch(url, {
+    ...options,
+    headers: {
+      ...authHeaders,
+      ...((options.headers as Record<string, string>) || {}),
+    },
+  });
 }
 
 // Lazy-evaluated getters to avoid calling config functions at module load time
@@ -136,13 +161,7 @@ export const syncPolicyToTideCloak = async (
 ): Promise<void> => {
   const url = `${getTcUrl()}/tide-admin/ssh-policies`;
   console.log(`[PolicySync] PUT ${url}`, JSON.stringify(policy).substring(0, 200));
-  const response = await fetch(url, {
-    method: "PUT",
-    headers: {
-      "Content-Type": "application/json",
-      ...tcAuthHeaders(token),
-    },
-    body: JSON.stringify(policy),
+  const response = await tcFetch(url, token, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(policy),
   });
 
   const responseBody = await response.text();
@@ -185,13 +204,7 @@ export const GetClientEvents = async (
     client: clientId,
   });
 
-  const response = await fetch(`${getTcUrl()}/events?${params.toString()}`, {
-    method: "GET",
-    headers: {
-      accept: "application/json",
-      ...tcAuthHeaders(token),
-    },
-  });
+  const response = await tcFetch(`${getTcUrl()}/events?${params.toString()}`, token, { method: "GET", headers: { accept: "application/json" } });
 
   if (!response.ok) {
     const errorBody = await response.text();
@@ -205,13 +218,7 @@ export const getUserByVuid = async (
   vuid: string,
   token: string
 ): Promise<UserRepresentation[]> => {
-  const response = await fetch(`${getTcUrl()}/users?q=vuid:${vuid}`, {
-    method: "GET",
-    headers: {
-      accept: "application/json",
-      ...tcAuthHeaders(token),
-    },
-  });
+  const response = await tcFetch(`${getTcUrl()}/users?q=vuid:${vuid}`, token, { method: "GET", headers: { accept: "application/json" } });
 
   if (!response.ok) {
     throw new Error(`Error fetching user: ${response.statusText}`);
@@ -230,13 +237,7 @@ export const getRoleById = async (
   if (client === null) {
     return {};
   }
-  const response = await fetch(`${getTcUrl()}/roles-by-id/${roleId}`, {
-    method: "GET",
-    headers: {
-      accept: "application/json",
-      ...tcAuthHeaders(token),
-    },
-  });
+  const response = await tcFetch(`${getTcUrl()}/roles-by-id/${roleId}`, token, { method: "GET", headers: { accept: "application/json" } });
   if (!response.ok) {
     console.error(`Error fetching role by id: ${response.statusText}`);
     return {};
@@ -259,13 +260,7 @@ export const getClientRoles = async (
   if (client === null) {
     return [];
   }
-  const response = await fetch(`${getTcUrl()}/clients/${client.id}/roles`, {
-    method: "GET",
-    headers: {
-      accept: "application/json",
-      ...tcAuthHeaders(token),
-    },
-  });
+  const response = await tcFetch(`${getTcUrl()}/clients/${client.id}/roles`, token, { method: "GET", headers: { accept: "application/json" } });
   if (!response.ok) {
     console.error(`Error fetching client roles: ${response.statusText}`);
     return [];
@@ -287,16 +282,8 @@ export const getTideRealmAdminRole = async (
   );
   if (client === null) throw new Error("No client found with clientId: " + REALM_MGMT);
 
-  const response = await fetch(
-    `${getTcUrl()}/clients/${client.id}/roles?search=${Roles.Admin}`,
-    {
-      method: "GET",
-      headers: {
-        accept: "application/json",
-        ...tcAuthHeaders(token),
-      },
-    }
-  );
+  const response = await tcFetch(
+    `${getTcUrl()}/clients/${client.id}/roles?search=${Roles.Admin}`, token, { method: "GET", headers: { accept: "application/json" } });
   if (!response.ok) {
     console.error(`Error fetching tide realm admin role: ${response.statusText}`);
     throw new Error("Error fetching tide realm admin role");
@@ -316,12 +303,7 @@ export const getClientByClientId = async (
   if (cached && Date.now() < cached.expiry) return cached.data;
 
   try {
-    const response = await fetch(`${getTcUrl()}/clients?clientId=${clientId}`, {
-      method: "GET",
-      headers: {
-        ...tcAuthHeaders(token),
-      },
-    });
+    const response = await tcFetch(`${getTcUrl()}/clients?clientId=${clientId}`, token);
     if (!response.ok) {
       console.error(`Error fetching client by clientId: ${response.statusText}`);
       return null;
@@ -345,12 +327,7 @@ export const getClientById = async (
   if (cached && Date.now() < cached.expiry) return cached.data;
 
   try {
-    const response = await fetch(`${getTcUrl()}/clients/${id}`, {
-      method: "GET",
-      headers: {
-        ...tcAuthHeaders(token),
-      },
-    });
+    const response = await tcFetch(`${getTcUrl()}/clients/${id}`, token);
     if (!response.ok) {
       console.error(`Error fetching client by id: ${response.statusText}`);
       return null;
@@ -369,13 +346,7 @@ export const createRoleForClient = async (
   roleRep: RoleRepresentation,
   token: string
 ): Promise<void> => {
-  const response = await fetch(`${getTcUrl()}/clients/${clientuuid}/roles`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...tcAuthHeaders(token),
-    },
-    body: JSON.stringify(roleRep),
+  const response = await tcFetch(`${getTcUrl()}/clients/${clientuuid}/roles`, token, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(roleRep),
   });
   if (!response.ok) {
     const errorBody = await response.text();
@@ -393,15 +364,8 @@ export const getClientRoleByName = async (
   clientuuid: string,
   token: string
 ): Promise<RoleRepresentation> => {
-  const response = await fetch(
-    `${getTcUrl()}/clients/${clientuuid}/roles`,
-    {
-      method: "GET",
-      headers: {
-        ...tcAuthHeaders(token),
-      },
-    }
-  );
+  const response = await tcFetch(
+    `${getTcUrl()}/clients/${clientuuid}/roles`, token);
   if (!response.ok) {
     const errorBody = await response.text();
     throw new Error(`Error fetching client roles: ${errorBody}`);
@@ -413,12 +377,7 @@ export const getClientRoleByName = async (
 };
 
 export const GetUsers = async (token: string): Promise<UserRepresentation[]> => {
-  const response = await fetch(`${getTcUrl()}/users?briefRepresentation=false`, {
-    method: "GET",
-    headers: {
-      ...tcAuthHeaders(token),
-    },
-  });
+  const response = await tcFetch(`${getTcUrl()}/users?briefRepresentation=false`, token);
 
   if (!response.ok) {
     console.error(`Error getting users: ${response.statusText}`);
@@ -443,15 +402,8 @@ export const GrantUserRole = async (
     roleName === Roles.Admin
       ? await getTideRealmAdminRole(token)
       : await getClientRoleByName(roleName, client.id, token);
-  const response = await fetch(
-    `${getTcUrl()}/users/${userId}/role-mappings/clients/${client.id}`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...tcAuthHeaders(token),
-      },
-      body: JSON.stringify([role]),
+  const response = await tcFetch(
+    `${getTcUrl()}/users/${userId}/role-mappings/clients/${client.id}`, token, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify([role]),
     }
   );
   if (!response.ok) {
@@ -470,12 +422,7 @@ export const UpdateUser = async (
   token: string
 ): Promise<void> => {
   // Fetch the current user to preserve other fields
-  const userResponse = await fetch(`${getTcUrl()}/users/${userId}`, {
-    method: "GET",
-    headers: {
-      ...tcAuthHeaders(token),
-    },
-  });
+  const userResponse = await tcFetch(`${getTcUrl()}/users/${userId}`, token);
 
   if (!userResponse.ok) {
     throw new Error(`Error fetching user: ${userResponse.statusText}`);
@@ -484,13 +431,7 @@ export const UpdateUser = async (
   const user = await userResponse.json();
   const updatedUserRep = { ...user, firstName, lastName, email };
 
-  const response = await fetch(`${getTcUrl()}/users/${userId}`, {
-    method: "PUT",
-    headers: {
-      "Content-Type": "application/json",
-      ...tcAuthHeaders(token),
-    },
-    body: JSON.stringify(updatedUserRep),
+  const response = await tcFetch(`${getTcUrl()}/users/${userId}`, token, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(updatedUserRep),
   });
 
   if (!response.ok) {
@@ -503,12 +444,7 @@ export const UpdateUser = async (
 };
 
 export const DeleteUser = async (userId: string, token: string): Promise<void> => {
-  const response = await fetch(`${getTcUrl()}/users/${userId}`, {
-    method: "DELETE",
-    headers: {
-      ...tcAuthHeaders(token),
-    },
-  });
+  const response = await tcFetch(`${getTcUrl()}/users/${userId}`, token, { method: "DELETE" });
 
   if (!response.ok) {
     const errorBody = await response.text();
@@ -525,12 +461,7 @@ export const SetUserEnabled = async (
   token: string
 ): Promise<void> => {
   // Fetch the current user to preserve other fields
-  const userResponse = await fetch(`${getTcUrl()}/users/${userId}`, {
-    method: "GET",
-    headers: {
-      ...tcAuthHeaders(token),
-    },
-  });
+  const userResponse = await tcFetch(`${getTcUrl()}/users/${userId}`, token);
 
   if (!userResponse.ok) {
     throw new Error(`Error fetching user: ${userResponse.statusText}`);
@@ -539,13 +470,7 @@ export const SetUserEnabled = async (
   const user = await userResponse.json();
   const updatedUserRep = { ...user, enabled };
 
-  const response = await fetch(`${getTcUrl()}/users/${userId}`, {
-    method: "PUT",
-    headers: {
-      "Content-Type": "application/json",
-      ...tcAuthHeaders(token),
-    },
-    body: JSON.stringify(updatedUserRep),
+  const response = await tcFetch(`${getTcUrl()}/users/${userId}`, token, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(updatedUserRep),
   });
 
   if (!response.ok) {
@@ -571,15 +496,8 @@ export const DeleteRole = async (roleName: string, token: string): Promise<Delet
   // Look up role by name to get UUID (name in URL path breaks on colons/slashes)
   const role = await getClientRoleByName(roleName, client!.id!, token);
 
-  const response = await fetch(
-    `${getTcUrl()}/roles-by-id/${role.id}`,
-    {
-      method: "DELETE",
-      headers: {
-        ...tcAuthHeaders(token),
-      },
-    }
-  );
+  const response = await tcFetch(
+    `${getTcUrl()}/roles-by-id/${role.id}`, token, { method: "DELETE" });
 
   if (!response.ok) {
     const errorBody = await response.text();
@@ -613,15 +531,8 @@ export const UpdateRole = async (
   }
 
   // Use roles-by-id to avoid colons/slashes in URL path
-  const response = await fetch(
-    `${getTcUrl()}/roles-by-id/${role.id}`,
-    {
-      method: "PUT",
-      headers: {
-        "Content-Type": "application/json",
-        ...tcAuthHeaders(token),
-      },
-      body: JSON.stringify(roleRep),
+  const response = await tcFetch(
+    `${getTcUrl()}/roles-by-id/${role.id}`, token, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(roleRep),
     }
   );
 
@@ -651,15 +562,8 @@ export const RemoveUserRole = async (
       ? await getTideRealmAdminRole(token)
       : await getClientRoleByName(roleName, client.id, token);
 
-  const response = await fetch(
-    `${getTcUrl()}/users/${userId}/role-mappings/clients/${client.id}`,
-    {
-      method: "DELETE",
-      headers: {
-        "Content-Type": "application/json",
-        ...tcAuthHeaders(token),
-      },
-      body: JSON.stringify([{ id: role.id, name: role.name }]),
+  const response = await tcFetch(
+    `${getTcUrl()}/users/${userId}/role-mappings/clients/${client.id}`, token, { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify([{ id: role.id, name: role.name }]),
     }
   );
   if (!response.ok) {
@@ -674,13 +578,7 @@ export const AddUser = async (
   userRep: UserRepresentation,
   token: string
 ): Promise<void> => {
-  const response = await fetch(`${getTcUrl()}/users`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...tcAuthHeaders(token),
-    },
-    body: JSON.stringify(userRep),
+  const response = await tcFetch(`${getTcUrl()}/users`, token, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(userRep),
   });
   if (!response.ok) {
     const errorBody = await response.text();
@@ -694,12 +592,7 @@ export const GetUserRoleMappings = async (
   userId: string,
   token: string
 ): Promise<MappingsRepresentation> => {
-  const response = await fetch(`${getTcUrl()}/users/${userId}/role-mappings`, {
-    method: "GET",
-    headers: {
-      ...tcAuthHeaders(token),
-    },
-  });
+  const response = await tcFetch(`${getTcUrl()}/users/${userId}/role-mappings`, token);
 
   if (!response.ok) {
     console.error(`Error getting user role mappings: ${response.statusText}`);
@@ -716,15 +609,8 @@ export const GetTideLinkUrl = async (
   if (!userId || !token) {
     throw new Error("UserId and token must be provided.");
   }
-  const response = await fetch(
-    `${getTcUrl()}/tideAdminResources/get-required-action-link?userId=${userId}&lifespan=43200&redirect_uri=${redirect_uri}&client_id=${getClient()}`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...tcAuthHeaders(token),
-      },
-      body: JSON.stringify(["link-tide-account-action"]),
+  const response = await tcFetch(
+    `${getTcUrl()}/tideAdminResources/get-required-action-link?userId=${userId}&lifespan=43200&redirect_uri=${redirect_uri}&client_id=${getClient()}`, token, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(["link-tide-account-action"]),
     }
   );
 
@@ -756,15 +642,8 @@ export const GetAllRoles = async (
 export const GetUserChangeRequests = async (
   token: string
 ): Promise<{ data: any; retrievalInfo: ChangeSetRequest }[]> => {
-  const response = await fetch(
-    `${getTcUrl()}/tide-admin/change-set/users/requests`,
-    {
-      method: "GET",
-      headers: {
-        ...tcAuthHeaders(token),
-      },
-    }
-  );
+  const response = await tcFetch(
+    `${getTcUrl()}/tide-admin/change-set/users/requests`, token);
 
   if (!response.ok) {
     const errorBody = await response.text();
@@ -790,15 +669,8 @@ export const GetUserChangeRequests = async (
 export const GetRoleChangeRequests = async (
   token: string
 ): Promise<{ data: any; retrievalInfo: ChangeSetRequest }[]> => {
-  const response = await fetch(
-    `${getTcUrl()}/tide-admin/change-set/roles/requests`,
-    {
-      method: "GET",
-      headers: {
-        ...tcAuthHeaders(token),
-      },
-    }
-  );
+  const response = await tcFetch(
+    `${getTcUrl()}/tide-admin/change-set/roles/requests`, token);
 
   if (!response.ok) {
     const errorBody = await response.text();
@@ -830,11 +702,11 @@ export const AddApprovalToChangeRequest = async (
   formData.append("actionType", changeSet.actionType);
   formData.append("changeSetType", changeSet.changeSetType);
 
-  const response = await fetch(`${getTcUrl()}/tideAdminResources/add-review`, {
+  const reviewUrl = `${getTcUrl()}/tideAdminResources/add-review`;
+  const authHeaders = await tcAuthHeaders(token, reviewUrl, "POST");
+  const response = await fetch(reviewUrl, {
     method: "POST",
-    headers: {
-      ...tcAuthHeaders(token),
-    },
+    headers: authHeaders,
     body: formData,
   });
 
@@ -857,16 +729,13 @@ export const AddRejectionToChangeRequest = async (
   formData.append("changeSetId", changeSet.changeSetId);
   formData.append("changeSetType", changeSet.changeSetType);
 
-  const response = await fetch(
-    `${getTcUrl()}/tideAdminResources/add-rejection`,
-    {
-      method: "POST",
-      headers: {
-        ...tcAuthHeaders(token),
-      },
-      body: formData,
-    }
-  );
+  const rejectionUrl = `${getTcUrl()}/tideAdminResources/add-rejection`;
+  const authHeaders = await tcAuthHeaders(token, rejectionUrl, "POST");
+  const response = await fetch(rejectionUrl, {
+    method: "POST",
+    headers: authHeaders,
+    body: formData,
+  });
 
   if (!response.ok) {
     const errorBody = await response.text();
@@ -884,13 +753,7 @@ export const CommitChangeRequest = async (
   changeSet: ChangeSetRequest,
   token: string
 ): Promise<void> => {
-  const response = await fetch(`${getTcUrl()}/tide-admin/change-set/commit`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...tcAuthHeaders(token),
-    },
-    body: JSON.stringify(changeSet),
+  const response = await tcFetch(`${getTcUrl()}/tide-admin/change-set/commit`, token, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(changeSet),
   });
 
   if (!response.ok) {
@@ -905,13 +768,7 @@ export const CancelChangeRequest = async (
   changeSet: ChangeSetRequest,
   token: string
 ): Promise<void> => {
-  const response = await fetch(`${getTcUrl()}/tide-admin/change-set/cancel`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...tcAuthHeaders(token),
-    },
-    body: JSON.stringify(changeSet),
+  const response = await tcFetch(`${getTcUrl()}/tide-admin/change-set/cancel`, token, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(changeSet),
   });
 
   if (!response.ok) {
@@ -932,13 +789,7 @@ export const GetRawChangeSetRequest = async (
   changeSet: ChangeSetRequest,
   token: string
 ): Promise<RawChangeSetResponse[]> => {
-  const response = await fetch(`${getTcUrl()}/tide-admin/change-set/sign/batch`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...tcAuthHeaders(token),
-    },
-    body: JSON.stringify({ changeSets: [changeSet] }),
+  const response = await tcFetch(`${getTcUrl()}/tide-admin/change-set/sign/batch`, token, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ changeSets: [changeSet] }),
   });
 
   if (!response.ok) {
@@ -963,11 +814,11 @@ export const AddApprovalWithSignedRequest = async (
   formData.append("changeSetType", changeSet.changeSetType);
   formData.append("requests", signedRequest);
 
-  const response = await fetch(`${getTcUrl()}/tideAdminResources/add-review`, {
+  const signedReviewUrl = `${getTcUrl()}/tideAdminResources/add-review`;
+  const signedAuthHeaders = await tcAuthHeaders(token, signedReviewUrl, "POST");
+  const response = await fetch(signedReviewUrl, {
     method: "POST",
-    headers: {
-      ...tcAuthHeaders(token),
-    },
+    headers: signedAuthHeaders,
     body: formData,
   });
 

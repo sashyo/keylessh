@@ -76,6 +76,10 @@ app.use((req, res, next) => {
     setupWSBridge(httpServer);
   }
 
+  // DPoP signing oracle — browser connects via WebSocket to sign TideCloak proofs on demand
+  const { setupDPoPSigner } = await import("./lib/dpopSigner");
+  setupDPoPSigner(httpServer);
+
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
     const message = err.message || "Internal Server Error";

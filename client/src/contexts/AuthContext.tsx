@@ -106,6 +106,9 @@ function TideCloakAuthBridge({ children, authConfig }: { children: ReactNode; au
           localStorage.setItem("access_token", tidecloak.token);
         }
 
+        // Connect DPoP signing oracle — server uses this to sign TideCloak proofs
+        import("../lib/dpopSigner").then(({ connectDPoPSigner }) => connectDPoPSigner());
+
         const tokenVuid = tidecloak.getValueFromIdToken("vuid") || "";
         setVuid(tokenVuid);
 
@@ -210,6 +213,7 @@ function TideCloakAuthBridge({ children, authConfig }: { children: ReactNode; au
 
   const logout = useCallback(() => {
     localStorage.removeItem("access_token");
+    import("../lib/dpopSigner").then(({ disconnectDPoPSigner }) => disconnectDPoPSigner());
     tidecloak.logout();
   }, [tidecloak]);
 

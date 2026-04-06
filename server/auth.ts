@@ -349,8 +349,9 @@ export class TidecloakAdmin {
     if (appClient?.id) {
       const tcUrl = `${getAuthOverrideUrl()}/admin/realms/${getRealm()}`;
       // Fetch role list for the app client
-      const rolesRes = await fetch(`${tcUrl}/clients/${appClient.id}/roles`, {
-        headers: tcAuthHeaders(token),
+      const rolesUrl = `${tcUrl}/clients/${appClient.id}/roles`;
+      const rolesRes = await fetch(rolesUrl, {
+        headers: await tcAuthHeaders(token, rolesUrl, "GET"),
       });
       if (rolesRes.ok) {
         const roles: RoleRepresentation[] = await rolesRes.json();
@@ -359,9 +360,9 @@ export class TidecloakAdmin {
         await Promise.all(
           roles.map(async (role) => {
             try {
-              const usersRes = await fetch(
-                `${tcUrl}/clients/${appClient.id}/roles/${encodeURIComponent(role.name!)}/users`,
-                { headers: tcAuthHeaders(token) }
+              const roleUsersUrl = `${tcUrl}/clients/${appClient.id}/roles/${encodeURIComponent(role.name!)}/users`;
+              const usersRes = await fetch(roleUsersUrl,
+                { headers: await tcAuthHeaders(token, roleUsersUrl, "GET") }
               );
               if (usersRes.ok) {
                 const roleUsers: UserRepresentation[] = await usersRes.json();
@@ -382,9 +383,9 @@ export class TidecloakAdmin {
       const rmClient = await getClientByClientId(REALM_MANAGEMENT_CLIENT, token);
       if (rmClient?.id) {
         const tcUrl = `${getAuthOverrideUrl()}/admin/realms/${getRealm()}`;
-        const adminRes = await fetch(
-          `${tcUrl}/clients/${rmClient.id}/roles/${encodeURIComponent(ADMIN_ROLE)}/users`,
-          { headers: tcAuthHeaders(token) }
+        const adminRoleUrl = `${tcUrl}/clients/${rmClient.id}/roles/${encodeURIComponent(ADMIN_ROLE)}/users`;
+        const adminRes = await fetch(adminRoleUrl,
+          { headers: await tcAuthHeaders(token, adminRoleUrl, "GET") }
         );
         if (adminRes.ok) {
           const adminUsers: UserRepresentation[] = await adminRes.json();
