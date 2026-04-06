@@ -1815,7 +1815,7 @@ fn install_route(cidr: &str, gateway: &str) {
 
     #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
-        let _ = (network, prefix, gateway);
+        let _ = (_network, prefix, gateway);
         tracing::warn!("[VPN] Auto route not supported on this platform: {}", cidr);
     }
 }
