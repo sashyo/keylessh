@@ -198,6 +198,15 @@ async fn main() {
     let gateway_url = format!("{scheme}://localhost:{}", config.listen_port);
     tray::spawn_tray(logs_url, gateway_url);
 
+    // Enable VPN IP forwarding on startup (tray can toggle it off)
+    let vpn_start_enabled = std::env::var("VPN_ENABLED")
+        .map(|v| v != "false" && v != "0")
+        .unwrap_or(true); // default: enabled
+    if vpn_start_enabled {
+        vpn::vpn_handler::enable_forwarding();
+        tracing::info!("[VPN] IP forwarding enabled");
+    }
+
     // VPN toggle callback — enables/disables IP forwarding from the system tray
     tray::set_vpn_callback(|enabled| {
         if enabled {

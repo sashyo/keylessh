@@ -173,7 +173,7 @@ mod win32 {
     // ── Globals (single tray instance) ───────────────────────
     static mut LOGS_URL: Option<String> = None;
     static mut GATEWAY_URL: Option<String> = None;
-    static mut VPN_ENABLED: bool = false;
+    static mut VPN_ENABLED: bool = true;
     pub static mut VPN_CALLBACK: Option<Box<dyn Fn(bool) + Send>> = None;
 
     fn to_wide(s: &str) -> Vec<u16> {
