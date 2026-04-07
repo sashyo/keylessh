@@ -475,7 +475,9 @@
       var signalHost = SIGNAL_BASE.replace(/^https?:\/\//, "");
       config.signalingUrl = wsProto + "://" + signalHost;
       config.targetGatewayId = gatewayId;
-      config.e2eTls = true;
+      // EdDSA backends need RDCleanPath (not e2e TLS) for passwordless auth
+      var backendIsEddsa = config.backendAuth && config.backendAuth[backendName] === "eddsa";
+      config.e2eTls = !backendIsEddsa;
       console.log("[RDP] Config loaded from signal server, token from localStorage");
       connectSignaling();
     } else {
