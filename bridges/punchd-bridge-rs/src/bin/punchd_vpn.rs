@@ -1,3 +1,5 @@
+#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
+
 ///! punchd-vpn: VPN client that tunnels IP traffic through a punchd-bridge-rs gateway.
 ///!
 ///! Creates a local TUN interface and routes IP packets through a QUIC P2P
@@ -22,6 +24,58 @@ use tokio_tungstenite::tungstenite::Message;
 
 const VPN_TUNNEL_MAGIC: u8 = 0x04;
 const AGENT_PORT: u16 = 19877;
+
+/// Simple in-memory log buffer for the web UI.
+mod log_buffer {
+    use std::sync::{Mutex, OnceLock};
+
+    static BUFFER: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+    const MAX_LINES: usize = 1000;
+
+    pub fn init() {
+        let _ = BUFFER.set(Mutex::new(Vec::with_capacity(MAX_LINES)));
+    }
+
+    pub fn recent_lines() -> Vec<String> {
+        BUFFER.get().map(|b| b.lock().unwrap().clone()).unwrap_or_default()
+    }
+
+    fn push_line(line: String) {
+        if let Some(buf) = BUFFER.get() {
+            let mut b = buf.lock().unwrap();
+            b.push(line);
+            if b.len() > MAX_LINES { b.drain(0..MAX_LINES / 2); }
+        }
+    }
+
+    pub struct BufferLayer;
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for BufferLayer {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            use tracing_subscriber::field::Visit;
+            struct Visitor(String);
+            impl Visit for Visitor {
+                fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                    if field.name() == "message" {
+                        self.0 = format!("{:?}", value);
+                    }
+                }
+            }
+            let mut v = Visitor(String::new());
+            event.record(&mut v);
+            let level = event.metadata().level();
+            let secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            push_line(format!("{secs} {level:>5} {}", v.0));
+        }
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "punchd-vpn", about = "VPN client for punchd-bridge gateways")]
@@ -669,12 +723,19 @@ async fn main() {
         .install_default()
         .expect("Failed to install rustls crypto provider");
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("punchd_vpn=debug,warn")),
-        )
-        .init();
+    // Init tracing with log buffer for the web UI
+    {
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+        log_buffer::init();
+        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("punchd_vpn=debug,warn"));
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer())
+            .with(log_buffer::BufferLayer)
+            .init();
+    }
 
     let args = Args::parse();
 
@@ -784,11 +845,16 @@ async fn main() {
 
     vpn_tray::set_logs_callback(|| {
         tracing::info!("[Tray] Show Logs requested");
-        // Open logs in browser (agent health endpoint)
         #[cfg(target_os = "windows")]
         {
             let _ = std::process::Command::new("rundll32")
-                .args(["url.dll,FileProtocolHandler", "http://127.0.0.1:19877/status"])
+                .args(["url.dll,FileProtocolHandler", "http://127.0.0.1:19877/logs/view"])
+                .spawn();
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = std::process::Command::new("xdg-open")
+                .arg("http://127.0.0.1:19877/logs/view")
                 .spawn();
         }
     });
@@ -1165,15 +1231,56 @@ async fn run_agent() -> Result<(), String> {
                 }
 
                 // GET /logs or /logs?gatewayId=xxx
-                (method, path) if method == "GET" && path.starts_with("/logs") => {
-                    let gw_filter = path.split("gatewayId=").nth(1).map(|s| s.split('&').next().unwrap_or(s).to_string());
-                    let s = state.lock().await;
+                ("GET", "/logs/view") => {
+                    // Serve HTML log viewer that polls /logs
+                    let html = r#"<!DOCTYPE html>
+<html><head><title>Punchd VPN Logs</title>
+<style>
+body { background: #0a0a0a; color: #d4d4d4; font-family: 'Consolas', monospace; font-size: 13px; margin: 0; padding: 12px; }
+#logs { white-space: pre-wrap; word-break: break-all; }
+.ts { color: #666; } .info { color: #6cc; } .warn { color: #cc6; } .err { color: #c66; }
+h3 { color: #888; margin: 0 0 8px; font-size: 14px; }
+</style></head><body>
+<h3>Punchd VPN</h3><div id="logs"></div>
+<script>
+let seen = 0;
+async function poll() {
+  try {
+    const r = await fetch('/logs');
+    const d = await r.json();
+    const el = document.getElementById('logs');
+    const lines = d.logs || [];
+    if (lines.length > seen) {
+      const newLines = lines.slice(seen);
+      for (const l of newLines) {
+        const div = document.createElement('div');
+        let cls = '';
+        if (l.includes(' INFO ')) cls = 'info';
+        else if (l.includes(' WARN ')) cls = 'warn';
+        else if (l.includes('ERROR')) cls = 'err';
+        div.className = cls;
+        div.textContent = l;
+        el.appendChild(div);
+      }
+      seen = lines.length;
+      window.scrollTo(0, document.body.scrollHeight);
+    }
+  } catch {}
+}
+poll(); setInterval(poll, 1000);
+</script></body></html>"#;
+                    // Return HTML directly
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{html}",
+                        html.len()
+                    );
+                    let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, resp.as_bytes()).await;
+                    return;
+                }
 
-                    let logs = if let Some(ref gw_id) = gw_filter {
-                        s.connections.get(gw_id).map(|c| c.logs.clone()).unwrap_or_default()
-                    } else {
-                        s.global_logs.clone()
-                    };
+                (method, path) if method == "GET" && path.starts_with("/logs") => {
+                    // Return tracing log buffer (captures all VPN output)
+                    let logs = log_buffer::recent_lines();
                     ("200 OK", json!({"logs": logs}).to_string())
                 }
 
