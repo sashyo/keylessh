@@ -1611,6 +1611,7 @@ async fn handle_request(
     }
 
     // ── Protected routes ────────────────────────────────
+    tracing::debug!("[HTTP] Backend: '{}', path: '{}', noauth: {}", active_backend, effective_path, state.no_auth_backends.contains(&active_backend));
 
     let cookies = parse_cookies(
         req_headers
@@ -1631,8 +1632,11 @@ async fn handle_request(
     let mut access_token: Option<String> = None;
     let mut refresh_cookies: Vec<String> = Vec::new();
 
+    tracing::debug!("[HTTP] is_no_auth: {}", is_no_auth);
+
     if is_no_auth {
         // Backend handles its own auth
+        tracing::debug!("[HTTP] Skipping auth (noauth backend)");
     } else {
         // Extract JWT: query param first, then cookie, then Authorization header
         let query_params: std::collections::HashMap<String, String> =
@@ -1859,7 +1863,9 @@ async fn handle_request(
         );
     }
 
+    tracing::debug!("[HTTP] Resolving backend for '{}'", active_backend);
     let target = state.resolve_backend(&active_backend, &req_headers);
+    tracing::debug!("[HTTP] Proxying to: {}", target);
     let target_url = format!(
         "{}://{}{}{}",
         target.scheme(),
