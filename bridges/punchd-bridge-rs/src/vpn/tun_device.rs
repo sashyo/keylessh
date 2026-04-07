@@ -176,23 +176,9 @@ mod platform {
                 .args(["interface", "ipv4", "set", "subinterface", &config.name, &format!("mtu={mtu_str}"), "store=active"])
                 .status();
 
-            // Enable forwarding on all interfaces (VPN + LAN)
-            let iface_output = std::process::Command::new("netsh")
-                .args(["interface", "ipv4", "show", "interfaces"])
-                .output();
-            if let Ok(out) = iface_output {
-                let text = String::from_utf8_lossy(&out.stdout);
-                for line in text.lines().skip(3) {
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    // Format: Idx  Met  MTU  State  Name
-                    if parts.len() >= 5 && parts[3] == "connected" {
-                        let iface_name = parts[4..].join(" ");
-                        let _ = std::process::Command::new("netsh")
-                            .args(["interface", "ipv4", "set", "interface", &iface_name, "forwarding=enabled"])
-                            .status();
-                    }
-                }
-            }
+            // Note: do NOT enable forwarding on Windows interfaces.
+            // Wintun handles packet forwarding in userspace via the TUN read/write loop.
+            // Enabling system-level forwarding breaks Hyper-V Default Switch NAT.
 
             // Firewall rules for VPN subnet (idempotent — netsh ignores duplicates)
             let subnet = format!("{}/{}", {
