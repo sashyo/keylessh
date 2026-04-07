@@ -19,7 +19,7 @@ vi.mock("../../server/lib/auth/tideJWT", () => ({
 }));
 
 // Import after mocking
-import { authenticate, requireAdmin, requirePolicyCreator, type AuthenticatedRequest } from "../../server/auth";
+import { authenticate, requireAdmin, requireAdminOrConfigDownload, requirePolicyCreator, type AuthenticatedRequest } from "../../server/auth";
 import { verifyTideCloakToken } from "../../server/lib/auth/tideJWT";
 
 const mockVerifyToken = verifyTideCloakToken as any;
@@ -252,6 +252,31 @@ describe("Auth Middleware", () => {
       expect((mockRequest as AuthenticatedRequest).accessToken).toBe("my-token");
     });
 
+    // Client roles collected from all resource_access entries
+    it("should populate clientRoles from resource_access", async () => {
+      mockRequest.headers = { authorization: "Bearer token" };
+      mockVerifyToken.mockResolvedValueOnce({
+        sub: "user-123",
+        preferred_username: "user",
+        email: "user@example.com",
+        resource_access: {
+          "realm-management": { roles: ["tide-realm-admin"] },
+          "keylessh": { roles: ["allowConfigDownload", "policy-creator"] },
+        },
+        realm_access: { roles: [] },
+      });
+
+      await authenticate(
+        mockRequest as AuthenticatedRequest,
+        mockResponse as Response,
+        mockNext
+      );
+
+      expect((mockRequest as AuthenticatedRequest).clientRoles).toEqual(
+        expect.arrayContaining(["tide-realm-admin", "allowConfigDownload", "policy-creator"])
+      );
+    });
+
     // Full decoded payload stored for custom claim access
     it("should store token payload on request", async () => {
       mockRequest.headers = { authorization: "Bearer token" };
@@ -332,6 +357,100 @@ describe("Auth Middleware", () => {
 
       expect(mockNext).toHaveBeenCalled();
       expect(statusMock).not.toHaveBeenCalled();
+    });
+  });
+
+  /**
+   * Tests for requireAdminOrConfigDownload() middleware.
+   * Guards routes that require admin or allowConfigDownload role.
+   */
+  describe("requireAdminOrConfigDownload", () => {
+    it("should return 401 when no user on request", () => {
+      requireAdminOrConfigDownload(
+        mockRequest as AuthenticatedRequest,
+        mockResponse as Response,
+        mockNext
+      );
+
+      expect(statusMock).toHaveBeenCalledWith(401);
+      expect(mockNext).not.toHaveBeenCalled();
+    });
+
+    it("should allow admin users", () => {
+      mockRequest.user = {
+        id: "admin-123",
+        username: "admin",
+        email: "admin@example.com",
+        role: "admin",
+        allowedServers: [],
+      };
+
+      requireAdminOrConfigDownload(
+        mockRequest as AuthenticatedRequest,
+        mockResponse as Response,
+        mockNext
+      );
+
+      expect(mockNext).toHaveBeenCalled();
+    });
+
+    it("should allow users with allowConfigDownload role", () => {
+      mockRequest.user = {
+        id: "user-123",
+        username: "user",
+        email: "user@example.com",
+        role: "user",
+        allowedServers: [],
+      };
+      mockRequest.clientRoles = ["allowConfigDownload"];
+
+      requireAdminOrConfigDownload(
+        mockRequest as AuthenticatedRequest,
+        mockResponse as Response,
+        mockNext
+      );
+
+      expect(mockNext).toHaveBeenCalled();
+    });
+
+    it("should return 403 for regular users without allowConfigDownload", () => {
+      mockRequest.user = {
+        id: "user-123",
+        username: "user",
+        email: "user@example.com",
+        role: "user",
+        allowedServers: [],
+      };
+      mockRequest.clientRoles = ["some-other-role"];
+
+      requireAdminOrConfigDownload(
+        mockRequest as AuthenticatedRequest,
+        mockResponse as Response,
+        mockNext
+      );
+
+      expect(statusMock).toHaveBeenCalledWith(403);
+      expect(mockNext).not.toHaveBeenCalled();
+    });
+
+    it("should return 403 when clientRoles is empty", () => {
+      mockRequest.user = {
+        id: "user-123",
+        username: "user",
+        email: "user@example.com",
+        role: "user",
+        allowedServers: [],
+      };
+      mockRequest.clientRoles = [];
+
+      requireAdminOrConfigDownload(
+        mockRequest as AuthenticatedRequest,
+        mockResponse as Response,
+        mockNext
+      );
+
+      expect(statusMock).toHaveBeenCalledWith(403);
+      expect(mockNext).not.toHaveBeenCalled();
     });
   });
 

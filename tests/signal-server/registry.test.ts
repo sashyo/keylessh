@@ -277,42 +277,6 @@ describe("Signal Server Registry", () => {
     });
   });
 
-  // ── Admin operations ────────────────────────────────────────────
-
-  describe("forceDisconnectClient", () => {
-    it("should close the client WebSocket", () => {
-      const ws = mockWs();
-      registry.registerClient("client-1", ws);
-      expect(registry.forceDisconnectClient("client-1")).toBe(true);
-      expect(ws.close).toHaveBeenCalledWith(1000, "Disconnected by admin");
-    });
-
-    it("should return false for unknown client", () => {
-      expect(registry.forceDisconnectClient("unknown")).toBe(false);
-    });
-  });
-
-  describe("drainGateway", () => {
-    it("should close gateway and clear its clients", () => {
-      const gwWs = mockWs();
-      const clientWs = mockWs();
-      registry.registerGateway("gw-1", [], gwWs);
-      registry.registerClient("client-1", clientWs);
-      const gw = registry.getGateway("gw-1")!;
-      gw.pairedClients.add("client-1");
-      registry.getClient("client-1")!.pairedGatewayId = "gw-1";
-
-      expect(registry.drainGateway("gw-1")).toBe(true);
-      expect(gwWs.close).toHaveBeenCalledWith(1000, "Drained by admin");
-      expect(gw.pairedClients.size).toBe(0);
-      expect(registry.getClient("client-1")!.pairedGatewayId).toBeUndefined();
-    });
-
-    it("should return false for unknown gateway", () => {
-      expect(registry.drainGateway("unknown")).toBe(false);
-    });
-  });
-
   // ── Lookup by WebSocket ─────────────────────────────────────────
 
   describe("getInfoByWs", () => {

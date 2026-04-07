@@ -26,7 +26,7 @@ describe("parseDestRolesFromToken", () => {
   it("should return empty array when no dest roles", () => {
     const payload: TokenPayload = {
       sub: "user-1",
-      realm_access: { roles: ["user", "ssh:root"] },
+      realm_access: { roles: ["user"] },
       resource_access: {},
     };
     expect(parseDestRolesFromToken(payload)).toEqual([]);
@@ -39,7 +39,7 @@ describe("parseDestRolesFromToken", () => {
       resource_access: {},
     };
     const result = parseDestRolesFromToken(payload);
-    expect(result).toEqual([{ gatewayId: "gw-abc", backendName: "WebApp" }]);
+    expect(result).toEqual([{ gatewayId: "gw-abc", backendName: "WebApp", prefix: "dest" }]);
   });
 
   it("should parse dest role from resource_access", () => {
@@ -51,7 +51,7 @@ describe("parseDestRolesFromToken", () => {
       },
     };
     const result = parseDestRolesFromToken(payload);
-    expect(result).toEqual([{ gatewayId: "gw-123", backendName: "MyApp" }]);
+    expect(result).toEqual([{ gatewayId: "gw-123", backendName: "MyApp", prefix: "dest" }]);
   });
 
   it("should parse multiple dest roles", () => {
@@ -64,8 +64,8 @@ describe("parseDestRolesFromToken", () => {
     };
     const result = parseDestRolesFromToken(payload);
     expect(result).toHaveLength(2);
-    expect(result).toContainEqual({ gatewayId: "gw-1", backendName: "App1" });
-    expect(result).toContainEqual({ gatewayId: "gw-2", backendName: "App2" });
+    expect(result).toContainEqual({ gatewayId: "gw-1", backendName: "App1", prefix: "dest" });
+    expect(result).toContainEqual({ gatewayId: "gw-2", backendName: "App2", prefix: "dest" });
   });
 
   it("should handle gateway IDs with dashes", () => {
@@ -75,7 +75,7 @@ describe("parseDestRolesFromToken", () => {
       resource_access: {},
     };
     const result = parseDestRolesFromToken(payload);
-    expect(result).toEqual([{ gatewayId: "gateway-abc-def-123", backendName: "Backend" }]);
+    expect(result).toEqual([{ gatewayId: "gateway-abc-def-123", backendName: "Backend", prefix: "dest" }]);
   });
 
   it("should parse 4-segment format with username", () => {
@@ -86,7 +86,17 @@ describe("parseDestRolesFromToken", () => {
       resource_access: {},
     };
     const result = parseDestRolesFromToken(payload);
-    expect(result).toEqual([{ gatewayId: "gw-1", backendName: "sashaspc", username: "Administrator" }]);
+    expect(result).toEqual([{ gatewayId: "gw-1", backendName: "sashaspc", username: "Administrator", prefix: "dest" }]);
+  });
+
+  it("should also parse ssh: prefixed roles", () => {
+    const payload: TokenPayload = {
+      sub: "user-1",
+      realm_access: { roles: ["ssh:gw-1:myserver"] },
+      resource_access: {},
+    };
+    const result = parseDestRolesFromToken(payload);
+    expect(result).toEqual([{ gatewayId: "gw-1", backendName: "myserver", prefix: "ssh" }]);
   });
 
   it("should reject dest role with missing backend name", () => {
@@ -116,22 +126,22 @@ describe("parseDestRolesFromToken", () => {
     expect(parseDestRolesFromToken(payload)).toEqual([]);
   });
 
-  it("should ignore non-dest roles", () => {
+  it("should ignore non-dest and non-ssh roles", () => {
     const payload: TokenPayload = {
       sub: "user-1",
-      realm_access: { roles: ["admin", "ssh:root", "dest:gw-1:App"] },
+      realm_access: { roles: ["admin", "user", "dest:gw-1:App"] },
       resource_access: {},
     };
     const result = parseDestRolesFromToken(payload);
     expect(result).toHaveLength(1);
-    expect(result[0]).toEqual({ gatewayId: "gw-1", backendName: "App" });
+    expect(result[0]).toEqual({ gatewayId: "gw-1", backendName: "App", prefix: "dest" });
   });
 });
 
 describe("hasDestAccess", () => {
   const permissions: DestPermission[] = [
-    { gatewayId: "gw-abc", backendName: "WebApp" },
-    { gatewayId: "gw-xyz", backendName: "AdminPanel" },
+    { gatewayId: "gw-abc", backendName: "WebApp", prefix: "dest" },
+    { gatewayId: "gw-xyz", backendName: "AdminPanel", prefix: "dest" },
   ];
 
   it("should return true for matching permission", () => {
