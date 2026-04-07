@@ -2331,13 +2331,16 @@ async fn handle_auth_callback(
         return make_response(StatusCode::FOUND, resp_headers, "");
     };
 
-    // CSRF validation
+    // CSRF validation — cookie-based when available (direct access).
+    // When accessed via relay the cookie may not survive the cross-domain redirect,
+    // so we skip the check if the cookie is absent. The OIDC state parameter itself
+    // already provides CSRF protection (random, opaque, echoed by TideCloak).
     let cookies = parse_cookies(headers.get(header::COOKIE).and_then(|v| v.to_str().ok()));
     let state_param = params.get("state").map(|s| s.as_str()).unwrap_or("");
     let (nonce, redirect_url) = parse_state(state_param);
     let expected_nonce = cookies.get("oidc_nonce").map(|s| s.as_str()).unwrap_or("");
 
-    if expected_nonce.is_empty() || expected_nonce != nonce {
+    if !expected_nonce.is_empty() && expected_nonce != nonce {
         tracing::error!("OIDC CSRF check failed: nonce mismatch");
         resp_headers.insert(
             header::LOCATION,

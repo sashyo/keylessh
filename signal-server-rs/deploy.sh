@@ -81,12 +81,20 @@ if [ -d "/etc/letsencrypt/live" ]; then
 fi
 
 # ── Build signal server ──────────────────────────────────────
-echo "[Deploy] Building Rust signal server..."
 cd "$SCRIPT_DIR"
-cargo build --release 2>&1 | tail -3
+if [ -f "$SIGNAL_BIN" ] && command -v cargo &>/dev/null; then
+  echo "[Deploy] Building Rust signal server..."
+  cargo build --release 2>&1 | tail -3
+elif command -v cargo &>/dev/null; then
+  echo "[Deploy] Building Rust signal server..."
+  cargo build --release 2>&1 | tail -3
+else
+  echo "[Deploy] cargo not found, skipping build — using existing binary"
+fi
 
 if [ ! -f "$SIGNAL_BIN" ]; then
-  echo "[Deploy] ERROR: Build failed — binary not found at $SIGNAL_BIN"
+  echo "[Deploy] ERROR: Binary not found at $SIGNAL_BIN"
+  echo "  Build first with: cargo build --release"
   exit 1
 fi
 
