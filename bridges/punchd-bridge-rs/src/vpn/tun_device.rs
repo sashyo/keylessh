@@ -153,7 +153,9 @@ mod platform {
             };
 
             // Delete any stale adapter with the same name to avoid punchd-vpn1, punchd-vpn2, etc.
-            let _ = wintun::Adapter::delete(&wintun_dll, &config.name, "PunchdVPN");
+            if let Ok(stale) = wintun::Adapter::open(&wintun_dll, &config.name) {
+                let _ = stale.delete();
+            }
 
             let adapter = wintun::Adapter::create(&wintun_dll, &config.name, "PunchdVPN", None)
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to create adapter: {e}")))?;
