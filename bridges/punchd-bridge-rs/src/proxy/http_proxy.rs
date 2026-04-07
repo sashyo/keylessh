@@ -446,6 +446,9 @@ impl ProxyState {
         let http_client = reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
             .redirect(reqwest::redirect::Policy::none())
+            .http1_only()
+            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(10))
             .build()
             .expect("Failed to build HTTP client");
 
@@ -755,6 +758,9 @@ pub fn build_proxy_state(
     let http_client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
         .redirect(reqwest::redirect::Policy::none())
+        .http1_only()
+        .timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(std::time::Duration::from_secs(10))
         .build()
         .unwrap();
 
@@ -1969,16 +1975,19 @@ async fn handle_request(
         }
     };
 
+    tracing::debug!("[HTTP] Sending backend request to: {}", target_url);
     let backend_resp = match state
         .http_client
         .request(method, &target_url)
         .headers(proxy_headers)
         .body(body_bytes)
-        .timeout(std::time::Duration::from_secs(30))
         .send()
         .await
     {
-        Ok(r) => r,
+        Ok(r) => {
+            tracing::debug!("[HTTP] Backend response: {}", r.status());
+            r
+        }
         Err(e) => {
             tracing::error!("Backend error: {e}");
             resp_headers.insert(
