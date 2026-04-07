@@ -1772,6 +1772,11 @@ async fn run_vpn_quic_inner(cfg: ResolvedConfig, shutdown_rx: Option<tokio::sync
 
     tracing::info!("[QUIC-VPN] TUN device created");
 
+    // Pin the gateway's actual IP via the original default gateway so the
+    // QUIC tunnel survives when VPN routes cover the gateway's subnet.
+    let gateway_real_addr = conn.remote_address();
+    pin_gateway_route(gateway_real_addr.ip());
+
     if cfg.default_route {
         setup_routing(&cfg.tun_name, &server_ip.to_string());
     }
@@ -1969,6 +1974,60 @@ struct VpnConfig {
     netmask: Ipv4Addr,
     mtu: u16,
     routes: Vec<String>,
+}
+
+/// Pin the gateway's real IP via the system default gateway so the QUIC
+/// tunnel isn't broken when VPN routes cover the gateway's subnet.
+fn pin_gateway_route(gateway_ip: std::net::IpAddr) {
+    if gateway_ip.is_loopback() { return; }
+    let ip = gateway_ip.to_string();
+
+    #[cfg(target_os = "windows")]
+    {
+        // Find default gateway from route table
+        let output = std::process::Command::new("route").args(["print", "0.0.0.0"]).output();
+        if let Ok(out) = output {
+            let text = String::from_utf8_lossy(&out.stdout);
+            for line in text.lines() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                // Look for: 0.0.0.0  0.0.0.0  <gateway>  <interface>  <metric>
+                if parts.len() >= 5 && parts[0] == "0.0.0.0" && parts[1] == "0.0.0.0" {
+                    let default_gw = parts[2];
+                    let status = std::process::Command::new("route")
+                        .args(["add", &ip, "MASK", "255.255.255.255", default_gw, "METRIC", "1"])
+                        .status();
+                    match status {
+                        Ok(s) if s.success() => tracing::info!("[VPN] Pinned gateway {ip} via {default_gw}"),
+                        _ => tracing::warn!("[VPN] Failed to pin gateway route for {ip}"),
+                    }
+                    return;
+                }
+            }
+        }
+        tracing::warn!("[VPN] Could not find default gateway to pin route for {ip}");
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Get default gateway
+        let output = std::process::Command::new("ip").args(["route", "show", "default"]).output();
+        if let Ok(out) = output {
+            let text = String::from_utf8_lossy(&out.stdout);
+            // "default via 192.168.1.1 dev eth0"
+            if let Some(gw) = text.split_whitespace().nth(2) {
+                let _ = std::process::Command::new("ip")
+                    .args(["route", "add", &format!("{ip}/32"), "via", gw])
+                    .status();
+                tracing::info!("[VPN] Pinned gateway {ip} via {gw}");
+            }
+        }
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        let _ = ip;
+        tracing::warn!("[VPN] Gateway route pinning not implemented on this platform");
+    }
 }
 
 /// Install a route for a LAN subnet through the VPN gateway.
