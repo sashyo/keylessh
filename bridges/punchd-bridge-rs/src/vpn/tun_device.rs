@@ -186,9 +186,9 @@ mod platform {
             // Don't override the TUN metric — let Windows use the default.
             // The VPN routes use explicit metrics when installed.
 
-            // Only enable forwarding on the TUN interface itself.
-            // Do NOT touch any other interface — enabling forwarding on Ethernet
-            // or vEthernet breaks Hyper-V Default Switch NAT.
+            // Enable forwarding on the TUN interface only.
+            // Note: on Hyper-V Default Switch VMs this may affect NAT.
+            // Use an External Switch if the Default Switch breaks.
             let _ = std::process::Command::new("netsh")
                 .args(["interface", "ipv4", "set", "interface", &config.name, "forwarding=enabled"])
                 .status();
