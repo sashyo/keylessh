@@ -354,25 +354,66 @@ export class TidecloakAdmin {
       if (rolesRes.ok) {
         const roles: RoleRepresentation[] = await rolesRes.json();
 
-        // For each role, fetch its users — all in parallel (R is small)
+        // For each role, fetch its users
+        // Skip VPN firewall roles (colons/slashes break URL path)
         await Promise.all(
-          roles.map(async (role) => {
-            try {
-              const usersRes = await fetch(
-                `${tcUrl}/clients/${appClient.id}/roles/${encodeURIComponent(role.name!)}/users`,
-                { headers: { Authorization: `Bearer ${token}` } }
-              );
-              if (usersRes.ok) {
-                const roleUsers: UserRepresentation[] = await usersRes.json();
-                for (const u of roleUsers) {
-                  const existing = userRolesMap.get(u.id!) || [];
-                  existing.push(role.name!);
-                  userRolesMap.set(u.id!, existing);
+          roles
+            .filter((role) => {
+              const name = role.name || "";
+              return !(name.includes(":allow:") || name.includes(":deny:"));
+            })
+            .map(async (role) => {
+              try {
+                const usersRes = await fetch(
+                  `${tcUrl}/clients/${appClient.id}/roles/${encodeURIComponent(role.name!)}/users`,
+                  { headers: { Authorization: `Bearer ${token}` } }
+                );
+                if (usersRes.ok) {
+                  const roleUsers: UserRepresentation[] = await usersRes.json();
+                  for (const u of roleUsers) {
+                    const existing = userRolesMap.get(u.id!) || [];
+                    existing.push(role.name!);
+                    userRolesMap.set(u.id!, existing);
+                  }
                 }
-              }
-            } catch { /* skip failed role lookup */ }
-          })
+              } catch { /* skip failed role lookup */ }
+            })
         );
+
+        // For VPN firewall roles, get assignments via user role-mappings instead
+        const fwRoles = roles.filter((r) => {
+          const name = r.name || "";
+          return name.includes(":allow:") || name.includes(":deny:");
+        });
+        if (fwRoles.length > 0) {
+          // Get all users and check their role-mappings
+          const usersRes = await fetch(`${tcUrl}/users?briefRepresentation=true`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (usersRes.ok) {
+            const allUsers: UserRepresentation[] = await usersRes.json();
+            await Promise.all(
+              allUsers.map(async (user) => {
+                try {
+                  const mappingsRes = await fetch(
+                    `${tcUrl}/users/${user.id}/role-mappings/clients/${appClient.id}`,
+                    { headers: { Authorization: `Bearer ${token}` } }
+                  );
+                  if (mappingsRes.ok) {
+                    const mappedRoles: RoleRepresentation[] = await mappingsRes.json();
+                    for (const mr of mappedRoles) {
+                      if (fwRoles.some((fw) => fw.id === mr.id)) {
+                        const existing = userRolesMap.get(user.id!) || [];
+                        existing.push(mr.name!);
+                        userRolesMap.set(user.id!, existing);
+                      }
+                    }
+                  }
+                } catch { /* skip */ }
+              })
+            );
+          }
+        }
       }
     }
 
