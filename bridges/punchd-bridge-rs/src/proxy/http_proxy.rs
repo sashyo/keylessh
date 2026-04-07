@@ -196,8 +196,21 @@ fn is_public_resource(path: &str) -> bool {
 }
 
 fn get_callback_url(host: &str, is_tls: bool) -> String {
+    // If host is loopback (relay/DataChannel), use the gateway's configured server_url
+    // so the OIDC redirect goes to the correct public address
     let proto = if is_tls { "https" } else { "http" };
     format!("{proto}://{host}/auth/callback")
+}
+
+fn get_callback_url_with_config(host: &str, is_tls: bool, server_url: &Option<String>) -> String {
+    // When accessed via relay/DataChannel, Host header is 127.0.0.1 or localhost.
+    // Use server_url for the OIDC redirect so it goes to the signal server's public URL.
+    if let Some(url) = server_url {
+        if host.starts_with("127.0.0.1") || host.starts_with("localhost") || host.starts_with("[::1]") {
+            return format!("{}/auth/callback", url.trim_end_matches('/'));
+        }
+    }
+    get_callback_url(host, is_tls)
 }
 
 const ALLOWED_METHODS: &[&str] = &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
@@ -2174,7 +2187,7 @@ fn handle_auth_login(
         .collect();
     let original_url = sanitize_redirect(params.get("redirect").map(|s| s.as_str()).unwrap_or("/"));
     let force_login = params.contains_key("prompt");
-    let callback_url = get_callback_url(host, state.use_tls);
+    let callback_url = get_callback_url_with_config(host, state.use_tls, &state.config.server_url);
 
     // Use browser endpoints for the redirect URL.
     // The STUN server routes /realms/<realm>/... to the gateway that registered
@@ -2253,7 +2266,7 @@ async fn handle_auth_callback(
         return make_response(StatusCode::FOUND, resp_headers, "");
     }
 
-    let callback_url = get_callback_url(host, state.use_tls);
+    let callback_url = get_callback_url_with_config(host, state.use_tls, &state.config.server_url);
 
     tracing::info!("Token exchange:");
     tracing::info!("  endpoint: {}", state.server_endpoints.token);
@@ -2483,7 +2496,7 @@ async fn handle_auth_logout(
         }
     }
 
-    let callback_url = get_callback_url(host, state.use_tls);
+    let callback_url = get_callback_url_with_config(host, state.use_tls, &state.config.server_url);
     let proto_host = callback_url.split("/auth/callback").next().unwrap_or("");
 
     let endpoints = state.get_browser_endpoints();
