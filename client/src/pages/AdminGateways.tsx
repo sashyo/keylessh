@@ -25,7 +25,8 @@ import { RefreshButton } from "@/components/RefreshButton";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
-import { Router, Plus, Pencil, Trash2, Download, Wifi, Copy, Check, KeyRound } from "lucide-react";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Router, Plus, Pencil, Trash2, Download, Wifi, Copy, Check, KeyRound, FileDown, Shield, Settings } from "lucide-react";
 import type { SignalServer } from "@shared/schema";
 import { useAuth, useAuthConfig } from "@/contexts/AuthContext";
 import { useMemo } from "react";
@@ -96,6 +97,8 @@ const defaultForm: Partial<GatewayConfigSummary> = {
 
 export default function AdminGateways() {
   const { toast } = useToast();
+  const { hasRole } = useAuth();
+  const isAdmin = hasRole("admin");
   const authConfig = useAuthConfig();
   const [editing, setEditing] = useState<GatewayConfigSummary | null>(null);
   const [creating, setCreating] = useState(false);
@@ -179,6 +182,11 @@ export default function AdminGateways() {
   const handleDownloadVpn = (config: GatewayConfigSummary) => {
     const token = localStorage.getItem("access_token");
     window.open(`${api.admin.gatewayConfigs.vpnConfigUrl(config.id)}?token=${encodeURIComponent(token || "")}`, "_blank");
+  };
+
+  const handleDownloadTidecloak = (config: GatewayConfigSummary) => {
+    const token = localStorage.getItem("access_token");
+    window.open(`${api.admin.gatewayConfigs.tidecloakConfigUrl(config.id)}?token=${encodeURIComponent(token || "")}`, "_blank");
   };
 
   const renderForm = (onSubmit: () => void, submitLabel: string, isPending: boolean) => (
@@ -311,7 +319,7 @@ export default function AdminGateways() {
 
   return (
     <div className="p-4 sm:p-6 space-y-4 sm:space-y-6">
-      <SshPublicKeyBanner />
+      {isAdmin && <SshPublicKeyBanner />}
 
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div className="space-y-1">
@@ -325,123 +333,223 @@ export default function AdminGateways() {
         </div>
         <div className="flex items-center gap-2">
           <RefreshButton onClick={() => void refreshNow()} isRefreshing={isFetching} secondsRemaining={secondsRemaining} />
-          <Button onClick={handleCreate} className="shrink-0">
-            <Plus className="h-4 w-4 sm:mr-2" />
-            <span className="hidden sm:inline">Add Gateway</span>
-          </Button>
+          {isAdmin && (
+            <Button onClick={handleCreate} className="shrink-0">
+              <Plus className="h-4 w-4 sm:mr-2" />
+              <span className="hidden sm:inline">Add Gateway</span>
+            </Button>
+          )}
         </div>
       </div>
 
-      <Card>
-        <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Gateway</TableHead>
-                <TableHead className="hidden md:table-cell">STUN Server</TableHead>
-                <TableHead className="hidden lg:table-cell">Backends</TableHead>
-                <TableHead>VPN</TableHead>
-                <TableHead className="text-right">Actions</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
+      <Tabs defaultValue={isAdmin ? "gateways" : "configs"} className="space-y-4">
+        <TabsList>
+          {isAdmin && <TabsTrigger value="gateways" className="gap-1.5"><Settings className="h-3.5 w-3.5" /> Gateways</TabsTrigger>}
+          <TabsTrigger value="configs" className="gap-1.5"><FileDown className="h-3.5 w-3.5" /> Configuration</TabsTrigger>
+        </TabsList>
+
+        {isAdmin && <TabsContent value="gateways">
+          <Card>
+            <CardContent className="p-0">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Gateway</TableHead>
+                    <TableHead className="hidden md:table-cell">STUN Server</TableHead>
+                    <TableHead className="hidden lg:table-cell">Backends</TableHead>
+                    <TableHead>VPN</TableHead>
+                    <TableHead className="text-right">Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {(configs || []).map((config) => (
+                    <TableRow key={config.id}>
+                      <TableCell>
+                        <div>
+                          <p className="font-medium">{config.displayName || config.gatewayId}</p>
+                          <p className="text-xs text-muted-foreground font-mono flex items-center gap-1">
+                            {config.gatewayId}
+                            <button onClick={() => handleCopyId(config.gatewayId)} className="hover:text-foreground">
+                              {copied === config.gatewayId ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+                            </button>
+                          </p>
+                        </div>
+                      </TableCell>
+                      <TableCell className="hidden md:table-cell">
+                        <p className="text-xs font-mono text-muted-foreground truncate max-w-[200px]">{config.stunServerUrl || "—"}</p>
+                      </TableCell>
+                      <TableCell className="hidden lg:table-cell">
+                        <p className="text-xs text-muted-foreground truncate max-w-[200px]">{config.backends || "—"}</p>
+                      </TableCell>
+                      <TableCell>
+                        {config.vpnEnabled ? (
+                          <Badge variant="outline" className="gap-1 bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950/30 dark:text-blue-400">
+                            <Wifi className="h-3 w-3" /> On
+                          </Badge>
+                        ) : (
+                          <Badge variant="outline" className="text-muted-foreground">Off</Badge>
+                        )}
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <div className="flex items-center justify-end gap-1">
+                          <Button size="icon" variant="ghost" title="Download gateway.toml" onClick={() => handleDownload(config)}>
+                            <Download className="h-4 w-4" />
+                          </Button>
+                          {config.vpnEnabled && (
+                            <Button size="icon" variant="ghost" title="Download VPN config" onClick={() => handleDownloadVpn(config)}>
+                              <Wifi className="h-4 w-4" />
+                            </Button>
+                          )}
+                          <Button size="icon" variant="ghost" onClick={() => handleEdit(config)}>
+                            <Pencil className="h-4 w-4" />
+                          </Button>
+                          <Button size="icon" variant="ghost" onClick={() => setDeleting(config)}>
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                  {(!configs || configs.length === 0) && !isLoading && (
+                    <TableRow>
+                      <TableCell colSpan={5} className="text-center text-muted-foreground py-8">
+                        No gateway configs. Click "Add Gateway" to create one.
+                      </TableCell>
+                    </TableRow>
+                  )}
+                </TableBody>
+              </Table>
+            </CardContent>
+          </Card>
+        </TabsContent>}
+
+        <TabsContent value="configs">
+          {(!configs || configs.length === 0) ? (
+            <Card>
+              <CardContent className="py-8 text-center text-muted-foreground">
+                No gateway configs. Create a gateway first to download configuration files.
+              </CardContent>
+            </Card>
+          ) : (
+            <div className="space-y-4">
               {(configs || []).map((config) => (
-                <TableRow key={config.id}>
-                  <TableCell>
-                    <div>
-                      <p className="font-medium">{config.displayName || config.gatewayId}</p>
-                      <p className="text-xs text-muted-foreground font-mono flex items-center gap-1">
-                        {config.gatewayId}
-                        <button onClick={() => handleCopyId(config.gatewayId)} className="hover:text-foreground">
-                          {copied === config.gatewayId ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
-                        </button>
-                      </p>
+                <Card key={config.id}>
+                  <CardContent className="p-4 sm:p-6">
+                    <div className="flex items-center gap-3 mb-4">
+                      <Router className="h-5 w-5 text-muted-foreground" />
+                      <div>
+                        <h3 className="font-medium">{config.displayName || config.gatewayId}</h3>
+                        <p className="text-xs text-muted-foreground font-mono">{config.gatewayId}</p>
+                      </div>
                     </div>
-                  </TableCell>
-                  <TableCell className="hidden md:table-cell">
-                    <p className="text-xs font-mono text-muted-foreground truncate max-w-[200px]">{config.stunServerUrl || "—"}</p>
-                  </TableCell>
-                  <TableCell className="hidden lg:table-cell">
-                    <p className="text-xs text-muted-foreground truncate max-w-[200px]">{config.backends || "—"}</p>
-                  </TableCell>
-                  <TableCell>
-                    {config.vpnEnabled ? (
-                      <Badge variant="outline" className="gap-1 bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950/30 dark:text-blue-400">
-                        <Wifi className="h-3 w-3" /> On
-                      </Badge>
-                    ) : (
-                      <Badge variant="outline" className="text-muted-foreground">Off</Badge>
-                    )}
-                  </TableCell>
-                  <TableCell className="text-right">
-                    <div className="flex items-center justify-end gap-1">
-                      <Button size="icon" variant="ghost" title="Download gateway.toml" onClick={() => handleDownload(config)}>
-                        <Download className="h-4 w-4" />
-                      </Button>
-                      {config.vpnEnabled && (
-                        <Button size="icon" variant="ghost" title="Download VPN config" onClick={() => handleDownloadVpn(config)}>
-                          <Wifi className="h-4 w-4" />
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      {/* TideCloak Adapter Config */}
+                      <div className="rounded-lg border border-border p-4 space-y-3">
+                        <div className="flex items-center gap-2">
+                          <Shield className="h-4 w-4 text-[hsl(var(--neon-cyan))]" />
+                          <span className="text-sm font-medium">tidecloak.json</span>
+                        </div>
+                        <p className="text-xs text-muted-foreground">
+                          TideCloak OIDC adapter config for the Punchd client. Place in the client's working directory.
+                        </p>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="w-full gap-2"
+                          disabled={!config.tidecloakConfigB64}
+                          onClick={() => handleDownloadTidecloak(config)}
+                        >
+                          <Download className="h-3.5 w-3.5" />
+                          {config.tidecloakConfigB64 ? "Download" : "Not configured"}
                         </Button>
-                      )}
-                      <Button size="icon" variant="ghost" onClick={() => handleEdit(config)}>
-                        <Pencil className="h-4 w-4" />
-                      </Button>
-                      <Button size="icon" variant="ghost" onClick={() => setDeleting(config)}>
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
+                      </div>
+
+                      {/* Gateway TOML Config */}
+                      <div className="rounded-lg border border-border p-4 space-y-3">
+                        <div className="flex items-center gap-2">
+                          <Settings className="h-4 w-4 text-[hsl(var(--neon-cyan))]" />
+                          <span className="text-sm font-medium">gateway.toml</span>
+                        </div>
+                        <p className="text-xs text-muted-foreground">
+                          Gateway bridge configuration. Place in the Punchd gateway's working directory.
+                        </p>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="w-full gap-2"
+                          onClick={() => handleDownload(config)}
+                        >
+                          <Download className="h-3.5 w-3.5" />
+                          Download
+                        </Button>
+                      </div>
+
+                      {/* VPN Config */}
+                      <div className="rounded-lg border border-border p-4 space-y-3">
+                        <div className="flex items-center gap-2">
+                          <Wifi className="h-4 w-4 text-[hsl(var(--neon-cyan))]" />
+                          <span className="text-sm font-medium">vpn-config.toml</span>
+                        </div>
+                        <p className="text-xs text-muted-foreground">
+                          VPN client configuration with signal server and auth settings.
+                        </p>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="w-full gap-2"
+                          disabled={!config.vpnEnabled}
+                          onClick={() => handleDownloadVpn(config)}
+                        >
+                          <Download className="h-3.5 w-3.5" />
+                          {config.vpnEnabled ? "Download" : "VPN not enabled"}
+                        </Button>
+                      </div>
                     </div>
-                  </TableCell>
-                </TableRow>
+                  </CardContent>
+                </Card>
               ))}
-              {(!configs || configs.length === 0) && !isLoading && (
-                <TableRow>
-                  <TableCell colSpan={5} className="text-center text-muted-foreground py-8">
-                    No gateway configs. Click "Add Gateway" to create one.
-                  </TableCell>
-                </TableRow>
-              )}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
+            </div>
+          )}
+        </TabsContent>
+      </Tabs>
 
-      {/* Create Dialog */}
-      <Dialog open={creating} onOpenChange={setCreating}>
-        <DialogContent className="max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>Create Gateway Config</DialogTitle>
-            <DialogDescription>Configure a new gateway bridge. Download the TOML file after creation.</DialogDescription>
-          </DialogHeader>
-          {renderForm(() => createMutation.mutate(form), "Create", createMutation.isPending)}
-        </DialogContent>
-      </Dialog>
+      {/* Create/Edit/Delete dialogs — admin only */}
+      {isAdmin && <>
+        <Dialog open={creating} onOpenChange={setCreating}>
+          <DialogContent className="max-w-2xl">
+            <DialogHeader>
+              <DialogTitle>Create Gateway Config</DialogTitle>
+              <DialogDescription>Configure a new gateway bridge. Download the TOML file after creation.</DialogDescription>
+            </DialogHeader>
+            {renderForm(() => createMutation.mutate(form), "Create", createMutation.isPending)}
+          </DialogContent>
+        </Dialog>
 
-      {/* Edit Dialog */}
-      <Dialog open={!!editing} onOpenChange={(open) => !open && setEditing(null)}>
-        <DialogContent className="max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>Edit Gateway Config</DialogTitle>
-            <DialogDescription>Update configuration for {editing?.gatewayId}</DialogDescription>
-          </DialogHeader>
-          {renderForm(() => editing && updateMutation.mutate({ id: editing.id, data: form }), "Save Changes", updateMutation.isPending)}
-        </DialogContent>
-      </Dialog>
+        <Dialog open={!!editing} onOpenChange={(open) => !open && setEditing(null)}>
+          <DialogContent className="max-w-2xl">
+            <DialogHeader>
+              <DialogTitle>Edit Gateway Config</DialogTitle>
+              <DialogDescription>Update configuration for {editing?.gatewayId}</DialogDescription>
+            </DialogHeader>
+            {renderForm(() => editing && updateMutation.mutate({ id: editing.id, data: form }), "Save Changes", updateMutation.isPending)}
+          </DialogContent>
+        </Dialog>
 
-      {/* Delete Confirmation */}
-      <AlertDialog open={!!deleting} onOpenChange={(open) => !open && setDeleting(null)}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete gateway config?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This will remove the configuration for <strong>{deleting?.gatewayId}</strong>. The bridge will continue running with its local config.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={() => deleting && deleteMutation.mutate(deleting.id)}>Delete</AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+        <AlertDialog open={!!deleting} onOpenChange={(open) => !open && setDeleting(null)}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Delete gateway config?</AlertDialogTitle>
+              <AlertDialogDescription>
+                This will remove the configuration for <strong>{deleting?.gatewayId}</strong>. The bridge will continue running with its local config.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction onClick={() => deleting && deleteMutation.mutate(deleting.id)}>Delete</AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      </>}
     </div>
   );
 }

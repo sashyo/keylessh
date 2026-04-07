@@ -28,6 +28,7 @@ import { getResource, getAuthOverrideUrl, getRealm } from "./lib/auth/tidecloakC
 // Extended Request interface with user information
 export interface AuthenticatedRequest extends Request {
   user?: OIDCUser;
+  clientRoles?: string[];
   accessToken?: string;
   tokenPayload?: TokenPayload;
 }
@@ -231,6 +232,14 @@ export async function authenticate(
     req.user = extractUserFromPayload(payload);
     req.accessToken = token;
     req.tokenPayload = payload;
+
+    // Collect all client roles for downstream middleware
+    const allClientRoles: string[] = [];
+    for (const [, v] of Object.entries(payload.resource_access || {})) {
+      if (Array.isArray(v?.roles)) allClientRoles.push(...v.roles);
+    }
+    req.clientRoles = allClientRoles;
+
     next();
   } catch (error) {
     console.error("[Auth] Token verification failed:", error);
@@ -255,6 +264,25 @@ export function requireAdmin(
   }
 
   next();
+}
+
+// Middleware to allow admin OR users with allowConfigDownload role (read-only config access)
+export function requireAdminOrConfigDownload(
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+) {
+  if (!req.user) {
+    res.status(401).json({ message: "Authentication required" });
+    return;
+  }
+
+  if (req.user.role === "admin" || req.clientRoles?.includes("allowConfigDownload")) {
+    next();
+    return;
+  }
+
+  res.status(403).json({ message: "Admin or allowConfigDownload role required" });
 }
 
 // Middleware to require policy creator permissions

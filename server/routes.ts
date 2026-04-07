@@ -114,6 +114,7 @@ async function checkServersHealth(servers: ServerType[]): Promise<Map<string, Se
 import {
   authenticate,
   requireAdmin,
+  requireAdminOrConfigDownload,
   requirePolicyCreator,
   tidecloakAdmin,
   type AuthenticatedRequest,
@@ -1506,7 +1507,7 @@ export async function registerRoutes(
   // ============================================
 
   // GET /api/admin/gateway-configs - List all gateway configs
-  app.get("/api/admin/gateway-configs", authenticate, requireAdmin, async (_req: AuthenticatedRequest, res) => {
+  app.get("/api/admin/gateway-configs", authenticate, requireAdminOrConfigDownload, async (_req: AuthenticatedRequest, res) => {
     try {
       const configs = await gatewayConfigStorage.list();
       res.json(configs);
@@ -1528,7 +1529,7 @@ export async function registerRoutes(
   });
 
   // GET /api/admin/gateway-configs/:id - Get a specific gateway config
-  app.get("/api/admin/gateway-configs/:id", authenticate, requireAdmin, async (req: AuthenticatedRequest, res) => {
+  app.get("/api/admin/gateway-configs/:id", authenticate, requireAdminOrConfigDownload, async (req: AuthenticatedRequest, res) => {
     try {
       const config = await gatewayConfigStorage.getById(req.params.id);
       if (!config) return res.status(404).json({ message: "Gateway config not found" });
@@ -1564,7 +1565,7 @@ export async function registerRoutes(
   });
 
   // GET /api/admin/gateway-configs/:id/download - Download gateway config as TOML
-  app.get("/api/admin/gateway-configs/:id/download", authenticate, requireAdmin, async (req: AuthenticatedRequest, res) => {
+  app.get("/api/admin/gateway-configs/:id/download", authenticate, requireAdminOrConfigDownload, async (req: AuthenticatedRequest, res) => {
     try {
       const config = await gatewayConfigStorage.getById(req.params.id);
       if (!config) return res.status(404).json({ message: "Gateway config not found" });
@@ -1586,8 +1587,25 @@ export async function registerRoutes(
     }
   });
 
+  // GET /api/admin/gateway-configs/:id/tidecloak-config - Download tidecloak.json adapter config
+  app.get("/api/admin/gateway-configs/:id/tidecloak-config", authenticate, requireAdminOrConfigDownload, async (req: AuthenticatedRequest, res) => {
+    try {
+      const config = await gatewayConfigStorage.getById(req.params.id);
+      if (!config) return res.status(404).json({ message: "Gateway config not found" });
+      if (!config.tidecloakConfigB64) return res.status(404).json({ message: "No TideCloak config set for this gateway" });
+
+      const json = Buffer.from(config.tidecloakConfigB64, "base64").toString("utf-8");
+      res.setHeader("Content-Type", "application/json");
+      res.setHeader("Content-Disposition", `attachment; filename="tidecloak.json"`);
+      res.send(json);
+    } catch (error) {
+      log(`Failed to download tidecloak config: ${error}`);
+      res.status(500).json({ message: "Failed to download tidecloak config" });
+    }
+  });
+
   // GET /api/admin/gateway-configs/:id/vpn-config - Download VPN client config (tidecloak.json + connection info)
-  app.get("/api/admin/gateway-configs/:id/vpn-config", authenticate, requireAdmin, async (req: AuthenticatedRequest, res) => {
+  app.get("/api/admin/gateway-configs/:id/vpn-config", authenticate, requireAdminOrConfigDownload, async (req: AuthenticatedRequest, res) => {
     try {
       const config = await gatewayConfigStorage.getById(req.params.id);
       if (!config) return res.status(404).json({ message: "Gateway config not found" });

@@ -1,19 +1,33 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use tokio::sync::oneshot;
+use tokio::sync::mpsc;
 
 use crate::config::Config;
 use crate::registry::Registry;
 
 pub struct PendingRequest {
-    pub response_tx: oneshot::Sender<HttpRelayResponse>,
+    pub tx: mpsc::UnboundedSender<RelayMessage>,
 }
 
-pub struct HttpRelayResponse {
-    pub status: u16,
-    pub headers: serde_json::Value,
-    pub body: Vec<u8>,
+pub enum RelayMessage {
+    /// Complete buffered response (from `http_response`)
+    Complete {
+        status: u16,
+        headers: serde_json::Value,
+        body: Vec<u8>,
+    },
+    /// Start of a streamed response (from `http_response_start`)
+    StreamStart {
+        status: u16,
+        headers: serde_json::Value,
+    },
+    /// A chunk of streamed data (from `http_response_chunk`)
+    StreamChunk(Vec<u8>),
+    /// End of stream (from `http_response_end`)
+    StreamEnd,
+    /// Abort (from `http_abort`)
+    Abort,
 }
 
 #[derive(Clone)]

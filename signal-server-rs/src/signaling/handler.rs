@@ -239,21 +239,53 @@ async fn handle_signaling(socket: WebSocket, client_ip: String, state: AppState)
                         // Forwarded internally — not expected from external clients
                     }
                     "http_response" | "http_response_start" | "http_response_chunk" | "http_response_end" | "http_abort" => {
-                        // Handle HTTP relay responses
                         let req_id = parsed["id"].as_str().unwrap_or("").to_string();
-                        if msg_type == "http_response" {
-                            if let Some((_, pending)) = state.pending_requests.remove(&req_id) {
-                                let status = parsed["statusCode"].as_u64().unwrap_or(200) as u16;
-                                let headers = parsed["headers"].clone();
-                                let body = parsed["body"].as_str()
-                                    .and_then(|b| base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b).ok())
-                                    .unwrap_or_default();
-                                let _ = pending.response_tx.send(crate::state::HttpRelayResponse {
-                                    status, headers, body,
-                                });
+                        match msg_type {
+                            "http_response" => {
+                                if let Some(pending) = state.pending_requests.get(&req_id) {
+                                    let status = parsed["statusCode"].as_u64().unwrap_or(200) as u16;
+                                    let headers = parsed["headers"].clone();
+                                    let body = parsed["body"].as_str()
+                                        .and_then(|b| base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b).ok())
+                                        .unwrap_or_default();
+                                    let _ = pending.tx.send(crate::state::RelayMessage::Complete {
+                                        status, headers, body,
+                                    });
+                                }
+                                state.pending_requests.remove(&req_id);
                             }
+                            "http_response_start" => {
+                                if let Some(pending) = state.pending_requests.get(&req_id) {
+                                    let status = parsed["statusCode"].as_u64().unwrap_or(200) as u16;
+                                    let headers = parsed["headers"].clone();
+                                    let _ = pending.tx.send(crate::state::RelayMessage::StreamStart {
+                                        status, headers,
+                                    });
+                                }
+                                // Keep the entry — chunks and end will follow
+                            }
+                            "http_response_chunk" => {
+                                if let Some(pending) = state.pending_requests.get(&req_id) {
+                                    let data = parsed["data"].as_str()
+                                        .and_then(|b| base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b).ok())
+                                        .unwrap_or_default();
+                                    let _ = pending.tx.send(crate::state::RelayMessage::StreamChunk(data));
+                                }
+                            }
+                            "http_response_end" => {
+                                if let Some(pending) = state.pending_requests.get(&req_id) {
+                                    let _ = pending.tx.send(crate::state::RelayMessage::StreamEnd);
+                                }
+                                state.pending_requests.remove(&req_id);
+                            }
+                            "http_abort" => {
+                                if let Some(pending) = state.pending_requests.get(&req_id) {
+                                    let _ = pending.tx.send(crate::state::RelayMessage::Abort);
+                                }
+                                state.pending_requests.remove(&req_id);
+                            }
+                            _ => {}
                         }
-                        // TODO: streaming responses
                     }
                     _ => {}
                 }

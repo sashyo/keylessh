@@ -50,4 +50,5 @@ clap = { version = "4", features = ["derive"] }
 sha2 = "0.10"
 bytes = "1"
 urlencoding = "2"
+async-stream = "0.3"
 dotenvy = "0.15"

@@ -28,7 +28,12 @@
             }
         ],
         "client": {
-            "myclient": [],
+            "myclient": [
+                {
+                    "name": "allowConfigDownload",
+                    "description": "Allow user to access configuration"
+                }
+            ],
             "myclient-stun": []
         }
     },

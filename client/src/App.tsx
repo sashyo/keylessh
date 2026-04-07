@@ -94,6 +94,16 @@ function AuthenticatedApp() {
   const [, setLocation] = useLocation();
   const [showRetry, setShowRetry] = useState(false);
   const isAdmin = hasRole("admin");
+  const canAccessGateways = isAdmin || (() => {
+    try {
+      const token = localStorage.getItem("access_token");
+      if (!token) return false;
+      const payload = JSON.parse(atob(token.split(".")[1]));
+      const clientId = payload.azp;
+      const clientRoles = payload.resource_access?.[clientId]?.roles || [];
+      return clientRoles.includes("allowConfigDownload");
+    } catch { return false; }
+  })();
 
   useEffect(() => {
     if (!isLoading && !isAuthenticated) {
@@ -146,7 +156,7 @@ function AuthenticatedApp() {
             {isAdmin ? <AdminSignalServers /> : <Redirect to="/app" />}
           </Route>
           <Route path="/admin/gateways">
-            {isAdmin ? <AdminGateways /> : <Redirect to="/app" />}
+            {canAccessGateways ? <AdminGateways /> : <Redirect to="/app" />}
           </Route>
           <Route path="/admin/users">
             {isAdmin ? <AdminUsers /> : <Redirect to="/app" />}

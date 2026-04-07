@@ -3,10 +3,10 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use std::time::Duration;
-use tokio::sync::oneshot;
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use crate::state::{AppState, HttpRelayResponse, PendingRequest};
+use crate::state::{AppState, PendingRequest, RelayMessage};
 
 const RELAY_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
@@ -65,49 +65,104 @@ pub async fn relay_handler(State(state): State<AppState>, req: Request) -> Respo
     }
 
     // Register pending request
-    let (tx, rx) = oneshot::channel::<HttpRelayResponse>();
-    state.pending_requests.insert(request_id.clone(), PendingRequest { response_tx: tx });
+    let (tx, mut rx) = mpsc::unbounded_channel::<RelayMessage>();
+    state.pending_requests.insert(request_id.clone(), PendingRequest { tx });
 
-    // Wait for response with timeout
-    match tokio::time::timeout(RELAY_TIMEOUT, rx).await {
-        Ok(Ok(resp)) => {
-            let mut builder = Response::builder().status(resp.status);
-
-            // Parse response headers
-            if let Some(headers_obj) = resp.headers.as_object() {
-                for (k, v) in headers_obj {
-                    // Skip CORS headers (handled at tower level)
-                    if k.to_lowercase().starts_with("access-control-") {
-                        continue;
-                    }
-                    if let Some(val) = v.as_str() {
-                        if let Ok(hv) = HeaderValue::from_str(val) {
-                            builder = builder.header(k.as_str(), hv);
-                        }
-                    }
-                }
-            }
-
-            // Add gateway affinity cookie
-            let cookie = format!(
-                "gateway_relay={}; Path=/; HttpOnly; SameSite=None; Secure",
-                urlencoding::encode(&gateway_id)
-            );
-            builder = builder.header("set-cookie", cookie);
-
-            builder.body(Body::from(resp.body)).unwrap_or_else(|_| {
-                (StatusCode::INTERNAL_SERVER_ERROR, "Response build error").into_response()
-            })
+    // Wait for first message with timeout
+    let first = tokio::time::timeout(RELAY_TIMEOUT, rx.recv()).await;
+    match first {
+        Ok(Some(RelayMessage::Complete { status, headers, body })) => {
+            build_buffered_response(status, &headers, body, &gateway_id)
         }
-        Ok(Err(_)) => {
+        Ok(Some(RelayMessage::StreamStart { status, headers })) => {
+            build_streaming_response(status, &headers, rx, &gateway_id)
+        }
+        Ok(Some(RelayMessage::Abort)) | Ok(None) => {
             state.pending_requests.remove(&request_id);
             (StatusCode::BAD_GATEWAY, "Gateway connection lost").into_response()
+        }
+        Ok(Some(_)) => {
+            // Unexpected message type as first message
+            state.pending_requests.remove(&request_id);
+            (StatusCode::BAD_GATEWAY, "Unexpected relay message").into_response()
         }
         Err(_) => {
             state.pending_requests.remove(&request_id);
             (StatusCode::GATEWAY_TIMEOUT, "Gateway response timeout").into_response()
         }
     }
+}
+
+/// Build headers on a response builder from the gateway's JSON header map.
+fn set_headers(mut builder: axum::http::response::Builder, headers: &serde_json::Value, gateway_id: &str) -> axum::http::response::Builder {
+    if let Some(headers_obj) = headers.as_object() {
+        for (k, v) in headers_obj {
+            if k.to_lowercase().starts_with("access-control-") {
+                continue;
+            }
+            match v {
+                serde_json::Value::String(val) => {
+                    if let Ok(hv) = HeaderValue::from_str(val) {
+                        builder = builder.header(k.as_str(), hv);
+                    }
+                }
+                serde_json::Value::Array(arr) => {
+                    for item in arr {
+                        if let Some(val) = item.as_str() {
+                            if let Ok(hv) = HeaderValue::from_str(val) {
+                                builder = builder.header(k.as_str(), hv);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Add gateway affinity cookie
+    let cookie = format!(
+        "gateway_relay={}; Path=/; HttpOnly; SameSite=None; Secure",
+        urlencoding::encode(gateway_id)
+    );
+    builder = builder.header("set-cookie", cookie);
+    builder
+}
+
+fn build_buffered_response(status: u16, headers: &serde_json::Value, body: Vec<u8>, gateway_id: &str) -> Response {
+    let builder = Response::builder()
+        .status(StatusCode::from_u16(status).unwrap_or(StatusCode::OK));
+    let builder = set_headers(builder, headers, gateway_id);
+    builder.body(Body::from(body)).unwrap_or_else(|_| {
+        (StatusCode::INTERNAL_SERVER_ERROR, "Response build error").into_response()
+    })
+}
+
+fn build_streaming_response(
+    status: u16,
+    headers: &serde_json::Value,
+    mut rx: mpsc::UnboundedReceiver<RelayMessage>,
+    gateway_id: &str,
+) -> Response {
+    let stream = async_stream::stream! {
+        loop {
+            match rx.recv().await {
+                Some(RelayMessage::StreamChunk(data)) => {
+                    yield Ok::<_, std::convert::Infallible>(data);
+                }
+                Some(RelayMessage::StreamEnd) | None => break,
+                Some(RelayMessage::Abort) => break,
+                _ => break,
+            }
+        }
+    };
+
+    let builder = Response::builder()
+        .status(StatusCode::from_u16(status).unwrap_or(StatusCode::OK));
+    let builder = set_headers(builder, headers, gateway_id);
+    builder.body(Body::from_stream(stream)).unwrap_or_else(|_| {
+        (StatusCode::INTERNAL_SERVER_ERROR, "Response build error").into_response()
+    })
 }
 
 fn find_gateway(state: &AppState, url: &str, headers: &HeaderMap) -> Option<String> {

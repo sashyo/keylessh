@@ -534,6 +534,7 @@ export const api = {
       delete: (id: string) => apiRequest<void>(`/api/admin/gateway-configs/${id}`, { method: "DELETE" }),
       downloadUrl: (id: string) => `/api/admin/gateway-configs/${id}/download`,
       vpnConfigUrl: (id: string) => `/api/admin/gateway-configs/${id}/vpn-config`,
+      tidecloakConfigUrl: (id: string) => `/api/admin/gateway-configs/${id}/tidecloak-config`,
     },
   },
 };
