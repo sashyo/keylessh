@@ -2096,17 +2096,8 @@ async fn handle_request(
         tracing::debug!("[HTTP] Step 2: prepend_prefix (prefix='{}')", backend_prefix);
 
         if !backend_prefix.is_empty() {
-            tracing::debug!("[HTTP] Step 2a: calling prepend_prefix");
-            html = prepend_prefix(&html, &backend_prefix);
-            tracing::debug!("[HTTP] Step 2b: building patch_script");
-            let patch_script = build_patch_script(&backend_prefix);
-            tracing::debug!("[HTTP] Step 2c: injecting patch_script");
-            if html.contains("<head>") {
-                html = html.replacen("<head>", &format!("<head>{patch_script}"), 1);
-            } else {
-                html = format!("{patch_script}{html}");
-            }
-            tracing::debug!("[HTTP] Step 2d: done");
+            // Temporarily skip HTML rewriting to test if this is the crash
+            tracing::debug!("[HTTP] Step 2: skipping HTML rewriting (debug)");
         }
 
         tracing::debug!("[HTTP] Step 3: inject upgrade scripts");
