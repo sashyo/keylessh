@@ -92,12 +92,18 @@ UINT __stdcall RegisterSecurityPackage(MSIHANDLE hInstall)
     RegQueryValueExW(hKey, L"Security Packages", NULL, NULL, (BYTE *)msz, &cbData);
 
     if (!MultiSzContains(msz, PACKAGE_NAME)) {
-        /* Append: find the double-null terminator and insert before it */
+        /* Append: find the double-null terminator and insert before it.
+         * Skip any leading empty strings (some Windows installs have "" as default). */
         WCHAR *end = msz;
         while (*end)
             end += wcslen(end) + 1;
-        /* end now points to the final '\0' of the double-null */
-        StringCchCopyW(end, wcslen(PACKAGE_NAME) + 1, PACKAGE_NAME);
+
+        /* If the only content was empty strings (end == msz), overwrite from the start */
+        if (end == msz) {
+            StringCchCopyW(msz, wcslen(PACKAGE_NAME) + 1, PACKAGE_NAME);
+        } else {
+            StringCchCopyW(end, wcslen(PACKAGE_NAME) + 1, PACKAGE_NAME);
+        }
         DWORD newSize = MultiSzSize(msz);
         RegSetValueExW(hKey, L"Security Packages", 0, REG_MULTI_SZ,
                        (BYTE *)msz, newSize);
