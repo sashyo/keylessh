@@ -1,8 +1,7 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Select,
   SelectContent,
@@ -10,7 +9,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Wifi, WifiOff, Download, Loader2, RefreshCw, X } from "lucide-react";
+import { Wifi, WifiOff, Loader2, RefreshCw, X, Power } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { api, type GatewayEndpoint } from "@/lib/api";
 import { useAuth, useAuthConfig } from "@/contexts/AuthContext";
@@ -37,7 +36,9 @@ interface AgentStatus {
 export function VpnPanel() {
   const { getToken } = useAuth();
   const authConfig = useAuthConfig();
+  const [enabled, setEnabled] = useState(false);
   const [agentRunning, setAgentRunning] = useState(false);
+  const [checking, setChecking] = useState(false);
   const [connections, setConnections] = useState<AgentConnection[]>([]);
   const [selectedGateway, setSelectedGateway] = useState<string>("");
   const [connecting, setConnecting] = useState(false);
@@ -49,22 +50,27 @@ export function VpnPanel() {
   });
 
   const checkAgent = useCallback(async () => {
+    setChecking(true);
     try {
       const resp = await fetch(`${AGENT_URL}/status`, { signal: AbortSignal.timeout(2000) });
       if (resp.ok) {
         const data: AgentStatus = await resp.json();
         setAgentRunning(data.running);
         setConnections(data.connections || []);
+        setChecking(false);
         return;
       }
     } catch {}
     setAgentRunning(false);
     setConnections([]);
+    setChecking(false);
   }, []);
 
-  useEffect(() => {
-    checkAgent();
-  }, [checkAgent]);
+  const handleEnable = async () => {
+    setEnabled(true);
+    setError(null);
+    await checkAgent();
+  };
 
   const connectedGatewayIds = new Set(connections.map((c) => c.gatewayId));
 
@@ -82,8 +88,6 @@ export function VpnPanel() {
       return;
     }
 
-    const vpnToken = token;
-
     try {
       const resp = await fetch(`${AGENT_URL}/connect`, {
         method: "POST",
@@ -91,7 +95,7 @@ export function VpnPanel() {
         body: JSON.stringify({
           stunServer: gw.signalServerUrl.replace(/^http/, "ws"),
           gatewayId: gw.id,
-          token: vpnToken,
+          token,
           tidecloakConfig: authConfig ? {
             realm: authConfig.realm,
             "auth-server-url": authConfig.url,
@@ -133,7 +137,29 @@ export function VpnPanel() {
     setTimeout(checkAgent, 1000);
   };
 
-  // Agent not detected
+  // Not enabled yet — show activation button
+  if (!enabled) {
+    return (
+      <Card>
+        <CardContent className="p-4">
+          <button
+            onClick={handleEnable}
+            className="w-full flex items-center gap-3 text-left group"
+          >
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border bg-muted/50 group-hover:bg-[hsl(var(--neon-cyan)/0.15)] group-hover:border-[hsl(var(--neon-cyan)/0.3)] transition-colors">
+              <Power className="h-4 w-4 text-muted-foreground group-hover:text-[hsl(var(--neon-cyan))]" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium group-hover:text-foreground transition-colors">Check for VPN Agent</p>
+              <p className="text-xs text-muted-foreground">Detect if a Punchd VPN agent is running on this device</p>
+            </div>
+          </button>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  // Enabled but agent not detected
   if (!agentRunning) {
     return (
       <Card>
@@ -143,12 +169,17 @@ export function VpnPanel() {
               <WifiOff className="h-4 w-4" />
               <span className="text-sm font-medium">VPN Agent Not Detected</span>
             </div>
-            <Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={checkAgent} title="Check again">
-              <RefreshCw className="h-3.5 w-3.5" />
-            </Button>
+            <div className="flex items-center gap-1">
+              <Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={checkAgent} title="Check again" disabled={checking}>
+                <RefreshCw className={`h-3.5 w-3.5 ${checking ? "animate-spin" : ""}`} />
+              </Button>
+              <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-muted-foreground" onClick={() => setEnabled(false)} title="Dismiss">
+                <X className="h-3.5 w-3.5" />
+              </Button>
+            </div>
           </div>
           <p className="text-xs text-muted-foreground">
-            Install and run the VPN agent to connect to gateway networks. Already running? Click refresh.
+            Install and run the VPN agent to connect to gateway networks.
           </p>
           <p className="text-[10px] text-muted-foreground">
             Run with: <code className="bg-muted px-1 rounded">punchd-vpn --agent</code>
@@ -178,8 +209,8 @@ export function VpnPanel() {
             )}
           </div>
           <div className="flex items-center gap-1">
-            <Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={checkAgent} title="Refresh">
-              <RefreshCw className="h-3 w-3" />
+            <Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={checkAgent} title="Refresh" disabled={checking}>
+              <RefreshCw className={`h-3 w-3 ${checking ? "animate-spin" : ""}`} />
             </Button>
             {connections.length > 1 && (
               <Button size="sm" variant="ghost" className="h-7 text-xs text-destructive" onClick={handleDisconnectAll}>
@@ -197,8 +228,8 @@ export function VpnPanel() {
                 <Wifi className="h-3 w-3 text-blue-600" />
                 {conn.gatewayId}
               </p>
-              {conn.info.tunName && (
-                <p className="text-muted-foreground font-mono">{conn.info.tunName}</p>
+              {conn.info.clientIp && (
+                <p className="text-muted-foreground font-mono">{conn.info.clientIp} {conn.info.tunName ? `(${conn.info.tunName})` : ""}</p>
               )}
             </div>
             <Button
