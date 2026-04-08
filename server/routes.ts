@@ -1187,7 +1187,7 @@ export async function registerRoutes(
   app.get(
     "/api/admin/servers",
     authenticate,
-    requireAdmin,
+    requireAdminOrConfigDownload,
     async (req: AuthenticatedRequest, res) => {
       try {
         const servers = await storage.getServers();
@@ -1201,7 +1201,7 @@ export async function registerRoutes(
   app.get(
     "/api/admin/servers/status",
     authenticate,
-    requireAdmin,
+    requireAdminOrConfigDownload,
     async (_req: AuthenticatedRequest, res) => {
       try {
         const servers = await storage.getServers();
@@ -1220,7 +1220,7 @@ export async function registerRoutes(
   app.post(
     "/api/admin/servers",
     authenticate,
-    requireAdmin,
+    requireAdminOrConfigDownload,
     async (req: AuthenticatedRequest, res) => {
       try {
         // Check server limit before creating
@@ -1249,7 +1249,7 @@ export async function registerRoutes(
   app.patch(
     "/api/admin/servers/:id",
     authenticate,
-    requireAdmin,
+    requireAdminOrConfigDownload,
     async (req: AuthenticatedRequest, res) => {
       try {
         const server = await storage.updateServer(req.params.id, req.body);
@@ -1267,7 +1267,7 @@ export async function registerRoutes(
   app.delete(
     "/api/admin/servers/:id",
     authenticate,
-    requireAdmin,
+    requireAdminOrConfigDownload,
     async (req: AuthenticatedRequest, res) => {
       try {
         const success = await storage.deleteServer(req.params.id);

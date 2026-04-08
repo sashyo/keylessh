@@ -13,7 +13,7 @@ import AuthRedirect from "@/pages/AuthRedirect";
 import Dashboard from "@/pages/Dashboard";
 import ConsoleWorkspace from "@/pages/ConsoleWorkspace";
 import AdminDashboard from "@/pages/AdminDashboard";
-// AdminServers removed — SSH servers are now gateway backends
+import AdminServers from "@/pages/AdminServers";
 import AdminUsers from "@/pages/AdminUsers";
 import AdminRoles from "@/pages/AdminRoles";
 import AdminApprovals from "@/pages/AdminApprovals";
@@ -157,6 +157,9 @@ function AuthenticatedApp() {
           </Route>
           <Route path="/admin/gateways">
             {canAccessGateways ? <AdminGateways /> : <Redirect to="/app" />}
+          </Route>
+          <Route path="/admin/servers">
+            {canAccessGateways ? <AdminServers /> : <Redirect to="/app" />}
           </Route>
           <Route path="/admin/users">
             {isAdmin ? <AdminUsers /> : <Redirect to="/app" />}

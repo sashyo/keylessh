@@ -24,7 +24,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Server, Users, Activity, LogOut, Shield, ChevronDown, Layers, ScrollText, KeyRound, CheckSquare, RefreshCw, CreditCard, Video, Zap, Sun, Moon, Network, Radio, Router } from "lucide-react";
+import { Server, Users, Activity, LogOut, Shield, ChevronDown, Layers, ScrollText, KeyRound, CheckSquare, RefreshCw, CreditCard, Video, Zap, Sun, Moon, Network, Radio, Router, Monitor } from "lucide-react";
 
 function KeyleSSHLogo({ className = "" }: { className?: string }) {
   return (
@@ -76,6 +76,7 @@ const adminNavGroups = [
       { title: "Overview", url: "/admin", icon: Shield },
       { title: "Signal Servers", url: "/admin/signal-servers", icon: Radio },
       { title: "Punchd", url: "/admin/gateways", icon: Router },
+      { title: "Servers", url: "/admin/servers", icon: Monitor },
       { title: "Sessions", url: "/admin/sessions", icon: Activity },
     ],
   },
@@ -169,15 +170,16 @@ export function AppLayout({ children }: AppLayoutProps) {
         ...group,
         items: group.items.filter(item => {
           if (item.url === "/admin/gateways") return canAccessGateways;
+          if (item.url === "/admin/servers") return canAccessGateways;
           return false; // non-admins can't see other admin items
         }),
       })).filter(group => group.items.length > 0);
     } else {
-      // Hide Punchd gateway tab unless admin or has allowConfigDownload role
+      // Hide Punchd + Servers unless admin or has allowConfigDownload role
       if (!canAccessGateways) {
         groups = groups.map(group => ({
           ...group,
-          items: group.items.filter(item => item.url !== "/admin/gateways"),
+          items: group.items.filter(item => item.url !== "/admin/gateways" && item.url !== "/admin/servers"),
         }));
       }
 
