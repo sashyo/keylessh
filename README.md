@@ -34,7 +34,7 @@ The result: enterprise-grade SSH access control without any private keys to mana
 - **Quorum-based RBAC, zero-knowledge OIDC login** with TideCloak - no passwords, no keys
 - **Programmable policy enforcement** with Forseti contracts for SSH access
 - **Admin UX**: servers, users, roles, policy templates, change requests, sessions, logs
-- **Browser-based RDP** - full Windows remote desktop in a browser tab via [IronRDP](https://github.com/niclas-APN/IronRDP) WASM (forked for e2e TLS support). No client install, no ports to open, no VPN. Passwordless login via TideSSP EdDSA certificates.
+- **Browser-based RDP** - full Windows remote desktop in a browser tab via [IronRDP](https://github.com/sashyo/IronRDP/tree/feat/ironrdp-tls-wasm) WASM (forked to add e2e TLS in WASM via WebCrypto). No client install, no ports to open, no VPN. Passwordless login via TideSSP EdDSA certificates.
 - **QUIC VPN** - native VPN client with TUN adapter, NAT hole-punching (LAN → direct → TURN relay fallback), per-user firewall rules from JWT roles, auto LAN route detection
 - **P2P transport** - automatic upgrade from HTTP relay to direct peer-to-peer WebRTC DataChannels (browsers) or QUIC P2P (native VPN), with TURN relay fallback for restrictive NATs
 - **Signal server** (`signal-server-rs/`) - Rust signaling hub coordinating P2P connections via WebSocket (SDP/ICE), HTTP relay, gateway registry, and ephemeral TURN credential generation. Deployed with a coturn sidecar for STUN/TURN.
