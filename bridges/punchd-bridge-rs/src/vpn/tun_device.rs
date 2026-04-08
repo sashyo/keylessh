@@ -183,9 +183,12 @@ mod platform {
                 .args(["interface", "ipv4", "set", "subinterface", &config.name, &format!("mtu={mtu_str}"), "store=active"])
                 .status();
 
-            // Enable IP forwarding on the TUN + physical adapters so packets
-            // from VPN clients (10.66.0.x) can be forwarded to LAN destinations.
-            // Skip vEthernet (Hyper-V virtual switches) to avoid breaking NAT.
+            // Enable IP forwarding on the TUN interface explicitly (by name)
+            let _ = std::process::Command::new("netsh")
+                .args(["interface", "ipv4", "set", "interface", &config.name, "forwarding=enabled"])
+                .status();
+
+            // Also enable on physical adapters (skip vEthernet to preserve Hyper-V NAT)
             let iface_output = std::process::Command::new("netsh")
                 .args(["interface", "ipv4", "show", "interfaces"])
                 .output();
@@ -195,7 +198,7 @@ mod platform {
                     let parts: Vec<&str> = line.split_whitespace().collect();
                     if parts.len() >= 5 && parts[3] == "connected" {
                         let iface_name = parts[4..].join(" ");
-                        if iface_name.starts_with("vEthernet") {
+                        if iface_name.starts_with("vEthernet") || iface_name == config.name {
                             continue;
                         }
                         let _ = std::process::Command::new("netsh")
