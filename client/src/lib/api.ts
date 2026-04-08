@@ -212,10 +212,14 @@ export const api = {
         return { linkUrl };
       },
       getRoles: async (userId: string): Promise<string[]> => {
-        // Use client-specific role-mappings endpoint to get all assigned roles
-        // (the generic /role-mappings endpoint may not return VPN firewall roles)
-        const clientRoles = await tc.getUserClientRoleMappings(userId);
-        return clientRoles.map(r => r.name).filter((n): n is string => !!n);
+        // Fetch from both app client and realm-management client
+        const [clientRoles, adminRoles] = await Promise.all([
+          tc.getUserClientRoleMappings(userId),
+          tc.getUserRealmManagementRoleMappings(userId),
+        ]);
+        const roles = clientRoles.map(r => r.name).filter((n): n is string => !!n);
+        const admin = adminRoles.map(r => r.name).filter((n): n is string => !!n);
+        return [...roles, ...admin];
       },
       setEnabled: async (userId: string, enabled: boolean) => {
         await tc.setUserEnabled(userId, enabled);

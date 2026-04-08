@@ -276,6 +276,12 @@ export async function getUserClientRoleMappings(userId: string): Promise<RoleRep
   return tcFetch<RoleRepresentation[]>(`/users/${userId}/role-mappings/clients/${client.id}`);
 }
 
+export async function getUserRealmManagementRoleMappings(userId: string): Promise<RoleRepresentation[]> {
+  const client = await getClientByClientId(REALM_MGMT);
+  if (!client?.id) return [];
+  return tcFetch<RoleRepresentation[]>(`/users/${userId}/role-mappings/clients/${client.id}`).catch(() => []);
+}
+
 export async function getTideLinkUrl(userId: string, redirectUri: string): Promise<string> {
   const clientId = await getClientId();
   return tcFetch<string>(
