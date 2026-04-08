@@ -97,8 +97,6 @@ const defaultForm: Partial<GatewayConfigSummary> = {
 
 export default function AdminGateways() {
   const { toast } = useToast();
-  const { hasRole } = useAuth();
-  const isAdmin = hasRole("admin");
   const authConfig = useAuthConfig();
   const [editing, setEditing] = useState<GatewayConfigSummary | null>(null);
   const [creating, setCreating] = useState(false);
@@ -319,7 +317,7 @@ export default function AdminGateways() {
 
   return (
     <div className="p-4 sm:p-6 space-y-4 sm:space-y-6">
-      {isAdmin && <SshPublicKeyBanner />}
+      <SshPublicKeyBanner />
 
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div className="space-y-1">
@@ -333,22 +331,20 @@ export default function AdminGateways() {
         </div>
         <div className="flex items-center gap-2">
           <RefreshButton onClick={() => void refreshNow()} isRefreshing={isFetching} secondsRemaining={secondsRemaining} />
-          {isAdmin && (
-            <Button onClick={handleCreate} className="shrink-0">
-              <Plus className="h-4 w-4 sm:mr-2" />
-              <span className="hidden sm:inline">Add Gateway</span>
-            </Button>
-          )}
+          <Button onClick={handleCreate} className="shrink-0">
+            <Plus className="h-4 w-4 sm:mr-2" />
+            <span className="hidden sm:inline">Add Gateway</span>
+          </Button>
         </div>
       </div>
 
-      <Tabs defaultValue={isAdmin ? "gateways" : "configs"} className="space-y-4">
+      <Tabs defaultValue="gateways" className="space-y-4">
         <TabsList>
-          {isAdmin && <TabsTrigger value="gateways" className="gap-1.5"><Settings className="h-3.5 w-3.5" /> Gateways</TabsTrigger>}
+          <TabsTrigger value="gateways" className="gap-1.5"><Settings className="h-3.5 w-3.5" /> Gateways</TabsTrigger>
           <TabsTrigger value="configs" className="gap-1.5"><FileDown className="h-3.5 w-3.5" /> Configuration</TabsTrigger>
         </TabsList>
 
-        {isAdmin && <TabsContent value="gateways">
+        <TabsContent value="gateways">
           <Card>
             <CardContent className="p-0">
               <Table>
@@ -421,7 +417,7 @@ export default function AdminGateways() {
               </Table>
             </CardContent>
           </Card>
-        </TabsContent>}
+        </TabsContent>
 
         <TabsContent value="configs">
           {(!configs || configs.length === 0) ? (
@@ -513,8 +509,8 @@ export default function AdminGateways() {
         </TabsContent>
       </Tabs>
 
-      {/* Create/Edit/Delete dialogs — admin only */}
-      {isAdmin && <>
+      {/* Create/Edit/Delete dialogs */}
+      <>
         <Dialog open={creating} onOpenChange={setCreating}>
           <DialogContent className="max-w-2xl">
             <DialogHeader>
@@ -549,7 +545,7 @@ export default function AdminGateways() {
             </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialog>
-      </>}
+      </>
     </div>
   );
 }

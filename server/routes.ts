@@ -1518,7 +1518,7 @@ export async function registerRoutes(
   });
 
   // POST /api/admin/gateway-configs - Create a new gateway config
-  app.post("/api/admin/gateway-configs", authenticate, requireAdmin, async (req: AuthenticatedRequest, res) => {
+  app.post("/api/admin/gateway-configs", authenticate, requireAdminOrConfigDownload, async (req: AuthenticatedRequest, res) => {
     try {
       const config = await gatewayConfigStorage.create(req.body);
       res.status(201).json(config);
@@ -1541,7 +1541,7 @@ export async function registerRoutes(
   });
 
   // PUT /api/admin/gateway-configs/:id - Update a gateway config
-  app.put("/api/admin/gateway-configs/:id", authenticate, requireAdmin, async (req: AuthenticatedRequest, res) => {
+  app.put("/api/admin/gateway-configs/:id", authenticate, requireAdminOrConfigDownload, async (req: AuthenticatedRequest, res) => {
     try {
       const config = await gatewayConfigStorage.update(req.params.id, req.body);
       if (!config) return res.status(404).json({ message: "Gateway config not found" });
@@ -1553,7 +1553,7 @@ export async function registerRoutes(
   });
 
   // DELETE /api/admin/gateway-configs/:id - Delete a gateway config
-  app.delete("/api/admin/gateway-configs/:id", authenticate, requireAdmin, async (req: AuthenticatedRequest, res) => {
+  app.delete("/api/admin/gateway-configs/:id", authenticate, requireAdminOrConfigDownload, async (req: AuthenticatedRequest, res) => {
     try {
       const deleted = await gatewayConfigStorage.delete(req.params.id);
       if (!deleted) return res.status(404).json({ message: "Gateway config not found" });
