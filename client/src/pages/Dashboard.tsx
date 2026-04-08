@@ -20,6 +20,8 @@ import { VpnPanel } from "@/components/VpnPanel";
 import { IAMService } from "@tidecloak/js";
 import { appFetch } from "@/lib/appFetch";
 import { api, type GatewayEndpoint } from "@/lib/api";
+import { lazy, Suspense } from "react";
+const AdminServers = lazy(() => import("@/pages/AdminServers"));
 
 type ServiceItem =
   | { kind: "ssh"; endpoint: GatewayEndpoint; backend: { name: string; protocol?: string; auth?: string; accessible?: boolean } }
@@ -1203,7 +1205,13 @@ export default function Dashboard() {
           {canAccessGateways && (
             <TabsTrigger value="gateways" className="gap-1.5">
               <Router className="h-4 w-4" />
-              Gateways
+              Local Gateways
+            </TabsTrigger>
+          )}
+          {canAccessGateways && (
+            <TabsTrigger value="servers" className="gap-1.5">
+              <Monitor className="h-4 w-4" />
+              Servers
             </TabsTrigger>
           )}
         </TabsList>
@@ -1358,6 +1366,13 @@ export default function Dashboard() {
         {canAccessGateways && (
           <TabsContent value="gateways">
             <GatewaysTab />
+          </TabsContent>
+        )}
+        {canAccessGateways && (
+          <TabsContent value="servers">
+            <Suspense fallback={<div className="py-8 text-center text-muted-foreground">Loading...</div>}>
+              <AdminServers />
+            </Suspense>
           </TabsContent>
         )}
       </Tabs>
