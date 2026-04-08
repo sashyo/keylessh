@@ -8,8 +8,22 @@ mod quic;
 mod http;
 
 use axum::{routing::get, Router};
+use axum::http::Request;
+use axum::middleware::Next;
+use axum::response::Response;
 use std::net::SocketAddr;
 use tower_http::cors::{CorsLayer, Any};
+
+/// Add Access-Control-Allow-Private-Network header to all responses.
+/// Chrome requires this for public websites accessing private network resources.
+async fn private_network_access(request: Request<axum::body::Body>, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(
+        axum::http::HeaderName::from_static("access-control-allow-private-network"),
+        axum::http::HeaderValue::from_static("true"),
+    );
+    response
+}
 
 use crate::config::Config;
 use crate::state::AppState;
@@ -51,6 +65,7 @@ async fn main() {
         // Everything else: HTTP relay to gateway
         .fallback(relay::http_relay::relay_handler)
         .layer(cors)
+        .layer(axum::middleware::from_fn(private_network_access))
         .with_state(state.clone());
 
     let scheme = if use_tls { "https" } else { "http" };
