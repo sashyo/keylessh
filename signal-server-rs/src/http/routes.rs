@@ -30,6 +30,28 @@ pub async fn webrtc_config(State(state): State<AppState>) -> Json<Value> {
         }
     }
 
+    // Include backend auth info per gateway so clients can detect EdDSA backends
+    // without a separate fetch (avoids Private Network Access prompt)
+    let mut gw_backends: serde_json::Map<String, Value> = serde_json::Map::new();
+    for gw_id in state.registry.get_all_gateways() {
+        if let Some(gw) = state.registry.get_gateway(&gw_id) {
+            if let Some(ref backends) = gw.metadata.backends {
+                let mut auth_map: serde_json::Map<String, Value> = serde_json::Map::new();
+                for b in backends {
+                    if let Some(ref auth) = b.auth {
+                        auth_map.insert(b.name.clone(), json!(auth));
+                    }
+                }
+                if !auth_map.is_empty() {
+                    gw_backends.insert(gw.id.clone(), Value::Object(auth_map));
+                }
+            }
+        }
+    }
+    if !gw_backends.is_empty() {
+        result["gatewayBackendAuth"] = Value::Object(gw_backends);
+    }
+
     Json(result)
 }
 
