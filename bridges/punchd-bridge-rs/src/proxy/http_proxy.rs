@@ -1225,14 +1225,15 @@ async fn handle_ssh_socket(
     let port: u16 = params.get("port").and_then(|p| p.parse().ok()).unwrap_or(22);
     let token = params.get("token").cloned().unwrap_or_default();
 
-    if host.is_empty() || token.is_empty() {
-        tracing::error!("[SSH] Missing host or token");
+    if host.is_empty() {
+        tracing::error!("[SSH] Missing host");
         return;
     }
 
     // Resolve backend name to actual host:port from config
-    let (resolved_host, resolved_port) = if let Some(backend) = state.config.backends.iter().find(|b| b.protocol == "ssh" && b.name == host) {
-        let url = backend.url.trim_start_matches("ssh://");
+    let backend = state.config.backends.iter().find(|b| b.protocol == "ssh" && b.name == host);
+    let (resolved_host, resolved_port) = if let Some(b) = backend {
+        let url = b.url.trim_start_matches("ssh://");
         if let Some((h, p)) = url.rsplit_once(':') {
             (h.to_string(), p.parse::<u16>().unwrap_or(22))
         } else {
@@ -1241,50 +1242,61 @@ async fn handle_ssh_socket(
     } else {
         (host.clone(), port)
     };
+    let is_noauth = backend.map(|b| b.no_auth).unwrap_or(false);
 
-    tracing::info!("[SSH] Connection request: {host} -> {resolved_host}:{resolved_port}");
+    tracing::info!("[SSH] Connection request: {host} -> {resolved_host}:{resolved_port} (noauth={is_noauth})");
 
-    // Verify JWT
-    let payload = match state.auth.verify_token(&token).await {
-        Some(p) => p,
-        None => {
-            tracing::error!("[SSH] JWT verification failed");
+    // Verify JWT (skip for noauth backends)
+    let payload = if is_noauth {
+        None
+    } else {
+        if token.is_empty() {
+            tracing::error!("[SSH] Missing token");
             let (mut sink, _) = socket.split();
             let _ = sink.send(Message::Text(
-                serde_json::json!({"type": "error", "message": "Unauthorized"}).to_string().into()
+                serde_json::json!({"type": "error", "message": "Token required"}).to_string().into()
             )).await;
             let _ = sink.send(Message::Close(None)).await;
             return;
         }
+        match state.auth.verify_token(&token).await {
+            Some(p) => Some(p),
+            None => {
+                tracing::error!("[SSH] JWT verification failed");
+                let (mut sink, _) = socket.split();
+                let _ = sink.send(Message::Text(
+                    serde_json::json!({"type": "error", "message": "Unauthorized"}).to_string().into()
+                )).await;
+                let _ = sink.send(Message::Close(None)).await;
+                return;
+            }
+        }
     };
 
-    let user = payload.sub.as_deref().unwrap_or("unknown");
+    let user = payload.as_ref().and_then(|p| p.sub.as_deref()).unwrap_or("anonymous");
     tracing::info!("[SSH] Authenticated: {user} -> {host}:{port}");
 
     // Find the SSH backend
-    let backend = state.config.backends.iter().find(|b| {
-        b.protocol == "ssh" && (b.url == format!("{host}:{port}") || b.name == host)
-    });
-
     let backend_name = backend.map(|b| b.name.clone()).unwrap_or_else(|| host.clone());
 
     // Check ssh: role — same pattern as dest: roles for RDP
-    // Looks in all resource_access entries for ssh:<gateway>:<backend> or ssh:<gateway>:<backend>:<username>
-    if !backend.map(|b| b.no_auth).unwrap_or(false) {
+    if !is_noauth {
         let gateway_id = state.gateway_id.as_deref().unwrap_or("");
         let required_prefix = format!("ssh:{gateway_id}:{backend_name}");
 
         let mut all_roles: Vec<String> = Vec::new();
-        if let Some(ref ra) = payload.realm_access {
-            all_roles.extend(ra.roles.clone());
-        }
-        if let Some(ref ra) = payload.resource_access {
-            if let Some(obj) = ra.as_object() {
-                for (_, access) in obj {
-                    if let Some(roles) = access.get("roles").and_then(|r| r.as_array()) {
-                        for role in roles {
-                            if let Some(r) = role.as_str() {
-                                all_roles.push(r.to_string());
+        if let Some(ref p) = payload {
+            if let Some(ref ra) = p.realm_access {
+                all_roles.extend(ra.roles.clone());
+            }
+            if let Some(ref ra) = p.resource_access {
+                if let Some(obj) = ra.as_object() {
+                    for (_, access) in obj {
+                        if let Some(roles) = access.get("roles").and_then(|r| r.as_array()) {
+                            for role in roles {
+                                if let Some(r) = role.as_str() {
+                                    all_roles.push(r.to_string());
+                                }
                             }
                         }
                     }

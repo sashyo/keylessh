@@ -496,7 +496,7 @@ export async function registerRoutes(
         // Route through a local Punchd gateway
         // bridgeId format: "gateway:<url>" e.g. "gateway:http://192.168.1.5:7891"
         const gwUrl = server.bridgeId.slice("gateway:".length).replace(/\/$/, "").replace(/^http/, "ws");
-        bridgeUrl = `${gwUrl}/ws/tcp`;
+        bridgeUrl = `${gwUrl}/ws/ssh`;
       } else if (server.bridgeId) {
         const bridge = await bridgeStorage.getBridge(server.bridgeId);
         if (bridge?.enabled) {
