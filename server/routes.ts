@@ -1726,7 +1726,7 @@ export async function registerRoutes(
         log(`[dest-roles] user=${req.user?.username} realmRoles=${JSON.stringify(rawRealmRoles)} clientRoles=${JSON.stringify(rawClientRoles)} destPerms=${JSON.stringify(destPerms)} gateways=${results.map(g => `${g.id}:[${g.backends.map(b => b.name).join(",")}]`).join("; ")}`);
 
         const annotated = results.map((gw) => {
-          const backends = (gw.backends.length > 0 ? gw.backends : [{ name: "Default" }]).map((b) => {
+          const backends = (gw.backends || []).map((b) => {
             const backendProtocol = ("protocol" in b ? b.protocol : "http") || "http";
             // SSH backends match ssh: roles, everything else matches dest: roles
             const expectedPrefix = backendProtocol === "ssh" ? "ssh" : "dest";
