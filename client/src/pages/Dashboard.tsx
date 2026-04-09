@@ -1083,7 +1083,7 @@ export default function Dashboard() {
   const allServices: ServiceItem[] = useMemo(() => {
     const items: ServiceItem[] = [];
     for (const endpoint of gatewayEndpoints ?? []) {
-      const backends = endpoint.backends?.length > 0 ? endpoint.backends : [{ name: "Default", accessible: true }];
+      const backends = endpoint.backends?.length > 0 ? endpoint.backends : [];
       for (const backend of backends) {
         if (backend.protocol === "ssh") {
           items.push({ kind: "ssh", endpoint, backend });
