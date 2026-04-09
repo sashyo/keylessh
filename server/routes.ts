@@ -77,6 +77,10 @@ async function checkTcpReachable(host: string, port: number, timeoutMs = 2500): 
 async function checkServerHealth(server: ServerType): Promise<ServerStatus> {
   // If server uses an external bridge, we can't check from the server side
   // The browser would need to test through the bridge
+  if (server.bridgeId?.startsWith("gateway:")) {
+    // Server routes through a gateway — can't verify from server
+    return "unknown";
+  }
   if (server.bridgeId) {
     const bridge = await bridgeStorage.getBridge(server.bridgeId);
     if (bridge?.enabled) {
@@ -486,9 +490,14 @@ export async function registerRoutes(
         recordingEnabled = recordedUsers.length === 0 || recordedUsers.includes(sshUser);
       }
 
-      // Determine bridge URL: server-specific bridge > default bridge > env BRIDGE_URL > null (embedded)
+      // Determine bridge URL: gateway > server-specific bridge > default bridge > env BRIDGE_URL > null (embedded)
       let bridgeUrl: string | null = null;
-      if (server.bridgeId) {
+      if (server.bridgeId?.startsWith("gateway:")) {
+        // Route through a local Punchd gateway
+        // bridgeId format: "gateway:<url>" e.g. "gateway:http://192.168.1.5:7891"
+        const gwUrl = server.bridgeId.slice("gateway:".length).replace(/\/$/, "").replace(/^http/, "ws");
+        bridgeUrl = `${gwUrl}/ws/tcp`;
+      } else if (server.bridgeId) {
         const bridge = await bridgeStorage.getBridge(server.bridgeId);
         if (bridge?.enabled) {
           bridgeUrl = bridge.url;

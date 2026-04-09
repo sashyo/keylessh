@@ -38,7 +38,7 @@ import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 import { Plus, Pencil, Trash2, Server, Search, AlertCircle, Video, Loader2, CheckCircle, XCircle, Wifi, KeyRound, Copy, Check } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import type { Server as ServerType, ServerStatus, Bridge } from "@shared/schema";
-import { api, testBridgeConnection, getBridgeWebSocketUrl, type GatewayEndpoint } from "@/lib/api";
+import { api, testBridgeConnection, getBridgeWebSocketUrl, type GatewayConfigSummary } from "@/lib/api";
 import { base64UrlToBytes, formatOpenSshEd25519PublicKey } from "@/lib/sshClient";
 import { useAuth, useAuthConfig } from "@/contexts/AuthContext";
 import { UpgradeBanner } from "@/components/UpgradeBanner";
@@ -131,7 +131,7 @@ function ServerForm({
   onCancel: () => void;
   isLoading: boolean;
   bridges?: Bridge[];
-  gateways?: GatewayEndpoint[];
+  gatewayConfigs?: GatewayConfigSummary[];
 }) {
   const [formData, setFormData] = useState<ServerFormData>(initialData || defaultFormData);
   const [testStatus, setTestStatus] = useState<"idle" | "testing" | "success" | "error">("idle");
@@ -255,8 +255,16 @@ function ServerForm({
       <div className="space-y-2">
         <Label htmlFor="bridgeId">Connection Method</Label>
         <Select
-          value={formData.bridgeId || "_default"}
-          onValueChange={(value) => setFormData({ ...formData, bridgeId: value === "_default" ? "" : value })}
+          value={formData.bridgeId?.startsWith("gateway:") ? "_gateway" : (formData.bridgeId || "_default")}
+          onValueChange={(value) => {
+            if (value === "_gateway") {
+              setFormData({ ...formData, bridgeId: "gateway:" });
+            } else if (value === "_default") {
+              setFormData({ ...formData, bridgeId: "" });
+            } else {
+              setFormData({ ...formData, bridgeId: value });
+            }
+          }}
         >
           <SelectTrigger data-testid="select-server-bridge">
             <SelectValue placeholder="Embedded bridge (built-in)" />
@@ -268,19 +276,18 @@ function ServerForm({
                 {bridge.name} {bridge.isDefault && "(default)"}
               </SelectItem>
             ))}
-            {gateways && gateways.length > 0 && (
-              <>
-                {gateways.filter(g => g.online).map((gw) => (
-                  <SelectItem key={`gw-${gw.id}`} value={`gateway:${gw.id}`}>
-                    {gw.displayName || gw.id} (Gateway)
-                  </SelectItem>
-                ))}
-              </>
-            )}
+            <SelectItem value="_gateway">Punchd Gateway (local)</SelectItem>
           </SelectContent>
         </Select>
+        {formData.bridgeId?.startsWith("gateway:") && (
+          <Input
+            value={formData.bridgeId.slice("gateway:".length)}
+            onChange={(e) => setFormData({ ...formData, bridgeId: `gateway:${e.target.value}` })}
+            placeholder="http://192.168.1.5:7891"
+          />
+        )}
         <p className="text-xs text-muted-foreground">
-          Route SSH through the built-in bridge, an external bridge, or a Punchd gateway
+          Route SSH through the built-in bridge or a local Punchd gateway
         </p>
       </div>
 
@@ -412,9 +419,9 @@ export default function AdminServers() {
     queryFn: api.admin.bridges.list,
   });
 
-  const { data: gatewayEndpoints } = useQuery<GatewayEndpoint[]>({
-    queryKey: ["/api/gateway-endpoints"],
-    queryFn: api.gatewayEndpoints.list,
+  const { data: gatewayConfigs } = useQuery<GatewayConfigSummary[]>({
+    queryKey: ["/api/admin/gateway-configs"],
+    queryFn: api.admin.gatewayConfigs.list,
   });
 
   // Check server status through bridge (client-side for external bridges)
@@ -665,7 +672,7 @@ export default function AdminServers() {
                   : undefined
               }
               bridges={bridges}
-              gateways={gatewayEndpoints}
+              gatewayConfigs={gatewayConfigs}
               onSubmit={handleSubmit}
               onCancel={handleCloseDialog}
               isLoading={createMutation.isPending || updateMutation.isPending}
