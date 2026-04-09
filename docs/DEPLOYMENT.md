@@ -8,19 +8,17 @@ KeyleSSH has several deployable components. This guide walks through deploying e
 |-----------|-------------|---------|-----------|
 | **Main Server** | React UI + REST API + built-in SSH bridge | Linux VM / container | Yes |
 | **TideCloak** | Authentication & authorization (OIDC) | Docker | Yes |
-| **Signal Server** | WebRTC signaling + HTTP relay + STUN/TURN | Public-facing Linux VM | For Punch'd Bridge |
-| **Punch'd Bridge** | NAT-traversing reverse proxy gateway + VPN | Private network | For RDP / web app / VPN access |
+| **Signal Server** | WebRTC signaling + HTTP relay + STUN/TURN | Public-facing Linux VM | For remote access via Punchd |
+| **Punchd Gateway** | NAT-traversing reverse proxy + QUIC VPN + SSH | Private network | For RDP / web app / SSH / VPN |
 | **Punchd VPN** | QUIC P2P VPN client with WebView2 DPoP | User device | For VPN tunnel to gateway LAN |
-| **SSH Bridge** | WebSocket-to-TCP tunnel for SSH sessions | Any server with SSH access | For standalone SSH bridging |
 | **TideSSP** | Passwordless RDP via Ed25519 SSP | Windows RDP target | For passwordless RDP |
 
 **Deployment order:**
 
 1. TideCloak (provides `tidecloak.json` used by everything else)
-2. Signal Server (provides URL + secrets used by gateways)
-3. Punch'd Bridge (connects to signal server)
-4. SSH Bridge (standalone, just needs `tidecloak.json`)
-5. TideSSP (on each Windows RDP target machine)
+2. Signal Server (provides URL + secrets used by gateways) — optional for local-only deployments
+3. Punchd Gateway (connects to signal server, or runs standalone in local/offline mode)
+4. TideSSP (on each Windows RDP target machine) — optional, for passwordless RDP
 
 ---
 
@@ -304,106 +302,97 @@ The VPN client can connect directly to a gateway without a signal server:
 
 ---
 
-## 5. SSH Bridge
+## 5. Punchd Gateway — Local/Offline Mode
 
-A standalone WebSocket-to-TCP bridge for SSH sessions. Browsers connect via WebSocket, the bridge pipes traffic to the SSH server over TCP.
+The Punchd Gateway can run without a signal server for local network access. This replaces the standalone SSH Bridge — the gateway handles SSH, HTTP, and RDP backends.
 
-### Deploy with script (Docker — recommended)
+### Minimal gateway.toml (no auth)
+
+```toml
+gateway_id = "local-gateway"
+backends = "MyServer=ssh://192.168.1.10:22;noauth,WebApp=http://localhost:3000;noauth"
+listen_port = 7891
+health_port = 7892
+https = false
+```
+
+No `tidecloak.json` needed when all backends use `;noauth`. Add it later to enable authentication.
+
+### Install (Windows MSI)
+
+1. Download `PunchdGateway.msi` from [releases](../../releases)
+2. Run the installer — installs as a Windows service
+3. Place `gateway.toml` in `C:\ProgramData\punchd-gateway\`
+4. Restart the service: `sc.exe stop PunchdGateway && sc.exe start PunchdGateway`
+
+### Install (Linux .deb)
 
 ```bash
-cd bridges/ssh-bridge-rs
-./deploy.sh
+sudo apt install ./punchd-gateway-linux-x64.deb
+sudo cp gateway.toml /etc/punchd-gateway/
+punchd-bridge-rs
 ```
 
-The script will:
-- Auto-detect `tidecloak.json` from `data/` directory
-- Build the Docker image (~15 MB)
-- Start the container on port 8088
-- Print the bridge URL and health endpoint
-
-After deployment:
-
-```
-SSH Bridge:  http://YOUR_IP:8088
-Health:      http://YOUR_IP:8088/health
-Logs:        http://YOUR_IP:8088/logs
-
-Add to main server: BRIDGE_URL=wss://YOUR_IP:8088
-```
-
-### Deploy (native binary)
+### Install (Docker)
 
 ```bash
-cd bridges/ssh-bridge-rs
-cargo build --release
-```
-
-#### First run (setup wizard)
-
-If no config exists, the bridge opens a setup UI at `http://localhost:7893`:
-- Select your `tidecloak.json` file
-- Set the listen port
-- Config is saved to `~/.keylessh/ssh-bridge.toml`
-
-#### Run with environment variables
-
-```bash
-PORT=8088 \
-TIDECLOAK_CONFIG_B64=$(base64 -w0 data/tidecloak.json) \
-./target/release/ssh-bridge-rs
-```
-
-### Deploy (Docker — manual)
-
-```bash
-cd bridges/ssh-bridge-rs
-docker build -t keylessh-bridge-rs .
-
 docker run -d --restart unless-stopped \
-  --name keylessh-bridge \
-  -p 8088:8080 \
-  -e TIDECLOAK_CONFIG_B64=$(base64 -w0 data/tidecloak.json) \
-  keylessh-bridge-rs
+  --name punchd-gateway \
+  -p 7891:7891 -p 7892:7892 -p 7893:7893/udp \
+  -v $(pwd)/gateway.toml:/etc/punchd-gateway/gateway.toml \
+  keylessh-punchd-bridge-rs
 ```
 
-### Deploy (Azure Container Apps)
+### Install (native binary)
 
 ```bash
-cd bridges/ssh-bridge-rs/azure
-./deploy.sh
+cd bridges/punchd-bridge-rs
+cargo build --release --bin punchd-bridge-rs
+./target/release/punchd-bridge-rs --console
 ```
 
-Outputs the bridge URL (`wss://...`). Set it on the main server:
+### Add to KeyleSSH UI
 
-```env
-BRIDGE_URL=wss://<bridge-fqdn>
+In the Dashboard → **Local Gateways** tab → **Add Gateway** → enter `http://YOUR_IP:7891`.
+The gateway's `/api/info` endpoint auto-discovers backends.
+
+### Backend flags
+
+| Flag | Description |
+|------|-------------|
+| `;noauth` | Skip JWT verification (backend handles its own auth) |
+| `;eddsa` | Passwordless RDP via TideSSP (requires `tidecloak.json`) |
+| `;stripauth` | Remove Authorization header before proxying |
+
+### With authentication
+
+Add `tidecloak.json` to enable JWT-based auth:
+
+```toml
+gateway_id = "office-gateway"
+backends = "WebApp=http://localhost:3000,RDP=rdp://192.168.1.100:3389;eddsa"
+listen_port = 7891
+health_port = 7892
+https = false
+tidecloak_config_b64 = "<base64 of tidecloak.json>"
 ```
 
-### Environment variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PORT` | 8081 | Listen port |
-| `TIDECLOAK_CONFIG_B64` | — | Base64-encoded `tidecloak.json` |
-| `client_adapter` | — | `tidecloak.json` as a JSON string (highest priority) |
-| `TC_CLIENT_ID` | — | Override client ID for role lookups in `resource_access` |
-
-Falls back to `data/tidecloak.json` if no env var is set.
-
-### Windows
-
-The SSH bridge runs as a system tray application on Windows. Right-click the tray icon for **Open Logs** or **Quit**.
+Or place `tidecloak.json` next to `gateway.toml`.
 
 ### Health check
 
 ```bash
-curl http://localhost:8088/health
-# {"status":"ok","tcpConnections":0}
+curl http://localhost:7892/health
+# {"status":"ok"}
+
+# View logs
+curl http://localhost:7892/logs       # browser-friendly HTML
+curl http://localhost:7892/logs/buffer # JSON array
 ```
 
 ---
 
-## 5. TideSSP (Windows — Passwordless RDP)
+## 6. TideSSP (Windows — Passwordless RDP)
 
 TideSSP is a Windows Security Support Provider that enables passwordless RDP. It verifies Ed25519 JWT signatures from TideCloak and creates Windows logon sessions without passwords.
 
@@ -520,9 +509,6 @@ PORT=3000
 NODE_ENV=production
 DATABASE_URL=./data/keylessh.db
 
-# Optional: external SSH bridge
-BRIDGE_URL=wss://<bridge-fqdn>
-
 # Optional: Stripe SaaS billing
 STRIPE_SECRET_KEY=sk_live_...
 STRIPE_WEBHOOK_SECRET=whsec_...
@@ -530,6 +516,9 @@ STRIPE_PRICE_ID_PRO=price_...
 STRIPE_PRICE_ID_ENTERPRISE=price_...
 APP_URL=https://your-domain.com
 ```
+
+The main server includes a built-in SSH bridge — no external bridge needed for basic SSH.
+For remote access (NAT traversal, RDP, VPN), deploy a Punchd Gateway.
 
 ### Reverse proxy / TLS
 
@@ -584,11 +573,10 @@ VPN Client (punchd-vpn)
 | Signal Server | 9090 | TCP | HTTP + WebSocket signaling |
 | coturn | 3478 | UDP + TCP | STUN/TURN |
 | coturn | 49152–65535 | UDP | TURN relay range |
-| Punch'd Bridge | 7891 | TCP | Proxy (HTTP/HTTPS) |
-| Punch'd Bridge | 7892 | TCP | Health check |
-| Punch'd Bridge | 7893 | UDP | QUIC VPN (P2P + STUN) |
-| SSH Bridge | 8081 | TCP | WebSocket SSH tunnel |
-| Main Server | 3000 | TCP | UI + API |
+| Punchd Gateway | 7891 | TCP | Proxy (HTTP/HTTPS) |
+| Punchd Gateway | 7892 | TCP | Health check + logs |
+| Punchd Gateway | 7893 | UDP | QUIC VPN (P2P + STUN) |
+| Main Server | 3000 | TCP | UI + API + built-in SSH bridge |
 
 ---
 
