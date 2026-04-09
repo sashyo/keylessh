@@ -22,11 +22,20 @@ fn main() {
     // Check if running as a Windows service
     #[cfg(target_os = "windows")]
     {
-        // Try to start as a Windows service first.
-        // If we're launched by SCM, this succeeds and blocks.
-        // If we're launched from a console, this fails and we fall through.
-        if let Ok(()) = gateway_service::run_as_service() {
-            return;
+        // Only try service dispatcher if not explicitly running as console.
+        // Pass --console to skip service mode, or any other args.
+        let args: Vec<String> = std::env::args().collect();
+        let is_console = args.len() > 1;
+        if !is_console {
+            // Try to start as a Windows service.
+            // If launched by SCM, this blocks. From console, it may fail or return immediately.
+            match gateway_service::run_as_service() {
+                Ok(()) => return,
+                Err(e) => {
+                    // Failed to connect to SCM — running from console
+                    eprintln!("Not running as service ({e}), starting in console mode...");
+                }
+            }
         }
     }
 
