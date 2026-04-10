@@ -855,12 +855,19 @@ pub fn build_router(state: Arc<ProxyState>) -> (Router, SharedState) {
         }
     });
 
+    use tower_http::cors::{CorsLayer, Any};
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+
     let router = Router::new()
         .route("/ws/rdcleanpath", get(handle_rdcleanpath_ws))
         .route("/ws/tcp-forward", get(handle_tcp_forward_ws))
         .route("/ws/ssh", get(handle_ssh_ws))
         .route("/api/info", get(handle_api_info))
         .fallback(any(handle_request))
+        .layer(cors)
         .with_state(shared.clone());
 
     (router, shared)
