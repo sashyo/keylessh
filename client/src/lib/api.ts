@@ -950,7 +950,18 @@ export async function testBridgeConnection(
  */
 export function getBridgeWebSocketUrl(bridgeUrl?: string | null): string {
   if (bridgeUrl) {
-    return bridgeUrl;
+    // Convert HTTP URL to WebSocket URL and add SSH path if missing
+    let url = bridgeUrl;
+    if (url.startsWith("https://")) {
+      url = "wss://" + url.slice(8);
+    } else if (url.startsWith("http://")) {
+      url = "ws://" + url.slice(7);
+    }
+    // Add /ws/ssh path for gateway bridges (if URL doesn't already have a path)
+    if (!url.includes("/ws/")) {
+      url = url.replace(/\/?$/, "/ws/ssh");
+    }
+    return url;
   }
   // Local development: use embedded /ws/tcp endpoint
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
