@@ -361,21 +361,68 @@ curl http://localhost:7892/health
 
 #### Linux .deb
 
-> **Note:** The .deb is built on Ubuntu 22.04. For older systems (Debian 11, etc.), use Docker instead.
+> **Note:** The .deb is built on Ubuntu 22.04. For older distros, build from source instead.
 
 ```bash
 sudo apt install ./punchd-gateway-linux-x64.deb
-sudo cp gateway.toml tidecloak.json /etc/punchd-gateway/
-punchd-bridge-rs --console
+sudo mkdir -p /etc/punchd-gateway
+# Copy your gateway.toml and tidecloak.json to /etc/punchd-gateway/
 ```
 
 #### Native binary (build from source)
 
+For systems where the .deb doesn't work (GLIBC mismatch):
+
 ```bash
-cd bridges/punchd-bridge-rs
+# Install build deps
+sudo apt install -y build-essential pkg-config libssl-dev cmake
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source ~/.cargo/env
+
+# Build
+git clone https://github.com/sashyo/keylessh.git --branch vpn --depth 1
+cd keylessh/bridges/punchd-bridge-rs
 cargo build --release --bin punchd-bridge-rs
-cp /path/to/gateway.toml /path/to/tidecloak.json .
-./target/release/punchd-bridge-rs --console
+sudo cp target/release/punchd-bridge-rs /usr/bin/
+```
+
+#### Linux systemd service
+
+After installing via .deb or building from source, create a systemd service:
+
+```bash
+# Place config files
+sudo mkdir -p /root/.keylessh
+sudo cp gateway.toml tidecloak.json /root/.keylessh/
+
+# Create service
+sudo tee /etc/systemd/system/punchd-gateway.service << 'EOF'
+[Unit]
+Description=Punchd Gateway
+After=network.target
+
+[Service]
+Type=simple
+Environment=HOME=/root
+WorkingDirectory=/etc/punchd-gateway
+ExecStart=/usr/bin/punchd-bridge-rs --console
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now punchd-gateway
+```
+
+Check it's running:
+
+```bash
+sudo systemctl status punchd-gateway
+curl http://localhost:7892/health
+curl http://localhost:7891/api/info
 ```
 
 ### Step 3: Add to KeyleSSH UI
