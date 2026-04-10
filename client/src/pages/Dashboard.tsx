@@ -964,7 +964,7 @@ function GatewaysTab() {
               <Label htmlFor="gw-url">Gateway URL</Label>
               <Input
                 id="gw-url"
-                placeholder="http://192.168.0.10:7891"
+                placeholder="https://192.168.0.10:7891"
                 value={addUrl}
                 onChange={(e) => setAddUrl(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && handleAdd()}
