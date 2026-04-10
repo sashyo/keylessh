@@ -304,80 +304,106 @@ The VPN client can connect directly to a gateway without a signal server:
 
 ## 5. Punchd Gateway — Local/Offline Mode
 
-The Punchd Gateway can run without a signal server for local network access. This replaces the standalone SSH Bridge — the gateway handles SSH, HTTP, and RDP backends.
+The Punchd Gateway can run without a signal server for local network access. It handles SSH, HTTP, and RDP backends. A `tidecloak.json` is always required for JWT verification.
 
-### Minimal gateway.toml (no auth)
+### Step 1: Create config files
+
+Create a directory for your config:
+
+```bash
+sudo mkdir -p /etc/punchd-gateway
+```
+
+#### gateway.toml
 
 ```toml
-gateway_id = "local-gateway"
-backends = "MyServer=ssh://192.168.1.10:22;noauth,WebApp=http://localhost:3000;noauth"
+gateway_id = "my-gateway"
+backends = "MyServer=ssh://localhost:22;noauth,WebApp=http://localhost:3000;noauth"
 listen_port = 7891
 health_port = 7892
 https = false
 ```
 
-No `tidecloak.json` needed when all backends use `;noauth`. Add it later to enable authentication.
+#### tidecloak.json
 
-### Install (Windows MSI)
+Download from TideCloak: **Clients** → your client → **Action** → **Download adapter config**. Save to `/etc/punchd-gateway/tidecloak.json`.
+
+### Step 2: Install and run
+
+#### Docker (recommended)
+
+```bash
+git clone https://github.com/sashyo/keylessh.git --branch vpn --depth 1
+cd keylessh/bridges/punchd-bridge-rs
+docker build -t punchd-gateway .
+
+docker run -d --restart unless-stopped \
+  --name punchd-gateway \
+  --network host \
+  -v /etc/punchd-gateway/gateway.toml:/app/gateway.toml \
+  -v /etc/punchd-gateway/tidecloak.json:/app/data/tidecloak.json \
+  punchd-gateway
+```
+
+Check it's running:
+
+```bash
+docker logs punchd-gateway
+curl http://localhost:7892/health
+```
+
+#### Windows MSI
 
 1. Download `PunchdGateway.msi` from [releases](../../releases)
 2. Run the installer — installs as a Windows service
-3. Place `gateway.toml` in `C:\ProgramData\punchd-gateway\`
+3. Place `gateway.toml` and `tidecloak.json` in `C:\ProgramData\punchd-gateway\`
 4. Restart the service: `sc.exe stop PunchdGateway && sc.exe start PunchdGateway`
 
-### Install (Linux .deb)
+#### Linux .deb
+
+> **Note:** The .deb is built on Ubuntu 22.04. For older systems (Debian 11, etc.), use Docker instead.
 
 ```bash
 sudo apt install ./punchd-gateway-linux-x64.deb
-sudo cp gateway.toml /etc/punchd-gateway/
-punchd-bridge-rs
+sudo cp gateway.toml tidecloak.json /etc/punchd-gateway/
+punchd-bridge-rs --console
 ```
 
-### Install (Docker)
-
-```bash
-docker run -d --restart unless-stopped \
-  --name punchd-gateway \
-  -p 7891:7891 -p 7892:7892 -p 7893:7893/udp \
-  -v $(pwd)/gateway.toml:/etc/punchd-gateway/gateway.toml \
-  keylessh-punchd-bridge-rs
-```
-
-### Install (native binary)
+#### Native binary (build from source)
 
 ```bash
 cd bridges/punchd-bridge-rs
 cargo build --release --bin punchd-bridge-rs
+cp /path/to/gateway.toml /path/to/tidecloak.json .
 ./target/release/punchd-bridge-rs --console
 ```
 
-### Add to KeyleSSH UI
+### Step 3: Add to KeyleSSH UI
 
-In the Dashboard → **Local Gateways** tab → **Add Gateway** → enter `http://YOUR_IP:7891`.
+In the Dashboard → **Local Gateways** tab → **Add Gateway** → enter `http://YOUR_GATEWAY_IP:7891`.
 The gateway's `/api/info` endpoint auto-discovers backends.
 
 ### Backend flags
 
 | Flag | Description |
 |------|-------------|
-| `;noauth` | Skip JWT verification (backend handles its own auth) |
-| `;eddsa` | Passwordless RDP via TideSSP (requires `tidecloak.json`) |
+| `;noauth` | Skip JWT verification for this backend |
+| `;eddsa` | Passwordless RDP via TideSSP |
 | `;stripauth` | Remove Authorization header before proxying |
 
-### With authentication
+### With signal server (remote access)
 
-Add `tidecloak.json` to enable JWT-based auth:
+Add signal server config to `gateway.toml` for remote access via NAT traversal:
 
 ```toml
 gateway_id = "office-gateway"
+stun_server_url = "wss://your-signal-server:9090"
+api_secret = "your-api-secret"
 backends = "WebApp=http://localhost:3000,RDP=rdp://192.168.1.100:3389;eddsa"
 listen_port = 7891
 health_port = 7892
 https = false
-tidecloak_config_b64 = "<base64 of tidecloak.json>"
 ```
-
-Or place `tidecloak.json` next to `gateway.toml`.
 
 ### Health check
 
