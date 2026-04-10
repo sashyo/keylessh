@@ -430,6 +430,8 @@ curl http://localhost:7891/api/info
 In the Dashboard → **Local Gateways** tab → **Add Gateway** → enter `http://YOUR_GATEWAY_IP:7891`.
 The gateway's `/api/info` endpoint auto-discovers backends.
 
+> **Important:** For local/offline gateways, set `https = false` in `gateway.toml` and access KeyleSSH via `http://localhost:3000` (not HTTPS). Browsers block cross-origin requests to self-signed HTTPS gateways — even after accepting the cert manually. Self-signed certs only work for direct page navigation, not for background fetch/WebSocket calls from an HTTPS page.
+
 ### Backend flags
 
 | Flag | Description |

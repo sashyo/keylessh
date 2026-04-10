@@ -765,8 +765,9 @@ const LOCAL_GW_STORAGE_KEY = "keylessh.localGateways.v1";
 interface LocalGateway {
   id: string;
   name: string;
-  url: string;  // e.g. https://192.168.0.10:7891
+  url: string;  // e.g. http://192.168.0.10:7891
   online?: boolean;
+  certError?: boolean;
   backends?: { name: string; protocol?: string; sshUsernames?: string[]; rdpUsernames?: string[] }[];
   lastChecked?: number;
 }
@@ -782,7 +783,7 @@ function saveLocalGateways(gateways: LocalGateway[]) {
   localStorage.setItem(LOCAL_GW_STORAGE_KEY, JSON.stringify(gateways));
 }
 
-async function probeGateway(url: string): Promise<{ online: boolean; backends: LocalGateway["backends"]; id?: string; name?: string }> {
+async function probeGateway(url: string): Promise<{ online: boolean; backends: LocalGateway["backends"]; id?: string; name?: string; certError?: boolean }> {
   try {
     const base = url.replace(/\/$/, "");
     const resp = await fetch(`${base}/api/info`, { signal: AbortSignal.timeout(5000) });
@@ -791,7 +792,9 @@ async function probeGateway(url: string): Promise<{ online: boolean; backends: L
     const backends = info.backends || [];
     return { online: true, backends, id: info.gatewayId, name: info.displayName };
   } catch {
-    return { online: false, backends: [] };
+    // If HTTPS URL fails, likely a self-signed cert issue
+    const certError = url.startsWith("https://");
+    return { online: false, backends: [], certError };
   }
 }
 
@@ -812,7 +815,7 @@ function GatewaysTab() {
     gateways.forEach((gw) => {
       probeGateway(gw.url).then((result) => {
         setGateways((prev) => prev.map((g) =>
-          g.id === gw.id ? { ...g, online: result.online, backends: result.backends, lastChecked: Date.now() } : g
+          g.id === gw.id ? { ...g, online: result.online, certError: result.certError, backends: result.backends, lastChecked: Date.now() } : g
         ));
       });
     });
@@ -917,7 +920,19 @@ function GatewaysTab() {
               </div>
             </CardHeader>
             <CardContent className="space-y-2">
-              {!gw.online && (
+              {!gw.online && gw.certError && (
+                <div className="space-y-1">
+                  <Badge variant="destructive" className="text-xs">Certificate Error</Badge>
+                  <p className="text-xs text-muted-foreground">
+                    Self-signed certificate not accepted.{" "}
+                    <a href={gw.url} target="_blank" rel="noopener" className="text-[hsl(var(--neon-cyan))] underline">
+                      Accept certificate
+                    </a>
+                    {" "}then refresh, or use <code className="bg-muted px-1 rounded">https = false</code> in gateway.toml.
+                  </p>
+                </div>
+              )}
+              {!gw.online && !gw.certError && (
                 <Badge variant="secondary" className="text-xs">Offline</Badge>
               )}
               {gw.online && gw.backends && gw.backends.length > 0 && (
@@ -949,7 +964,7 @@ function GatewaysTab() {
               <Label htmlFor="gw-url">Gateway URL</Label>
               <Input
                 id="gw-url"
-                placeholder="https://192.168.0.10:7891"
+                placeholder="http://192.168.0.10:7891"
                 value={addUrl}
                 onChange={(e) => setAddUrl(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && handleAdd()}
