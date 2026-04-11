@@ -15,7 +15,7 @@ import type {
 } from "@shared/schema";
 
 import { IAMService } from "@tidecloak/js";
-import { appFetch } from "./appFetch";
+import { appFetch, isDpopEnabled } from "./appFetch";
 import * as tc from "./tidecloakAdmin";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
@@ -68,6 +68,47 @@ export interface ForsetiCompileResult {
 export interface CommittedPolicyResult {
   roleId: string;
   policyData: string; // Base64 encoded policy bytes
+}
+
+/**
+ * Sign a delegation request using the DPoP key.
+ * Retries until the DPoP provider is available (async init).
+ */
+async function signDelegation(claims: Record<string, unknown>, timeoutMs = 15000): Promise<string> {
+  const start = Date.now();
+  while (true) {
+    try {
+      return await IAMService.signDelegationRequest(claims);
+    } catch (err: any) {
+      if (!err.message?.includes('DPoP is not initialized') && !err.message?.includes('not a function')) {
+        throw err;
+      }
+      if (Date.now() - start > timeoutMs) {
+        throw new Error('DPoP provider initialization timed out');
+      }
+      await new Promise(r => setTimeout(r, 500));
+    }
+  }
+}
+
+async function delegatedAction<T>(
+  action: string,
+  options: { scope?: string; audience?: string } = {}
+): Promise<T> {
+  // Step 1: Pack the delegation request
+  const packed = await apiRequest<{ payload: any }>("/api/delegation/pack", {
+    method: "POST",
+    body: JSON.stringify({ scope: options.scope, audience: options.audience }),
+  });
+
+  // Step 2: Browser signs with DPoP key
+  const signedDelegationRequest = await signDelegation(packed.payload);
+
+  // Step 3: Complete the exchange
+  return apiRequest<T>("/api/delegation/complete", {
+    method: "POST",
+    body: JSON.stringify({ action, signedDelegationRequest }),
+  });
 }
 
 export const api = {
@@ -227,14 +268,8 @@ export const api = {
       },
     },
     roles: {
-      list: async () => {
-        const roles = await tc.getClientRoles();
-        return { roles: roles as unknown as AdminRole[] };
-      },
-      listAll: async () => {
-        const roles = await tc.getAllRoles();
-        return { roles: roles as unknown as AdminRole[] };
-      },
+      list: () => delegatedAction<{ roles: AdminRole[] }>("list-roles"),
+      listAll: () => delegatedAction<{ roles: AdminRole[] }>("list-roles-all"),
       create: async (data: { name: string; description?: string; policy?: SshPolicyConfig }) => {
         await tc.createRole({ name: data.name, description: data.description });
         return { success: "Role created" };

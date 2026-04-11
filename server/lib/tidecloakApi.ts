@@ -7,6 +7,7 @@ import {
 } from "./auth/keycloakTypes";
 import { Roles } from "@shared/config/roles";
 import { getAuthOverrideUrl, getRealm, getResource } from "./auth/tidecloakConfig";
+import { TideDelegation } from "@tidecloak/server";
 
 // Lazy-evaluated getters to avoid calling config functions at module load time
 const getKeycloakAuthServer = () => getAuthOverrideUrl();
@@ -904,6 +905,59 @@ export const GetRawChangeSetRequest = async (
   // Returns array of all sign requests (may include user + policy requests)
   return json as RawChangeSetResponse[];
 };
+
+// ============================================
+// Delegation Token Flow
+// ============================================
+
+// Lazy TideDelegation instance
+let _delegation: TideDelegation | null = null;
+function getDelegation(): TideDelegation {
+  if (!_delegation) {
+    _delegation = new TideDelegation({
+      tidecloakUrl: getAuthOverrideUrl(),
+      realm: getRealm(),
+    });
+  }
+  return _delegation;
+}
+
+// Pack a delegation request for the browser to sign
+export function packDelegationRequest(scope?: string, audience?: string) {
+  return getDelegation().packRequest({ scope, audience });
+}
+
+// Exchange for a delegation token (browser provides the signed delegation request)
+export async function exchangeForDelegationToken(
+  subjectToken: string,
+  signedDelegationRequest: string
+) {
+  return getDelegation().exchange({
+    subjectToken,
+    delegationRequest: signedDelegationRequest,
+  });
+}
+
+// Make a fetch with delegation token + server DPoP proof
+export async function tcFetchWithDelegation(
+  url: string,
+  method: string,
+  delegationToken: string
+): Promise<any> {
+  const proof = getDelegation().generateDpopProof(method, url);
+  const response = await fetch(url, {
+    method,
+    headers: {
+      accept: "application/json",
+      Authorization: `DPoP ${delegationToken}`,
+      DPoP: proof,
+    },
+  });
+  if (!response.ok) {
+    throw new Error(`Delegation fetch failed: ${response.status} ${await response.text()}`);
+  }
+  return response.json();
+}
 
 export const AddApprovalWithSignedRequest = async (
   changeSet: ChangeSetRequest,

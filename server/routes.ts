@@ -133,6 +133,10 @@ import {
   GetRawChangeSetRequest,
   AddApprovalWithSignedRequest,
   GetClientEvents,
+  packDelegationRequest,
+  exchangeForDelegationToken,
+  tcFetchWithDelegation,
+  getClientByClientId,
 } from "./lib/tidecloakApi";
 import type { ChangeSetRequest, AccessApproval } from "./lib/auth/keycloakTypes";
 import { getAllowedSshUsersFromToken } from "./lib/auth/sshUsers";
@@ -4158,6 +4162,84 @@ export async function registerRoutes(
       }
     }
   );
+
+  // ============================================
+  // Delegation Token Exchange Routes
+  // ============================================
+
+  // POST /api/delegation/pack
+  app.post("/api/delegation/pack", authenticate, requireAdmin, async (req, res) => {
+    try {
+      const { scope, audience } = req.body;
+      const packed = packDelegationRequest(scope, audience);
+      res.json(packed);
+    } catch (error) {
+      log(`Delegation pack failed: ${error}`);
+      res.status(500).json({ error: "Failed to pack delegation request" });
+    }
+  });
+
+  // POST /api/delegation/complete
+  app.post("/api/delegation/complete", authenticate, requireAdmin, async (req, res) => {
+    try {
+      const { action, signedDelegationRequest } = req.body;
+      const subjectToken = (req as AuthenticatedRequest).accessToken!;
+
+      if (!action || !signedDelegationRequest) {
+        res.status(400).json({ error: "action and signedDelegationRequest are required" });
+        return;
+      }
+
+      const delegationResult = await exchangeForDelegationToken(subjectToken, signedDelegationRequest);
+      const delegationToken = delegationResult.access_token;
+
+      const tcBaseUrl = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+
+      switch (action) {
+        case "list-roles": {
+          const client = await getClientByClientId(getResource(), delegationToken);
+          if (!client?.id) {
+            res.status(500).json({ error: "Could not resolve client UUID" });
+            return;
+          }
+          const roles = await tcFetchWithDelegation(
+            `${tcBaseUrl}/clients/${client.id}/roles`, "GET", delegationToken
+          );
+          res.json({ roles });
+          break;
+        }
+        case "list-roles-all": {
+          const client = await getClientByClientId(getResource(), delegationToken);
+          if (!client?.id) {
+            res.status(500).json({ error: "Could not resolve client UUID" });
+            return;
+          }
+          const clientRoles = await tcFetchWithDelegation(
+            `${tcBaseUrl}/clients/${client.id}/roles`, "GET", delegationToken
+          );
+          try {
+            const realmMgmt = await getClientByClientId("realm-management", delegationToken);
+            if (realmMgmt?.id) {
+              const adminRoles = await tcFetchWithDelegation(
+                `${tcBaseUrl}/clients/${realmMgmt.id}/roles?search=tide-realm-admin`, "GET", delegationToken
+              );
+              if (Array.isArray(adminRoles) && adminRoles.length > 0) {
+                res.json({ roles: [...clientRoles, adminRoles[0]] });
+                return;
+              }
+            }
+          } catch { /* admin role fetch failed */ }
+          res.json({ roles: clientRoles });
+          break;
+        }
+        default:
+          res.status(400).json({ error: `Unknown delegation action: ${action}` });
+      }
+    } catch (error) {
+      log(`Delegation exchange failed: ${error}`);
+      res.status(500).json({ error: "Delegation exchange failed" });
+    }
+  });
 
   return httpServer;
 }
