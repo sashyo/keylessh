@@ -25,6 +25,9 @@ export default defineConfig({
       "node-rsa": path.resolve(import.meta.dirname, "client", "src", "lib", "node-rsa-stub.ts"),
     },
   },
+  optimizeDeps: {
+    exclude: ["heimdall-tide", "@tidecloak/js", "@tidecloak/react"],
+  },
   root: path.resolve(import.meta.dirname, "client"),
   build: {
     outDir: path.resolve(import.meta.dirname, "dist/public"),

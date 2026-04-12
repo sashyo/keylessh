@@ -95,20 +95,47 @@ async function delegatedAction<T>(
   action: string,
   options: { scope?: string; audience?: string } = {}
 ): Promise<T> {
-  // Step 1: Pack the delegation request
-  const packed = await apiRequest<{ payload: any }>("/api/delegation/pack", {
+  // Step 1: Pack the delegation request (server includes cnf.jkt = SERVER_JKT)
+  const packed = await apiRequest<{ payload: any; serverJkt: string }>("/api/delegation/pack", {
     method: "POST",
     body: JSON.stringify({ scope: options.scope, audience: options.audience }),
   });
 
-  // Step 2: Browser signs with DPoP key
+  // Step 2: Browser signs delegation request with DPoP key
   const signedDelegationRequest = await signDelegation(packed.payload);
 
-  // Step 3: Complete the exchange
-  return apiRequest<T>("/api/delegation/complete", {
+  // Step 3: Browser signs DPoP approval with Tide Session Key
+  // This tells the ORK network to accept the server's DPoP key for token signing
+  // Wait for RequestEnclave to be ready (it initializes async after login)
+  console.log("[delegation] Step 2 done, waiting for RequestEnclave + signing DPoP approval...");
+  let dpopApproval: string;
+  {
+    const start = Date.now();
+    while (true) {
+      try {
+        dpopApproval = await IAMService.signDpopApproval(packed.serverJkt);
+        break;
+      } catch (err: any) {
+        if (err.message?.includes('not initialized') || err.message?.includes('not a function')) {
+          if (Date.now() - start > 15000) {
+            throw new Error('RequestEnclave initialization timed out for DPoP approval');
+          }
+          await new Promise(r => setTimeout(r, 500));
+          continue;
+        }
+        throw err;
+      }
+    }
+  }
+  console.log("[delegation] Step 3 done, dpopApproval received. Calling complete...");
+
+  // Step 4: Complete the exchange with both signatures
+  const result = await apiRequest<T>("/api/delegation/complete", {
     method: "POST",
-    body: JSON.stringify({ action, signedDelegationRequest }),
+    body: JSON.stringify({ action, signedDelegationRequest, dpopApproval }),
   });
+  console.log("[delegation] Step 4 done, got result:", result);
+  return result;
 }
 
 export const api = {

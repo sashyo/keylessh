@@ -917,6 +917,7 @@ function getDelegation(): TideDelegation {
     _delegation = new TideDelegation({
       tidecloakUrl: getAuthOverrideUrl(),
       realm: getRealm(),
+      clientId: getResource(),
     });
   }
   return _delegation;
@@ -927,14 +928,16 @@ export function packDelegationRequest(scope?: string, audience?: string) {
   return getDelegation().packRequest({ scope, audience });
 }
 
-// Exchange for a delegation token (browser provides the signed delegation request)
+// Exchange for a delegation token (browser provides the signed delegation request + DPoP approval)
 export async function exchangeForDelegationToken(
   subjectToken: string,
-  signedDelegationRequest: string
+  signedDelegationRequest: string,
+  dpopApproval: string
 ) {
   return getDelegation().exchange({
     subjectToken,
     delegationRequest: signedDelegationRequest,
+    dpopApproval,
   });
 }
 
@@ -944,7 +947,25 @@ export async function tcFetchWithDelegation(
   method: string,
   delegationToken: string
 ): Promise<any> {
-  const proof = getDelegation().generateDpopProof(method, url);
+  const proof = getDelegation().generateDpopProof(method, url, delegationToken);
+  // Log DPoP proof details for debugging
+  try {
+    const proofPayload = JSON.parse(Buffer.from(proof.split('.')[1], 'base64url').toString());
+    const proofHeader = JSON.parse(Buffer.from(proof.split('.')[0], 'base64url').toString());
+    // Compute JWK thumbprint of the DPoP proof key
+    const { createHash } = require('crypto');
+    const jwk = proofHeader.jwk;
+    const canonical = JSON.stringify({ crv: jwk.crv, kty: jwk.kty, x: jwk.x });
+    const proofJkt = createHash('sha256').update(canonical).digest('base64url');
+    // Also decode token cnf.jkt to compare
+    const tokenPayload = JSON.parse(Buffer.from(delegationToken.split('.')[1], 'base64url').toString());
+    const tokenJkt = tokenPayload.cnf?.jkt;
+    console.log(`[tcFetchWithDelegation] url=${url} method=${method}`);
+    console.log(`[tcFetchWithDelegation] DPoP proof JKT=${proofJkt}`);
+    console.log(`[tcFetchWithDelegation] Token cnf.jkt=${tokenJkt}`);
+    console.log(`[tcFetchWithDelegation] JKT MATCH: ${proofJkt === tokenJkt}`);
+    console.log(`[tcFetchWithDelegation] htm=${proofPayload.htm} htu=${proofPayload.htu}`);
+  } catch {}
   const response = await fetch(url, {
     method,
     headers: {
@@ -954,7 +975,11 @@ export async function tcFetchWithDelegation(
     },
   });
   if (!response.ok) {
-    throw new Error(`Delegation fetch failed: ${response.status} ${await response.text()}`);
+    const body = await response.text();
+    const wwwAuth = response.headers.get('WWW-Authenticate') || '';
+    console.error(`[tcFetchWithDelegation] FAILED ${response.status}: ${body}`);
+    console.error(`[tcFetchWithDelegation] WWW-Authenticate: ${wwwAuth}`);
+    throw new Error(`Delegation fetch failed: ${response.status} ${body}`);
   }
   return response.json();
 }
