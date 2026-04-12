@@ -2013,15 +2013,25 @@ export async function registerRoutes(
   // Admin Role Routes
   // ============================================
 
-  // GET /api/admin/roles - List client roles
+  // GET /api/admin/roles - List client roles (via delegation)
   app.get(
     "/api/admin/roles",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
-        const roles = await tidecloakAdmin.getClientRoles(token);
+        const tcBaseUrl = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        const clients = await (req as any).delegation.fetch(
+          `${tcBaseUrl}/clients?clientId=${getResource()}`
+        );
+        if (!Array.isArray(clients) || clients.length === 0) {
+          res.status(500).json({ error: "Could not resolve client UUID" });
+          return;
+        }
+        const roles = await (req as any).delegation.fetch(
+          `${tcBaseUrl}/clients/${clients[0].id}/roles`
+        );
         res.json({ roles });
       } catch (error) {
         log(`Failed to fetch roles: ${error}`);
@@ -2177,16 +2187,40 @@ export async function registerRoutes(
     }
   );
 
-  // GET /api/admin/roles/all - List all roles including admin role
+  // GET /api/admin/roles/all - List all roles including admin role (via delegation)
   app.get(
     "/api/admin/roles/all",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
-        const roles = await tidecloakAdmin.getAllRoles(token);
-        res.json({ roles });
+        const tcBaseUrl = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        const clients = await (req as any).delegation.fetch(
+          `${tcBaseUrl}/clients?clientId=${getResource()}`
+        );
+        if (!Array.isArray(clients) || clients.length === 0) {
+          res.status(500).json({ error: "Could not resolve client UUID" });
+          return;
+        }
+        const clientRoles = await (req as any).delegation.fetch(
+          `${tcBaseUrl}/clients/${clients[0].id}/roles`
+        );
+        let allRoles = [...(Array.isArray(clientRoles) ? clientRoles : [])];
+        try {
+          const realmMgmt = await (req as any).delegation.fetch(
+            `${tcBaseUrl}/clients?clientId=realm-management`
+          );
+          if (Array.isArray(realmMgmt) && realmMgmt.length > 0) {
+            const adminRoles = await (req as any).delegation.fetch(
+              `${tcBaseUrl}/clients/${realmMgmt[0].id}/roles?search=tide-realm-admin`
+            );
+            if (Array.isArray(adminRoles) && adminRoles.length > 0) {
+              allRoles.push(adminRoles[0]);
+            }
+          }
+        } catch { /* admin role fetch failed */ }
+        res.json({ roles: allRoles });
       } catch (error) {
         log(`Failed to fetch all roles: ${error}`);
         res.status(500).json({ error: "Internal Server Error" });
@@ -4165,70 +4199,8 @@ export async function registerRoutes(
   // Delegation Token Exchange (forgetful interrupt pattern)
   // ============================================
 
-  const delegation = getDelegation();
-
   // POST /api/delegation — handles delegation signatures from browser
-  app.post("/api/delegation", authenticate, delegation.handleDelegation());
-
-  // GET /api/admin/roles — returns client roles (requires delegation)
-  app.get("/api/admin/roles", authenticate, requireAdmin, delegation.requireDelegation(),
-    async (req: AuthenticatedRequest, res) => {
-      try {
-        const tcBaseUrl = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
-        const clients = await (req as any).delegation.fetch(
-          `${tcBaseUrl}/clients?clientId=${getResource()}`
-        );
-        if (!Array.isArray(clients) || clients.length === 0) {
-          res.status(500).json({ error: "Could not resolve client UUID" });
-          return;
-        }
-        const roles = await (req as any).delegation.fetch(
-          `${tcBaseUrl}/clients/${clients[0].id}/roles`
-        );
-        res.json({ roles });
-      } catch (error) {
-        log(`Admin roles fetch failed: ${error}`);
-        res.status(500).json({ error: "Failed to fetch roles" });
-      }
-    }
-  );
-
-  // GET /api/admin/roles/all — returns all roles including admin (requires delegation)
-  app.get("/api/admin/roles/all", authenticate, requireAdmin, delegation.requireDelegation(),
-    async (req: AuthenticatedRequest, res) => {
-      try {
-        const tcBaseUrl = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
-        const clients = await (req as any).delegation.fetch(
-          `${tcBaseUrl}/clients?clientId=${getResource()}`
-        );
-        if (!Array.isArray(clients) || clients.length === 0) {
-          res.status(500).json({ error: "Could not resolve client UUID" });
-          return;
-        }
-        const clientRoles = await (req as any).delegation.fetch(
-          `${tcBaseUrl}/clients/${clients[0].id}/roles`
-        );
-        let allRoles = [...(Array.isArray(clientRoles) ? clientRoles : [])];
-        try {
-          const realmMgmt = await (req as any).delegation.fetch(
-            `${tcBaseUrl}/clients?clientId=realm-management`
-          );
-          if (Array.isArray(realmMgmt) && realmMgmt.length > 0) {
-            const adminRoles = await (req as any).delegation.fetch(
-              `${tcBaseUrl}/clients/${realmMgmt[0].id}/roles?search=tide-realm-admin`
-            );
-            if (Array.isArray(adminRoles) && adminRoles.length > 0) {
-              allRoles.push(adminRoles[0]);
-            }
-          }
-        } catch { /* admin role fetch failed */ }
-        res.json({ roles: allRoles });
-      } catch (error) {
-        log(`Admin roles/all fetch failed: ${error}`);
-        res.status(500).json({ error: "Failed to fetch roles" });
-      }
-    }
-  );
+  app.post("/api/delegation", authenticate, getDelegation().handleDelegation());
 
   return httpServer;
 }
