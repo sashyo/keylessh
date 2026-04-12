@@ -120,7 +120,6 @@ import {
   requireAdmin,
   requireAdminOrConfigDownload,
   requirePolicyCreator,
-  tidecloakAdmin,
   type AuthenticatedRequest,
 } from "./auth";
 import {
@@ -1774,15 +1773,115 @@ export async function registerRoutes(
   // Admin User Routes
   // ============================================
 
-  // GET /api/admin/users - List all users with roles
+  // GET /api/admin/users - List all users with roles (via delegation)
   app.get(
     "/api/admin/users",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
-        const users = await tidecloakAdmin.getUsers(token);
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        // Fetch all users
+        const allUsers = await (req as any).delegation.fetch(`${tcBase}/users?briefRepresentation=false`);
+
+        // Build userId → role names map using role-centric fetching
+        const userRolesMap = new Map<string, string[]>();
+
+        // Get app client UUID
+        const clients = await (req as any).delegation.fetch(`${tcBase}/clients?clientId=${getResource()}`);
+        if (Array.isArray(clients) && clients.length > 0) {
+          const appClientId = clients[0].id;
+          // Fetch role list for the app client
+          const roles = await (req as any).delegation.fetch(`${tcBase}/clients/${appClientId}/roles`);
+          if (Array.isArray(roles)) {
+            // For each role, fetch its users (skip VPN firewall roles)
+            await Promise.all(
+              roles
+                .filter((role: any) => {
+                  const name = role.name || "";
+                  return !(name.includes(":allow:") || name.includes(":deny:"));
+                })
+                .map(async (role: any) => {
+                  try {
+                    const roleUsers = await (req as any).delegation.fetch(
+                      `${tcBase}/clients/${appClientId}/roles/${encodeURIComponent(role.name)}/users`
+                    );
+                    if (Array.isArray(roleUsers)) {
+                      for (const u of roleUsers) {
+                        const existing = userRolesMap.get(u.id) || [];
+                        existing.push(role.name);
+                        userRolesMap.set(u.id, existing);
+                      }
+                    }
+                  } catch { /* skip failed role lookup */ }
+                })
+            );
+
+            // For VPN firewall roles, get assignments via user role-mappings instead
+            const fwRoles = roles.filter((r: any) => {
+              const name = r.name || "";
+              return name.includes(":allow:") || name.includes(":deny:");
+            });
+            if (fwRoles.length > 0) {
+              const briefUsers = await (req as any).delegation.fetch(`${tcBase}/users?briefRepresentation=true`);
+              if (Array.isArray(briefUsers)) {
+                await Promise.all(
+                  briefUsers.map(async (user: any) => {
+                    try {
+                      const mappedRoles = await (req as any).delegation.fetch(
+                        `${tcBase}/users/${user.id}/role-mappings/clients/${appClientId}`
+                      );
+                      if (Array.isArray(mappedRoles)) {
+                        for (const mr of mappedRoles) {
+                          if (fwRoles.some((fw: any) => fw.id === mr.id)) {
+                            const existing = userRolesMap.get(user.id) || [];
+                            existing.push(mr.name);
+                            userRolesMap.set(user.id, existing);
+                          }
+                        }
+                      }
+                    } catch { /* skip */ }
+                  })
+                );
+              }
+            }
+          }
+        }
+
+        // Also check admin role members
+        try {
+          const rmClients = await (req as any).delegation.fetch(`${tcBase}/clients?clientId=realm-management`);
+          if (Array.isArray(rmClients) && rmClients.length > 0) {
+            const rmClientId = rmClients[0].id;
+            const adminUsers = await (req as any).delegation.fetch(
+              `${tcBase}/clients/${rmClientId}/roles/${encodeURIComponent("tide-realm-admin")}/users`
+            );
+            if (Array.isArray(adminUsers)) {
+              for (const u of adminUsers) {
+                const existing = userRolesMap.get(u.id) || [];
+                existing.push("tide-realm-admin");
+                userRolesMap.set(u.id, existing);
+              }
+            }
+          }
+        } catch { /* admin role fetch failed */ }
+
+        const users = (allUsers || []).map((u: any) => {
+          const userClientRoles = userRolesMap.get(u.id) || [];
+          const isAdmin = userClientRoles.includes("tide-realm-admin");
+          return {
+            id: u.id ?? "",
+            firstName: u.firstName ?? "",
+            lastName: u.lastName ?? "",
+            email: u.email ?? "",
+            username: u.username,
+            role: userClientRoles,
+            linked: !!u.attributes?.vuid?.[0],
+            enabled: u.enabled !== false,
+            isAdmin,
+          };
+        });
         res.json(users);
       } catch (error) {
         log(`Failed to fetch users: ${error}`);
@@ -1791,14 +1890,14 @@ export async function registerRoutes(
     }
   );
 
-  // POST /api/admin/users - Update user roles
+  // POST /api/admin/users - Update user roles (via delegation)
   app.post(
     "/api/admin/users",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
         const { id, rolesToAdd, rolesToRemove } = req.body;
 
         if (!id) {
@@ -1806,12 +1905,50 @@ export async function registerRoutes(
           return;
         }
 
-        await tidecloakAdmin.updateUserRoles(
-          token,
-          id,
-          rolesToAdd || [],
-          rolesToRemove || []
-        );
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        const ADMIN_ROLE = "tide-realm-admin";
+
+        for (const roleName of (rolesToAdd || [])) {
+          const isAdmin = roleName === ADMIN_ROLE;
+          const targetClientId = isAdmin ? "realm-management" : getResource();
+          const clients = await (req as any).delegation.fetch(`${tcBase}/clients?clientId=${targetClientId}`);
+          if (!Array.isArray(clients) || clients.length === 0) throw new Error(`Client '${targetClientId}' not found`);
+          const clientUuid = clients[0].id;
+
+          let role: any;
+          if (isAdmin) {
+            const adminRoles = await (req as any).delegation.fetch(`${tcBase}/clients/${clientUuid}/roles?search=${ADMIN_ROLE}`);
+            role = adminRoles[0];
+          } else {
+            role = await (req as any).delegation.fetch(`${tcBase}/clients/${clientUuid}/roles/${encodeURIComponent(roleName)}`);
+          }
+
+          await (req as any).delegation.fetch(`${tcBase}/users/${id}/role-mappings/clients/${clientUuid}`, {
+            method: 'POST',
+            body: [role],
+          });
+        }
+
+        for (const roleName of (rolesToRemove || [])) {
+          const isAdmin = roleName === ADMIN_ROLE;
+          const targetClientId = isAdmin ? "realm-management" : getResource();
+          const clients = await (req as any).delegation.fetch(`${tcBase}/clients?clientId=${targetClientId}`);
+          if (!Array.isArray(clients) || clients.length === 0) throw new Error(`Client '${targetClientId}' not found`);
+          const clientUuid = clients[0].id;
+
+          let role: any;
+          if (isAdmin) {
+            const adminRoles = await (req as any).delegation.fetch(`${tcBase}/clients/${clientUuid}/roles?search=${ADMIN_ROLE}`);
+            role = adminRoles[0];
+          } else {
+            role = await (req as any).delegation.fetch(`${tcBase}/clients/${clientUuid}/roles/${encodeURIComponent(roleName)}`);
+          }
+
+          await (req as any).delegation.fetch(`${tcBase}/users/${id}/role-mappings/clients/${clientUuid}`, {
+            method: 'DELETE',
+            body: [{ id: role.id, name: role.name }],
+          });
+        }
 
         res.json({ message: "User roles updated successfully" });
       } catch (error) {
@@ -1821,14 +1958,14 @@ export async function registerRoutes(
     }
   );
 
-  // PUT /api/admin/users - Update user profile
+  // PUT /api/admin/users - Update user profile (via delegation)
   app.put(
     "/api/admin/users",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
         const { id, firstName, lastName, email } = req.body;
 
         if (!id) {
@@ -1836,7 +1973,14 @@ export async function registerRoutes(
           return;
         }
 
-        await tidecloakAdmin.updateUser(token, id, { firstName, lastName, email });
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        // Fetch current user to preserve other fields
+        const user = await (req as any).delegation.fetch(`${tcBase}/users/${id}`);
+        const updatedUser = { ...user, firstName, lastName, email };
+        await (req as any).delegation.fetch(`${tcBase}/users/${id}`, {
+          method: 'PUT',
+          body: updatedUser,
+        });
 
         res.json({ message: "User profile updated successfully" });
       } catch (error) {
@@ -1846,14 +1990,14 @@ export async function registerRoutes(
     }
   );
 
-  // DELETE /api/admin/users - Delete user
+  // DELETE /api/admin/users - Delete user (via delegation)
   app.delete(
     "/api/admin/users",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
         const userId = req.query.userId as string;
 
         if (!userId) {
@@ -1861,12 +2005,12 @@ export async function registerRoutes(
           return;
         }
 
-        await tidecloakAdmin.deleteUser(token, userId);
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        await (req as any).delegation.fetch(`${tcBase}/users/${userId}`, { method: 'DELETE' });
 
         // Update the over-limit status after deleting user
-        // Count ALL enabled users (including admins) for the limit check
-        const users = await tidecloakAdmin.getUsers(token);
-        const enabledCount = users.filter(u => u.enabled).length;
+        const allUsers = await (req as any).delegation.fetch(`${tcBase}/users?briefRepresentation=false`);
+        const enabledCount = (allUsers || []).filter((u: any) => u.enabled).length;
         const subscription = await subscriptionStorage.getSubscription();
         const tier = (subscription?.tier as SubscriptionTier) || 'free';
         const tierConfig = subscriptionTiers[tier];
@@ -1885,14 +2029,14 @@ export async function registerRoutes(
     }
   );
 
-  // PUT /api/admin/users/:id/enabled - Enable or disable a user
+  // PUT /api/admin/users/:id/enabled - Enable or disable a user (via delegation)
   app.put(
     "/api/admin/users/:id/enabled",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
         const userId = req.params.id;
         const { enabled } = req.body;
 
@@ -1901,12 +2045,18 @@ export async function registerRoutes(
           return;
         }
 
-        await tidecloakAdmin.setUserEnabled(token, userId, enabled);
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        // Fetch current user to preserve other fields
+        const user = await (req as any).delegation.fetch(`${tcBase}/users/${userId}`);
+        const updatedUser = { ...user, enabled };
+        await (req as any).delegation.fetch(`${tcBase}/users/${userId}`, {
+          method: 'PUT',
+          body: updatedUser,
+        });
 
         // Update the over-limit status after changing user enabled state
-        // Count ALL enabled users (including admins) for the limit check
-        const users = await tidecloakAdmin.getUsers(token);
-        const enabledCount = users.filter(u => u.enabled).length;
+        const allUsers = await (req as any).delegation.fetch(`${tcBase}/users?briefRepresentation=false`);
+        const enabledCount = (allUsers || []).filter((u: any) => u.enabled).length;
         const subscription = await subscriptionStorage.getSubscription();
         const tier = (subscription?.tier as SubscriptionTier) || 'free';
         const tierConfig = subscriptionTiers[tier];
@@ -1925,14 +2075,14 @@ export async function registerRoutes(
     }
   );
 
-  // POST /api/admin/users/add - Create new user
+  // POST /api/admin/users/add - Create new user (via delegation)
   app.post(
     "/api/admin/users/add",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
         const { username, firstName, lastName, email } = req.body;
 
         if (!username || !firstName || !lastName || !email) {
@@ -1940,9 +2090,11 @@ export async function registerRoutes(
           return;
         }
 
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+
         // Check user limit before creating
-        const users = await tidecloakAdmin.getUsers(token);
-        const limitCheck = await subscriptionStorage.checkCanAdd('user', users.length);
+        const currentUsers = await (req as any).delegation.fetch(`${tcBase}/users?briefRepresentation=false`);
+        const limitCheck = await subscriptionStorage.checkCanAdd('user', (currentUsers || []).length);
         if (!limitCheck.allowed) {
           res.status(403).json({
             error: 'User limit reached',
@@ -1955,12 +2107,14 @@ export async function registerRoutes(
           return;
         }
 
-        await tidecloakAdmin.addUser(token, { username, firstName, lastName, email });
+        await (req as any).delegation.fetch(`${tcBase}/users`, {
+          method: 'POST',
+          body: { username, firstName, lastName, email, enabled: true },
+        });
 
         // Update the over-limit status after adding user
-        // Count ALL enabled users (including admins) for the limit check
-        const updatedUsers = await tidecloakAdmin.getUsers(token);
-        const enabledCount = updatedUsers.filter(u => u.enabled).length;
+        const updatedUsers = await (req as any).delegation.fetch(`${tcBase}/users?briefRepresentation=false`);
+        const enabledCount = (updatedUsers || []).filter((u: any) => u.enabled).length;
         const subscription = await subscriptionStorage.getSubscription();
         const tier = (subscription?.tier as SubscriptionTier) || 'free';
         const tierConfig = subscriptionTiers[tier];
@@ -1979,14 +2133,14 @@ export async function registerRoutes(
     }
   );
 
-  // GET /api/admin/users/tide - Get Tide account linking URL
+  // GET /api/admin/users/tide - Get Tide account linking URL (via delegation)
   app.get(
     "/api/admin/users/tide",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
         const userId = req.query.userId as string;
         const redirectUri = req.query.redirect_uri as string;
 
@@ -1995,10 +2149,14 @@ export async function registerRoutes(
           return;
         }
 
-        const linkUrl = await tidecloakAdmin.getTideLinkUrl(
-          token,
-          userId,
-          redirectUri || `${req.protocol}://${req.get("host")}/`
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        const redirect = redirectUri || `${req.protocol}://${req.get("host")}/`;
+        const linkUrl = await (req as any).delegation.fetch(
+          `${tcBase}/tideAdminResources/get-required-action-link?userId=${userId}&lifespan=43200&redirect_uri=${redirect}&client_id=${getResource()}`,
+          {
+            method: 'POST',
+            body: ["link-tide-account-action"],
+          }
         );
 
         res.json({ linkUrl });
@@ -2040,14 +2198,14 @@ export async function registerRoutes(
     }
   );
 
-  // POST /api/admin/roles - Create new role
+  // POST /api/admin/roles - Create new role (via delegation)
   app.post(
     "/api/admin/roles",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
         const { name, description, policy } = req.body;
 
         if (!name) {
@@ -2055,8 +2213,18 @@ export async function registerRoutes(
           return;
         }
 
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        // Get app client UUID
+        const clients = await (req as any).delegation.fetch(`${tcBase}/clients?clientId=${getResource()}`);
+        if (!Array.isArray(clients) || clients.length === 0) {
+          res.status(500).json({ error: "Could not resolve client UUID" });
+          return;
+        }
         // Create the role in TideCloak
-        await tidecloakAdmin.createRole(token, { name, description });
+        await (req as any).delegation.fetch(`${tcBase}/clients/${clients[0].id}/roles`, {
+          method: 'POST',
+          body: { name, description },
+        });
 
         // If policy config is provided and enabled, store the SSH policy
         if (policy && policy.enabled) {
@@ -2071,7 +2239,6 @@ export async function registerRoutes(
             log(`Created SSH policy for role: ${name}`);
           } catch (policyError) {
             log(`Warning: Role created but failed to save policy: ${policyError}`);
-            // Continue - role was created successfully
           }
         }
 
@@ -2083,14 +2250,14 @@ export async function registerRoutes(
     }
   );
 
-  // PUT /api/admin/roles - Update role
+  // PUT /api/admin/roles - Update role (via delegation)
   app.put(
     "/api/admin/roles",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
         const { name, description } = req.body;
 
         if (!name) {
@@ -2098,7 +2265,17 @@ export async function registerRoutes(
           return;
         }
 
-        await tidecloakAdmin.updateRole(token, { name, description });
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        // Get app client UUID
+        const clients = await (req as any).delegation.fetch(`${tcBase}/clients?clientId=${getResource()}`);
+        if (!Array.isArray(clients) || clients.length === 0) {
+          res.status(500).json({ error: "Could not resolve client UUID" });
+          return;
+        }
+        await (req as any).delegation.fetch(`${tcBase}/clients/${clients[0].id}/roles/${encodeURIComponent(name)}`, {
+          method: 'PUT',
+          body: { name, description },
+        });
 
         res.json({ success: "Role has been updated!" });
       } catch (error) {
@@ -2108,14 +2285,14 @@ export async function registerRoutes(
     }
   );
 
-  // DELETE /api/admin/roles - Delete role
+  // DELETE /api/admin/roles - Delete role (via delegation)
   app.delete(
     "/api/admin/roles",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
         const roleName = req.query.roleName as string;
 
         if (!roleName) {
@@ -2123,11 +2300,32 @@ export async function registerRoutes(
           return;
         }
 
-        // Delete the role in TideCloak
-        const result = await tidecloakAdmin.deleteRole(token, roleName);
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        // Get app client UUID
+        const clients = await (req as any).delegation.fetch(`${tcBase}/clients?clientId=${getResource()}`);
+        if (!Array.isArray(clients) || clients.length === 0) {
+          res.status(500).json({ error: "Could not resolve client UUID" });
+          return;
+        }
+        const clientUuid = clients[0].id;
 
-        // Also delete any associated SSH policy (only if role was actually deleted, not queued for approval)
-        if (!result.approvalCreated) {
+        // Delete the role in TideCloak
+        await (req as any).delegation.fetch(`${tcBase}/clients/${clientUuid}/roles/${encodeURIComponent(roleName)}`, {
+          method: 'DELETE',
+        });
+
+        // Check if role still exists (approval created instead of immediate delete)
+        let approvalCreated = false;
+        try {
+          await (req as any).delegation.fetch(`${tcBase}/clients/${clientUuid}/roles/${encodeURIComponent(roleName)}`);
+          // Role still exists — approval was created
+          approvalCreated = true;
+        } catch {
+          // Role doesn't exist — it was deleted immediately
+        }
+
+        // Delete associated SSH policy (only if role was actually deleted)
+        if (!approvalCreated) {
           try {
             await policyStorage.deletePolicy(roleName);
           } catch (policyError) {
@@ -2135,8 +2333,7 @@ export async function registerRoutes(
           }
         }
 
-        // Return appropriate message based on whether an approval was created
-        if (result.approvalCreated) {
+        if (approvalCreated) {
           res.json({ success: "Approval request created", approvalCreated: true });
         } else {
           res.json({ success: "Role has been deleted!", approvalCreated: false });
