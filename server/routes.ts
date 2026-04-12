@@ -123,17 +123,7 @@ import {
   type AuthenticatedRequest,
 } from "./auth";
 import {
-  GetUserChangeRequests,
-  GetRoleChangeRequests,
-  AddApprovalToChangeRequest,
-  AddRejectionToChangeRequest,
-  CommitChangeRequest,
-  CancelChangeRequest,
-  GetRawChangeSetRequest,
-  AddApprovalWithSignedRequest,
-  GetClientEvents,
   getDelegation,
-  getClientByClientId,
 } from "./lib/tidecloakApi";
 import type { ChangeSetRequest, AccessApproval } from "./lib/auth/keycloakTypes";
 import { getAllowedSshUsersFromToken } from "./lib/auth/sshUsers";
@@ -3132,12 +3122,21 @@ export async function registerRoutes(
     "/api/admin/access-approvals",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
-        const data = await GetUserChangeRequests(token);
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        const json = await (req as any).delegation.fetch(`${tcBase}/tide-admin/change-set/users/requests`);
+        const data = json.map((d: any) => ({
+          data: d,
+          retrievalInfo: {
+            changeSetId: d.draftRecordId,
+            changeSetType: d.changeSetType,
+            actionType: d.actionType,
+          },
+        }));
 
-        const approvals: AccessApproval[] = data.map((item) => {
+        const approvals: AccessApproval[] = data.map((item: any) => {
           // Extract the first user record for display
           const firstUserRecord =
             item.data.userRecord && item.data.userRecord.length > 0
@@ -3174,9 +3173,9 @@ export async function registerRoutes(
     "/api/admin/access-approvals/raw",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
         const { changeSet } = req.body as { changeSet: ChangeSetRequest };
 
         log(`Getting raw change set request for: ${JSON.stringify(changeSet)}`);
@@ -3191,7 +3190,11 @@ export async function registerRoutes(
           return;
         }
 
-        const rawRequests = await GetRawChangeSetRequest(changeSet, token);
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        const rawRequests = await (req as any).delegation.fetch(`${tcBase}/tide-admin/change-set/sign/batch`, {
+          method: 'POST',
+          body: { changeSets: [changeSet] },
+        });
         // Return all sign requests (may include user + policy requests)
         res.json({ rawRequests });
       } catch (error) {
@@ -3207,9 +3210,9 @@ export async function registerRoutes(
     "/api/admin/access-approvals/approve",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
         const { changeSet, signedRequest } = req.body as {
           changeSet: ChangeSetRequest;
           signedRequest?: string;
@@ -3220,12 +3223,18 @@ export async function registerRoutes(
           return;
         }
 
-        // If signedRequest is provided, use the new approval with signature
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        const formData = new URLSearchParams();
+        formData.append("changeSetId", changeSet.changeSetId);
+        formData.append("actionType", changeSet.actionType);
+        formData.append("changeSetType", changeSet.changeSetType);
         if (signedRequest) {
-          await AddApprovalWithSignedRequest(changeSet, signedRequest, token);
-        } else {
-          await AddApprovalToChangeRequest(changeSet, token);
+          formData.append("requests", signedRequest);
         }
+        await (req as any).delegation.fetch(`${tcBase}/tideAdminResources/add-review`, {
+          method: 'POST',
+          formData,
+        });
         res.json({ message: "Access request approved" });
       } catch (error) {
         log(`Failed to approve access request: ${error}`);
@@ -3239,9 +3248,9 @@ export async function registerRoutes(
     "/api/admin/access-approvals/approve-with-id",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
         const { changeSetId, actionType, changeSetType, signedRequest } = req.body as {
           changeSetId: string;
           actionType: string;
@@ -3254,14 +3263,16 @@ export async function registerRoutes(
           return;
         }
 
-        // Build changeSet object from explicit IDs
-        const changeSet: ChangeSetRequest = {
-          changeSetId,
-          actionType,
-          changeSetType,
-        };
-
-        await AddApprovalWithSignedRequest(changeSet, signedRequest, token);
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        const formData = new URLSearchParams();
+        formData.append("changeSetId", changeSetId);
+        formData.append("actionType", actionType);
+        formData.append("changeSetType", changeSetType);
+        formData.append("requests", signedRequest);
+        await (req as any).delegation.fetch(`${tcBase}/tideAdminResources/add-review`, {
+          method: 'POST',
+          formData,
+        });
         res.json({ message: "Access request approved" });
       } catch (error) {
         log(`Failed to approve access request with id: ${error}`);
@@ -3275,9 +3286,9 @@ export async function registerRoutes(
     "/api/admin/access-approvals/reject",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
         const { changeSet } = req.body as { changeSet: ChangeSetRequest };
 
         if (!changeSet || !changeSet.changeSetId) {
@@ -3285,7 +3296,15 @@ export async function registerRoutes(
           return;
         }
 
-        await AddRejectionToChangeRequest(changeSet, token);
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        const formData = new URLSearchParams();
+        formData.append("actionType", changeSet.actionType);
+        formData.append("changeSetId", changeSet.changeSetId);
+        formData.append("changeSetType", changeSet.changeSetType);
+        await (req as any).delegation.fetch(`${tcBase}/tideAdminResources/add-rejection`, {
+          method: 'POST',
+          formData,
+        });
         res.json({ message: "Access request rejected" });
       } catch (error) {
         log(`Failed to reject access request: ${error}`);
@@ -3299,9 +3318,9 @@ export async function registerRoutes(
     "/api/admin/access-approvals/commit",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
         const { changeSet } = req.body as { changeSet: ChangeSetRequest };
 
         log(`Committing change set: ${JSON.stringify(changeSet)}`);
@@ -3311,7 +3330,11 @@ export async function registerRoutes(
           return;
         }
 
-        await CommitChangeRequest(changeSet, token);
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        await (req as any).delegation.fetch(`${tcBase}/tide-admin/change-set/commit`, {
+          method: 'POST',
+          body: changeSet,
+        });
         res.json({ message: "Access request committed" });
       } catch (error) {
         const errorMsg = error instanceof Error ? error.message : String(error);
@@ -3326,9 +3349,9 @@ export async function registerRoutes(
     "/api/admin/access-approvals/cancel",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
         const { changeSet } = req.body as { changeSet: ChangeSetRequest };
 
         log(`Cancelling change set: ${JSON.stringify(changeSet)}`);
@@ -3338,7 +3361,11 @@ export async function registerRoutes(
           return;
         }
 
-        await CancelChangeRequest(changeSet, token);
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        await (req as any).delegation.fetch(`${tcBase}/tide-admin/change-set/cancel`, {
+          method: 'POST',
+          body: changeSet,
+        });
         res.json({ message: "Access request cancelled" });
       } catch (error) {
         const errorMsg = error instanceof Error ? error.message : String(error);
@@ -3357,13 +3384,22 @@ export async function registerRoutes(
     "/api/admin/role-approvals",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
-        const requests = await GetRoleChangeRequests(token);
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        const json = await (req as any).delegation.fetch(`${tcBase}/tide-admin/change-set/roles/requests`);
+        const requests = json.map((d: any) => ({
+          data: d,
+          retrievalInfo: {
+            changeSetId: d.draftRecordId,
+            changeSetType: d.changeSetType,
+            actionType: d.actionType,
+          },
+        }));
 
         // Transform to match frontend expectations
-        const approvals: AccessApproval[] = requests.map((req) => ({
+        const approvals: AccessApproval[] = requests.map((req: any) => ({
           id: req.retrievalInfo.changeSetId,
           requestType: req.data.actionType || req.data.action,
           status: req.data.status,
@@ -3389,9 +3425,9 @@ export async function registerRoutes(
     "/api/admin/role-approvals/raw",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
         const { changeSet } = req.body as { changeSet: ChangeSetRequest };
 
         if (!changeSet || !changeSet.changeSetId) {
@@ -3399,7 +3435,11 @@ export async function registerRoutes(
           return;
         }
 
-        const rawRequests = await GetRawChangeSetRequest(changeSet, token);
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        const rawRequests = await (req as any).delegation.fetch(`${tcBase}/tide-admin/change-set/sign/batch`, {
+          method: 'POST',
+          body: { changeSets: [changeSet] },
+        });
         res.json({ rawRequests });
       } catch (error) {
         log(`Failed to get raw role change request: ${error}`);
@@ -3413,9 +3453,9 @@ export async function registerRoutes(
     "/api/admin/role-approvals/approve",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
         const { changeSet, signedRequest } = req.body as {
           changeSet: ChangeSetRequest;
           signedRequest?: string;
@@ -3426,11 +3466,18 @@ export async function registerRoutes(
           return;
         }
 
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        const formData = new URLSearchParams();
+        formData.append("changeSetId", changeSet.changeSetId);
+        formData.append("actionType", changeSet.actionType);
+        formData.append("changeSetType", changeSet.changeSetType);
         if (signedRequest) {
-          await AddApprovalWithSignedRequest(changeSet, signedRequest, token);
-        } else {
-          await AddApprovalToChangeRequest(changeSet, token);
+          formData.append("requests", signedRequest);
         }
+        await (req as any).delegation.fetch(`${tcBase}/tideAdminResources/add-review`, {
+          method: 'POST',
+          formData,
+        });
         res.json({ message: "Role change request approved" });
       } catch (error) {
         log(`Failed to approve role change request: ${error}`);
@@ -3444,9 +3491,9 @@ export async function registerRoutes(
     "/api/admin/role-approvals/approve-with-id",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
         const { changeSetId, actionType, changeSetType, signedRequest } = req.body as {
           changeSetId: string;
           actionType: string;
@@ -3459,13 +3506,16 @@ export async function registerRoutes(
           return;
         }
 
-        const changeSet: ChangeSetRequest = {
-          changeSetId,
-          actionType,
-          changeSetType,
-        };
-
-        await AddApprovalWithSignedRequest(changeSet, signedRequest, token);
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        const formData = new URLSearchParams();
+        formData.append("changeSetId", changeSetId);
+        formData.append("actionType", actionType);
+        formData.append("changeSetType", changeSetType);
+        formData.append("requests", signedRequest);
+        await (req as any).delegation.fetch(`${tcBase}/tideAdminResources/add-review`, {
+          method: 'POST',
+          formData,
+        });
         res.json({ message: "Role change request approved" });
       } catch (error) {
         log(`Failed to approve role change request with id: ${error}`);
@@ -3479,9 +3529,9 @@ export async function registerRoutes(
     "/api/admin/role-approvals/reject",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
         const { changeSet } = req.body as { changeSet: ChangeSetRequest };
 
         if (!changeSet || !changeSet.changeSetId) {
@@ -3489,7 +3539,15 @@ export async function registerRoutes(
           return;
         }
 
-        await AddRejectionToChangeRequest(changeSet, token);
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        const formData = new URLSearchParams();
+        formData.append("actionType", changeSet.actionType);
+        formData.append("changeSetId", changeSet.changeSetId);
+        formData.append("changeSetType", changeSet.changeSetType);
+        await (req as any).delegation.fetch(`${tcBase}/tideAdminResources/add-rejection`, {
+          method: 'POST',
+          formData,
+        });
         res.json({ message: "Role change request rejected" });
       } catch (error) {
         log(`Failed to reject role change request: ${error}`);
@@ -3503,9 +3561,9 @@ export async function registerRoutes(
     "/api/admin/role-approvals/commit",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
         const { changeSet } = req.body as { changeSet: ChangeSetRequest };
 
         log(`Committing role change set: ${JSON.stringify(changeSet)}`);
@@ -3515,7 +3573,11 @@ export async function registerRoutes(
           return;
         }
 
-        await CommitChangeRequest(changeSet, token);
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        await (req as any).delegation.fetch(`${tcBase}/tide-admin/change-set/commit`, {
+          method: 'POST',
+          body: changeSet,
+        });
         res.json({ message: "Role change request committed" });
       } catch (error) {
         const errorMsg = error instanceof Error ? error.message : String(error);
@@ -3530,9 +3592,9 @@ export async function registerRoutes(
     "/api/admin/role-approvals/cancel",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
         const { changeSet } = req.body as { changeSet: ChangeSetRequest };
 
         log(`Cancelling role change set: ${JSON.stringify(changeSet)}`);
@@ -3542,7 +3604,11 @@ export async function registerRoutes(
           return;
         }
 
-        await CancelChangeRequest(changeSet, token);
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        await (req as any).delegation.fetch(`${tcBase}/tide-admin/change-set/cancel`, {
+          method: 'POST',
+          body: changeSet,
+        });
         res.json({ message: "Role change request cancelled" });
       } catch (error) {
         const errorMsg = error instanceof Error ? error.message : String(error);
@@ -3557,12 +3623,19 @@ export async function registerRoutes(
     "/api/admin/logs/access",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
         const limit = parseInt(req.query.limit as string) || 100;
         const offset = parseInt(req.query.offset as string) || 0;
-        const token = req.accessToken!;
-        const events = await GetClientEvents(token, offset, limit);
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        const clientId = getResource();
+        const params = new URLSearchParams({
+          first: String(offset),
+          max: String(limit),
+          client: clientId,
+        });
+        const events = await (req as any).delegation.fetch(`${tcBase}/events?${params.toString()}`);
         res.json(events);
       } catch (error) {
         log(`Failed to fetch access logs: ${error}`);
