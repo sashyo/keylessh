@@ -14,7 +14,7 @@ import type {
   InsertSignalServer,
 } from "@shared/schema";
 
-import { IAMService } from "@tidecloak/js";
+import { IAMService, createTideFetch } from "@tidecloak/js";
 import { appFetch, isDpopEnabled } from "./appFetch";
 import * as tc from "./tidecloakAdmin";
 
@@ -25,12 +25,16 @@ function toAbsoluteUrl(path: string): string {
   return `${window.location.origin}${path}`;
 }
 
+// Delegation-aware fetch: handles 419 challenges transparently
+const tideFetch = createTideFetch(
+  (url: string | URL | Request, init?: RequestInit) => appFetch(url as string, init),
+  { delegationEndpoint: `${API_BASE}/api/delegation` }
+);
+
 async function apiRequest<T>(
   endpoint: string,
   options: RequestInit = {}
 ): Promise<T> {
-  // Use the managed token so secureFetch recognises it and attaches DPoP.
-  // localStorage may hold a stale token after a refresh, causing a mismatch.
   const token = await IAMService.getToken();
 
   const headers: HeadersInit = {
@@ -39,7 +43,7 @@ async function apiRequest<T>(
     ...options.headers,
   };
 
-  const response = await appFetch(toAbsoluteUrl(`${API_BASE}${endpoint}`), {
+  const response = await tideFetch(toAbsoluteUrl(`${API_BASE}${endpoint}`), {
     ...options,
     headers,
   });
@@ -49,7 +53,6 @@ async function apiRequest<T>(
     throw new Error(error.message || `HTTP ${response.status}`);
   }
 
-  // Handle 204 No Content (common for DELETE)
   if (response.status === 204) {
     return undefined as T;
   }
@@ -68,74 +71,6 @@ export interface ForsetiCompileResult {
 export interface CommittedPolicyResult {
   roleId: string;
   policyData: string; // Base64 encoded policy bytes
-}
-
-/**
- * Sign a delegation request using the DPoP key.
- * Retries until the DPoP provider is available (async init).
- */
-async function signDelegation(claims: Record<string, unknown>, timeoutMs = 15000): Promise<string> {
-  const start = Date.now();
-  while (true) {
-    try {
-      return await IAMService.signDelegationRequest(claims);
-    } catch (err: any) {
-      if (!err.message?.includes('DPoP is not initialized') && !err.message?.includes('not a function')) {
-        throw err;
-      }
-      if (Date.now() - start > timeoutMs) {
-        throw new Error('DPoP provider initialization timed out');
-      }
-      await new Promise(r => setTimeout(r, 500));
-    }
-  }
-}
-
-async function delegatedAction<T>(
-  action: string,
-  options: { scope?: string; audience?: string } = {}
-): Promise<T> {
-  // Step 1: Pack the delegation request (server includes cnf.jkt = SERVER_JKT)
-  const packed = await apiRequest<{ payload: any; serverJkt: string }>("/api/delegation/pack", {
-    method: "POST",
-    body: JSON.stringify({ scope: options.scope, audience: options.audience }),
-  });
-
-  // Step 2: Browser signs delegation request with DPoP key
-  const signedDelegationRequest = await signDelegation(packed.payload);
-
-  // Step 3: Browser signs DPoP approval with Tide Session Key
-  // This tells the ORK network to accept the server's DPoP key for token signing
-  // Wait for RequestEnclave to be ready (it initializes async after login)
-  console.log("[delegation] Step 2 done, waiting for RequestEnclave + signing DPoP approval...");
-  let dpopApproval: string;
-  {
-    const start = Date.now();
-    while (true) {
-      try {
-        dpopApproval = await IAMService.signDpopApproval(packed.serverJkt);
-        break;
-      } catch (err: any) {
-        if (err.message?.includes('not initialized') || err.message?.includes('not a function')) {
-          if (Date.now() - start > 15000) {
-            throw new Error('RequestEnclave initialization timed out for DPoP approval');
-          }
-          await new Promise(r => setTimeout(r, 500));
-          continue;
-        }
-        throw err;
-      }
-    }
-  }
-  console.log("[delegation] Step 3 done, dpopApproval received. Calling complete...");
-
-  // Step 4: Complete the exchange with both signatures
-  const result = await apiRequest<T>("/api/delegation/complete", {
-    method: "POST",
-    body: JSON.stringify({ action, signedDelegationRequest, dpopApproval }),
-  });
-  console.log("[delegation] Step 4 done, got result:", result);
-  return result;
 }
 
 export const api = {
@@ -295,8 +230,8 @@ export const api = {
       },
     },
     roles: {
-      list: () => delegatedAction<{ roles: AdminRole[] }>("list-roles"),
-      listAll: () => delegatedAction<{ roles: AdminRole[] }>("list-roles-all"),
+      list: () => apiRequest<{ roles: AdminRole[] }>("/api/admin/roles"),
+      listAll: () => apiRequest<{ roles: AdminRole[] }>("/api/admin/roles/all"),
       create: async (data: { name: string; description?: string; policy?: SshPolicyConfig }) => {
         await tc.createRole({ name: data.name, description: data.description });
         return { success: "Role created" };

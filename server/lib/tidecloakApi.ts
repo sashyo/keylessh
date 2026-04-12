@@ -912,7 +912,7 @@ export const GetRawChangeSetRequest = async (
 
 // Lazy TideDelegation instance
 let _delegation: TideDelegation | null = null;
-function getDelegation(): TideDelegation {
+export function getDelegation(): TideDelegation {
   if (!_delegation) {
     _delegation = new TideDelegation({
       tidecloakUrl: getAuthOverrideUrl(),
