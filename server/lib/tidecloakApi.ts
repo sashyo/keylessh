@@ -7,7 +7,6 @@ import {
 } from "./auth/keycloakTypes";
 import { Roles } from "@shared/config/roles";
 import path from "path";
-import { readFileSync } from "fs";
 import { getAuthOverrideUrl, getRealm, getResource } from "./auth/tidecloakConfig";
 import { TideDelegation } from "@tidecloak/server";
 
@@ -912,33 +911,25 @@ export const GetRawChangeSetRequest = async (
 // Delegation Token Flow
 // ============================================
 
-// Lazy TideDelegation instance (mTLS mode)
+// Lazy TideDelegation instance (vault-backed mTLS)
 let _delegation: TideDelegation | null = null;
 export function getDelegation(): TideDelegation {
   if (!_delegation) {
-    const keyPath = path.join(process.cwd(), "data", "server.key");
-    let privateKey: string | undefined;
-    try {
-      privateKey = readFileSync(keyPath, "utf-8");
-    } catch {
-      // Key not generated yet
-    }
-    console.log(`[delegation] privateKey loaded: ${!!privateKey}, length: ${privateKey?.length || 0}`);
     _delegation = new TideDelegation({
       tidecloakUrl: getAuthOverrideUrl(),
       realm: getRealm(),
       clientId: getResource(),
       adapterJsonPath: path.join(process.cwd(), "data", "tidecloak.json"),
-      privateKey,
     });
-    console.log(`[delegation] mTLS enabled: ${_delegation.isMtlsEnabled()}`);
   }
   return _delegation;
 }
 
-// Request a server identity certificate on startup if not already present
+// Initialize vault-backed key management on startup
 export async function initServerIdentity() {
-  await getDelegation().requestServerCert();
+  const delegation = getDelegation();
+  await delegation.init();
+  console.log(`[delegation] mTLS enabled: ${delegation.isMtlsEnabled()}`);
 }
 
 export const AddApprovalWithSignedRequest = async (
