@@ -6,6 +6,7 @@ import { createServer } from "http";
 import { log } from "./logger";
 import { setupWSBridge } from "./wsBridge";
 import { storage } from "./storage";
+import { initServerIdentity } from "./lib/tidecloakApi";
 
 const app = express();
 const httpServer = createServer(app);
@@ -70,6 +71,9 @@ app.use((req, res, next) => {
 
 (async () => {
   await registerRoutes(httpServer, app);
+
+  // Request server identity certificate for mTLS delegation (no-op if cert already exists)
+  void initServerIdentity();
 
   // Setup embedded WebSocket bridge for local development (when BRIDGE_URL not set)
   if (!process.env.BRIDGE_URL) {

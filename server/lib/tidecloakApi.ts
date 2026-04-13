@@ -925,6 +925,11 @@ export function getDelegation(): TideDelegation {
   return _delegation;
 }
 
+// Request a server identity certificate on startup if not already present
+export async function initServerIdentity() {
+  await getDelegation().requestServerCert();
+}
+
 export const AddApprovalWithSignedRequest = async (
   changeSet: ChangeSetRequest,
   signedRequest: string,
