@@ -238,65 +238,41 @@ echo "✅ Admin user & role done."
 # ============================================
 # Server Identity Certificate (mTLS SPIFFE SVID)
 # ============================================
-echo "🔐 Requesting server identity certificate..."
+# The server generates its own key (via TPM/DB/memory) on first startup
+# and submits a cert request to /tide-server-identity/request.
+# This section approves any pending SERVER_CERT change requests.
+echo "🔐 Approving pending server certificate requests..."
+TOKEN="$(get_admin_token)"
 
-# Generate Ed25519 keypair for the server
-SERVER_KEY_DIR="${SCRIPT_DIR}/../data"
-mkdir -p "$SERVER_KEY_DIR"
-SERVER_INSTANCE_ID=$(cat /proc/sys/kernel/random/uuid)
+CERT_REQUESTS=$(curl -s -X GET "${TIDECLOAK_LOCAL_URL}/admin/realms/${REALM_NAME}/tide-admin/server-cert/requests" \
+    -H "Authorization: Bearer $TOKEN" 2>/dev/null || echo "[]")
 
-openssl genpkey -algorithm ed25519 -out "${SERVER_KEY_DIR}/server.key" 2>/dev/null
-SERVER_PUB_B64URL=$(openssl pkey -in "${SERVER_KEY_DIR}/server.key" -pubout -outform DER 2>/dev/null | tail -c 32 | base64 | tr '+/' '-_' | tr -d '=')
+CERT_COUNT=$(echo "$CERT_REQUESTS" | jq '[.[] | select(.status == "DRAFT")] | length' 2>/dev/null || echo "0")
 
-echo "  Instance ID: $SERVER_INSTANCE_ID"
-echo "  Public key: $SERVER_PUB_B64URL"
+if [ "$CERT_COUNT" != "0" ] && [ -n "$CERT_COUNT" ]; then
+    echo "  Found $CERT_COUNT pending cert request(s)"
+    echo "$CERT_REQUESTS" | jq -c '.[] | select(.status == "DRAFT")' | while read -r cert; do
+        CERT_ID=$(echo "$cert" | jq -r '.changeRequestId')
+        CERT_CLIENT=$(echo "$cert" | jq -r '.clientId')
+        CERT_INSTANCE=$(echo "$cert" | jq -r '.instanceId')
+        echo "  Approving cert for client=$CERT_CLIENT instance=$CERT_INSTANCE"
 
-# Submit cert request (public endpoint, no auth needed)
-CERT_RESPONSE=$(curl -s -X POST "${TIDECLOAK_LOCAL_URL}/realms/${REALM_NAME}/tide-server-identity/request" \
-    -H "Content-Type: application/json" \
-    -d "{\"clientId\":\"${CLIENT_NAME}\",\"publicKey\":\"${SERVER_PUB_B64URL}\",\"instanceId\":\"${SERVER_INSTANCE_ID}\",\"requestedLifetime\":86400}")
+        CERT_PAYLOAD=$(jq -n --arg id "$CERT_ID" \
+            '{changeSetId:$id,changeSetType:"SERVER_CERT",actionType:"CREATE"}')
 
-CERT_CHANGESET_ID=$(echo "$CERT_RESPONSE" | jq -r '.changeSetId // empty')
+        curl -s -X POST "${TIDECLOAK_LOCAL_URL}/admin/realms/${REALM_NAME}/tide-admin/change-set/sign" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$CERT_PAYLOAD" > /dev/null 2>&1
 
-if [ -z "$CERT_CHANGESET_ID" ]; then
-    log_warn "Server cert request failed: $CERT_RESPONSE"
-    log_warn "Continuing without mTLS - delegation will use DPoP fallback"
-else
-    echo "  Change-set ID: $CERT_CHANGESET_ID"
-
-    # Sign and commit the server cert change request
-    TOKEN="$(get_admin_token)"
-    CERT_PAYLOAD=$(jq -n --arg id "$CERT_CHANGESET_ID" \
-        '{changeSetId:$id,changeSetType:"SERVER_CERT",actionType:"CREATE"}')
-
-    curl -s -X POST "${TIDECLOAK_LOCAL_URL}/admin/realms/${REALM_NAME}/tide-admin/change-set/sign" \
-        -H "Authorization: Bearer $TOKEN" \
-        -H "Content-Type: application/json" \
-        -d "$CERT_PAYLOAD" > /dev/null 2>&1
-
-    curl -s -X POST "${TIDECLOAK_LOCAL_URL}/admin/realms/${REALM_NAME}/tide-admin/change-set/commit" \
-        -H "Authorization: Bearer $TOKEN" \
-        -H "Content-Type: application/json" \
-        -d "$CERT_PAYLOAD" > /dev/null 2>&1
-
-    # Poll for cert to be ready
-    echo "  Waiting for cert to be signed..."
-    for i in $(seq 1 30); do
-        CERT_STATUS=$(curl -s "${TIDECLOAK_LOCAL_URL}/realms/${REALM_NAME}/tide-server-identity/status?changeSetId=${CERT_CHANGESET_ID}")
-        STATUS=$(echo "$CERT_STATUS" | jq -r '.status // empty')
-        if [ "$STATUS" = "ACTIVE" ]; then
-            echo "✅ Server certificate issued"
-            # Save instance ID for the server to use
-            echo "$SERVER_INSTANCE_ID" > "${SERVER_KEY_DIR}/server-instance-id"
-            break
-        fi
-        sleep 1
+        curl -s -X POST "${TIDECLOAK_LOCAL_URL}/admin/realms/${REALM_NAME}/tide-admin/change-set/commit" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$CERT_PAYLOAD" > /dev/null 2>&1
     done
-
-    if [ "$STATUS" != "ACTIVE" ]; then
-        log_warn "Server cert not ready after 30s. Status: $STATUS"
-        log_warn "Continuing without mTLS"
-    fi
+    echo "✅ Server certificate(s) approved"
+else
+    echo "  No pending cert requests (server submits on first startup)"
 fi
 
 # Fetch adapter config (includes serverIdentity if cert was issued)
