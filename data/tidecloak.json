@@ -1,26 +1,35 @@
 {
-  "realm": "keylessh-demo-01",
-  "auth-server-url": "https://login.dauth.me",
+  "realm": "keylessh",
+  "auth-server-url": "http://localhost:8080",
   "ssl-required": "external",
   "resource": "myclient",
   "public-client": true,
+  "verify-token-audience": true,
+  "use-resource-role-mappings": true,
   "confidential-port": 0,
   "jwk": {
     "keys": [
       {
-        "kid": "APJNf4p2LlTM8qXK2YLTeY69y9xfVvZH44uq3D2xVGA",
+        "kid": "y_xVGQAB5TiTZaqOSeEiaJQjbZngx7hywfDBYTa5Y98",
         "kty": "OKP",
         "alg": "EdDSA",
         "use": "sig",
         "crv": "Ed25519",
-        "x": "u58Rn0-39mearKwFr1sCv9EchBv8fT3EevpeqmMS3m8"
+        "x": "6xxdKRbHLEeOd7RdTqWxaX4roAI8KZ2kZuiGKr5k89E"
       }
     ]
   },
-  "vendorId": "7017193515492054180304345278779404116402393327264375637999730428773132832277",
-  "backgroundUrl": "https://login.dauth.me/realms/keylessh-demo-01/tide-idp-resources/images/BACKGROUND_IMAGE",
-  "logoUrl": "https://login.dauth.me/realms/keylessh-demo-01/tide-idp-resources/images/LOGO",
-  "homeOrkUrl": "https://ork1.tideprotocol.com",
-  "client-origin-auth-https://punchd.keylessh.com": "isJMCNTe6zQ0xWhnm6BJ/81qQcE3jW6Xf1coVeYn83Gn25yr7NhcPUPMe3HFJ/VqnCZkJrwpcV4EpyG+no0hBw==",
-  "client-origin-auth-https://demo.keylessh.com": "gBXL+4B/wXKW09QR3GU2MHgQ4ZZHcmh2jKkOZBcZde7B14UCh36IJ/eXxHsVGljEusdJwOQfYKz393AIJL6pDA=="
+  "vendorId": "861143433751369824731295799505965732284576958507770179046886631493686576007",
+  "backgroundUrl": "http://localhost:8080/realms/keylessh/tide-idp-resources/images/BACKGROUND_IMAGE",
+  "logoUrl": "http://localhost:8080/realms/keylessh/tide-idp-resources/images/LOGO",
+  "homeOrkUrl": "http://localhost:1001",
+  "client-origin-auth--stunhttps://punchd.keylessh.com": "/Dwe3Zs4NF4ieWCTg1iqLSzHJcdmVWzFrFguyP4U7m5dgJHf/vV6U9Cbdba+l+QzcTrTryyanJv/f7cDIAtECw==",
+  "client-origin-auth-http://localhost:3000": "WIimSTsM+ChKw8JXKFZhBqeDY2PkefwTtwW6lo8NqEu9riKCY01PFMxIkORnGQQQjvhOWTE1/TNKJncG8XMDAg==",
+  "client-origin-auth--stunhttp://localhost:19876": "vf/kfe39xmUdGzgXLVFslwLWz3XaAHfzUwl9SVQ+DnQgSYWUzY/n1VgQxmEdGKExyt/Zimlu1IGWyJqMKPH8Cw==",
+  "serverIdentity": {
+    "spiffeId": "spiffe://tide.realm.keylessh/client/myclient/instance/ae9753e5-ede9-441a-bbb6-43b1c0744d76",
+    "certificate": "-----BEGIN CERTIFICATE-----\nMIIBmTCCAUugAwIBAgIJAPEKhB5d9VvnMAUGAytlcDAeMRwwGgYDVQQDDBN0aWRl\nLnJlYWxtLmtleWxlc3NoMB4XDTI2MDQxMzA5MTk0NFoXDTI2MDQxNDA5MTk0NFow\nJjERMA8GA1UECgwIa2V5bGVzc2gxETAPBgNVBAMMCG15Y2xpZW50MCowBQYDK2Vw\nAyEAPkEcIB2vx5067J8O3n4xibUK1G8fYi4XoMlzev6n2I2jgZ0wgZowZQYDVR0R\nBF4wXIZac3BpZmZlOi8vdGlkZS5yZWFsbS5rZXlsZXNzaC9jbGllbnQvbXljbGll\nbnQvaW5zdGFuY2UvYWU5NzUzZTUtZWRlOS00NDFhLWJiYjYtNDNiMWMwNzQ0ZDc2\nMA4GA1UdDwEB/wQEAwIHgDATBgNVHSUEDDAKBggrBgEFBQcDAjAMBgNVHRMBAf8E\nAjAAMAUGAytlcANBABHqimtz5jpwQqMAt82MSYJkqdR1q57/1o/zaHz8ehPlD8d9\nkaY05zx2tFLUPCX7e4lz6jdKth94j9LBbbvJYw8=\n-----END CERTIFICATE-----",
+    "trustBundle": "-----BEGIN CERTIFICATE-----\nMIIBvTCCAW+gAwIBAgIBATAFBgMrZXAwHjEcMBoGA1UEAwwTdGlkZS5yZWFsbS5r\nZXlsZXNzaDAeFw0yNjA0MTMwOTE5NDVaFw0zNjA0MTAwOTE5NDVaMB4xHDAaBgNV\nBAMME3RpZGUucmVhbG0ua2V5bGVzc2gwgdgwBQYDK2VwA4HOAAEAAAAFAAAAVlJL\nOjE3AAAAAQAAACMAAAAgAAA0BJDekqj+kAj5taVyTWYZEmYP8WYE5gGXTaM8Ymzn\nrggAAAADzgRqAAAAAAsAAABSb3RhdGVWUks6MRkAAABUaWRlY2xvYWtVcGRhdGVT\nZXR0aW5nczoxCwAAAFVzZXJUb2tlbjoxCAAAAGRUb2tlbjoxBwAAAHNDZXJ0OjEQ\nAAAARW5hYmxlT2ZmYm9hcmQ6MRsAAABUaWRlUmVxdWVzdEluaXRpYWxpemF0aW9u\nOjGjIzAhMA8GA1UdEwEB/wQFMAMBAf8wDgYDVR0PAQH/BAQDAgEGMAUGAytlcANB\nAKvnTlm/Wy3kmnmzoxBLwxX1kO/LuLO55RkpdmiWEnHGddzdC6CcTqTQ08ntRabU\nl/BCa8sBt0YBGePM7mVMlgU=\n-----END CERTIFICATE-----",
+    "instanceId": "ae9753e5-ede9-441a-bbb6-43b1c0744d76"
+  }
 }

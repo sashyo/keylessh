@@ -7,6 +7,7 @@ import {
 } from "./auth/keycloakTypes";
 import { Roles } from "@shared/config/roles";
 import path from "path";
+import { readFileSync } from "fs";
 import { getAuthOverrideUrl, getRealm, getResource } from "./auth/tidecloakConfig";
 import { TideDelegation } from "@tidecloak/server";
 
@@ -918,11 +919,11 @@ export function getDelegation(): TideDelegation {
     const keyPath = path.join(process.cwd(), "data", "server.key");
     let privateKey: string | undefined;
     try {
-      const fs = require("fs");
-      privateKey = fs.readFileSync(keyPath, "utf-8");
+      privateKey = readFileSync(keyPath, "utf-8");
     } catch {
       // Key not generated yet
     }
+    console.log(`[delegation] privateKey loaded: ${!!privateKey}, length: ${privateKey?.length || 0}`);
     _delegation = new TideDelegation({
       tidecloakUrl: getAuthOverrideUrl(),
       realm: getRealm(),
@@ -930,6 +931,7 @@ export function getDelegation(): TideDelegation {
       adapterJsonPath: path.join(process.cwd(), "data", "tidecloak.json"),
       privateKey,
     });
+    console.log(`[delegation] mTLS enabled: ${_delegation.isMtlsEnabled()}`);
   }
   return _delegation;
 }
