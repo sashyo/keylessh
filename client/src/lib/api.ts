@@ -24,11 +24,9 @@ function toAbsoluteUrl(path: string): string {
   return `${window.location.origin}${path}`;
 }
 
-// Delegation-aware fetch: uses plain fetch (not secureFetch) so 419 responses
-// are returned cleanly without being swallowed by the DPoP layer.
-// Auth headers are added in apiRequest.
+// Delegation-aware fetch: wraps appFetch (which uses secureFetch for DPoP)
 const tideFetch = createTideFetch(
-  (url: string | URL | Request, init?: RequestInit) => fetch(url as string, init),
+  (url: string | URL | Request, init?: RequestInit) => appFetch(url as string, init),
   { delegationEndpoint: `${API_BASE}/api/delegation` }
 );
 
