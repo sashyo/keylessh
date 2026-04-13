@@ -915,11 +915,20 @@ export const GetRawChangeSetRequest = async (
 let _delegation: TideDelegation | null = null;
 export function getDelegation(): TideDelegation {
   if (!_delegation) {
+    const keyPath = path.join(process.cwd(), "data", "server.key");
+    let privateKey: string | undefined;
+    try {
+      const fs = require("fs");
+      privateKey = fs.readFileSync(keyPath, "utf-8");
+    } catch {
+      // Key not generated yet
+    }
     _delegation = new TideDelegation({
       tidecloakUrl: getAuthOverrideUrl(),
       realm: getRealm(),
       clientId: getResource(),
       adapterJsonPath: path.join(process.cwd(), "data", "tidecloak.json"),
+      privateKey,
     });
   }
   return _delegation;
