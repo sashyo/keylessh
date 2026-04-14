@@ -10,26 +10,34 @@
   "jwk": {
     "keys": [
       {
-        "kid": "y_xVGQAB5TiTZaqOSeEiaJQjbZngx7hywfDBYTa5Y98",
+        "kid": "F1GYkA7pGeEYaKYifqwkLOVfoJW7tX5QlN43Inv_WNE",
         "kty": "OKP",
         "alg": "EdDSA",
         "use": "sig",
         "crv": "Ed25519",
-        "x": "6xxdKRbHLEeOd7RdTqWxaX4roAI8KZ2kZuiGKr5k89E"
+        "x": "Rr6_GpK9rwyRTPYRJETsJzbs-04Jc2Vw2EOWpjND2dw"
       }
     ]
   },
-  "vendorId": "861143433751369824731295799505965732284576958507770179046886631493686576007",
+  "vendorId": "2193864135121004514919393808537779077523052343071904019206214831266599307951",
   "backgroundUrl": "http://localhost:8080/realms/keylessh/tide-idp-resources/images/BACKGROUND_IMAGE",
   "logoUrl": "http://localhost:8080/realms/keylessh/tide-idp-resources/images/LOGO",
   "homeOrkUrl": "http://localhost:1001",
-  "client-origin-auth--stunhttps://punchd.keylessh.com": "/Dwe3Zs4NF4ieWCTg1iqLSzHJcdmVWzFrFguyP4U7m5dgJHf/vV6U9Cbdba+l+QzcTrTryyanJv/f7cDIAtECw==",
-  "client-origin-auth-http://localhost:3000": "WIimSTsM+ChKw8JXKFZhBqeDY2PkefwTtwW6lo8NqEu9riKCY01PFMxIkORnGQQQjvhOWTE1/TNKJncG8XMDAg==",
-  "client-origin-auth--stunhttp://localhost:19876": "vf/kfe39xmUdGzgXLVFslwLWz3XaAHfzUwl9SVQ+DnQgSYWUzY/n1VgQxmEdGKExyt/Zimlu1IGWyJqMKPH8Cw==",
+  "client-origin-auth--stunhttps://punchd.keylessh.com": "OtJY7y97IXlvmB0tiN+CX46d5KY1PNZSQpK3unOZMHIsyXqseqY6LnLKNf4umFis2wmUSBFMUqMvFThfzp61CQ==",
+  "client-origin-auth-http://localhost:3000": "Mxy1prl0SCo8attznfKcrW/xqJuMLR9cvurX2JYTRhThoE6FM0Lf8shTLiG5lBoCdhKEB4Il2fXHRMMwJCjxBA==",
+  "client-origin-auth--stunhttp://localhost:19876": "2gk1ArVi3GKjaOVlLRctbd80nPvKgMgijwjkTIhsnRO7qeICAMbNodm1oEO7T4ph3RikI0PkazZPqwc6F++6Aw==",
+  "gVVK": "46bebf1a92bdaf0c914cf6112444ec2736ecfb4e09736570d84396a63343d9dc",
+  "vvkId": "2193864135121004514919393808537779077523052343071904019206214831266599307951",
+  "orkUrl": "http://hostgateway:1001",
+  "payerPublic": "2000001d0cfc73bd50ffd4d39c26bf788e385e8406ab6d85ae1ba6d67394340b2417a4",
+  "obfGVVK": "d3344fcc4ce3db3665592c45c0b7215e3c9eca3457df7b0d74ccc1dc9f44efaa",
+  "gVRKCertificate": "ScdfS714CAIusZUc0NsU5VvSlZ8tGFuqf1aIwBal03UuqEIbriN2qNL7ZkTcmhGLh1JIa6ITuFEbzZcAtsdnCw==",
+  "thresholdT": 3,
+  "thresholdN": 5,
   "serverIdentity": {
-    "spiffeId": "spiffe://tide.realm.keylessh/client/myclient/instance/ae9753e5-ede9-441a-bbb6-43b1c0744d76",
-    "certificate": "-----BEGIN CERTIFICATE-----\nMIIBmTCCAUugAwIBAgIJAPEKhB5d9VvnMAUGAytlcDAeMRwwGgYDVQQDDBN0aWRl\nLnJlYWxtLmtleWxlc3NoMB4XDTI2MDQxMzA5MTk0NFoXDTI2MDQxNDA5MTk0NFow\nJjERMA8GA1UECgwIa2V5bGVzc2gxETAPBgNVBAMMCG15Y2xpZW50MCowBQYDK2Vw\nAyEAPkEcIB2vx5067J8O3n4xibUK1G8fYi4XoMlzev6n2I2jgZ0wgZowZQYDVR0R\nBF4wXIZac3BpZmZlOi8vdGlkZS5yZWFsbS5rZXlsZXNzaC9jbGllbnQvbXljbGll\nbnQvaW5zdGFuY2UvYWU5NzUzZTUtZWRlOS00NDFhLWJiYjYtNDNiMWMwNzQ0ZDc2\nMA4GA1UdDwEB/wQEAwIHgDATBgNVHSUEDDAKBggrBgEFBQcDAjAMBgNVHRMBAf8E\nAjAAMAUGAytlcANBABHqimtz5jpwQqMAt82MSYJkqdR1q57/1o/zaHz8ehPlD8d9\nkaY05zx2tFLUPCX7e4lz6jdKth94j9LBbbvJYw8=\n-----END CERTIFICATE-----",
-    "trustBundle": "-----BEGIN CERTIFICATE-----\nMIIBvTCCAW+gAwIBAgIBATAFBgMrZXAwHjEcMBoGA1UEAwwTdGlkZS5yZWFsbS5r\nZXlsZXNzaDAeFw0yNjA0MTMwOTE5NDVaFw0zNjA0MTAwOTE5NDVaMB4xHDAaBgNV\nBAMME3RpZGUucmVhbG0ua2V5bGVzc2gwgdgwBQYDK2VwA4HOAAEAAAAFAAAAVlJL\nOjE3AAAAAQAAACMAAAAgAAA0BJDekqj+kAj5taVyTWYZEmYP8WYE5gGXTaM8Ymzn\nrggAAAADzgRqAAAAAAsAAABSb3RhdGVWUks6MRkAAABUaWRlY2xvYWtVcGRhdGVT\nZXR0aW5nczoxCwAAAFVzZXJUb2tlbjoxCAAAAGRUb2tlbjoxBwAAAHNDZXJ0OjEQ\nAAAARW5hYmxlT2ZmYm9hcmQ6MRsAAABUaWRlUmVxdWVzdEluaXRpYWxpemF0aW9u\nOjGjIzAhMA8GA1UdEwEB/wQFMAMBAf8wDgYDVR0PAQH/BAQDAgEGMAUGAytlcANB\nAKvnTlm/Wy3kmnmzoxBLwxX1kO/LuLO55RkpdmiWEnHGddzdC6CcTqTQ08ntRabU\nl/BCa8sBt0YBGePM7mVMlgU=\n-----END CERTIFICATE-----",
-    "instanceId": "ae9753e5-ede9-441a-bbb6-43b1c0744d76"
+    "spiffeId": "spiffe://tide.realm.keylessh/client/myclient/instance/d9fda456-9500-4066-877a-ad3967af6519",
+    "certificate": "-----BEGIN CERTIFICATE-----\nMIIBmTCCAUugAwIBAgIJAMYu96o3PHumMAUGAytlcDAeMRwwGgYDVQQDDBN0aWRl\nLnJlYWxtLmtleWxlc3NoMB4XDTI2MDQxNDA2MTgxMloXDTI2MDQxNTA2MTgxMlow\nJjERMA8GA1UECgwIa2V5bGVzc2gxETAPBgNVBAMMCG15Y2xpZW50MCowBQYDK2Vw\nAyEALjj8aLyT96EkZvOnYDOkGRlAZyWOp3KBdZzgjsKwZ1ijgZ0wgZowZQYDVR0R\nBF4wXIZac3BpZmZlOi8vdGlkZS5yZWFsbS5rZXlsZXNzaC9jbGllbnQvbXljbGll\nbnQvaW5zdGFuY2UvZDlmZGE0NTYtOTUwMC00MDY2LTg3N2EtYWQzOTY3YWY2NTE5\nMA4GA1UdDwEB/wQEAwIHgDATBgNVHSUEDDAKBggrBgEFBQcDAjAMBgNVHRMBAf8E\nAjAAMAUGAytlcANBAD4eVImnxCbVLpYCyCSOfZEX0Oh48XpHzkH/To2Uef4Le9pg\nY+MH4XBqh52H/stiFuukj6IZEtgjlIRIn1pbigk=\n-----END CERTIFICATE-----",
+    "trustBundle": "-----BEGIN CERTIFICATE-----\nMIIBDTCBwKADAgECAgEBMAUGAytlcDAeMRwwGgYDVQQDDBN0aWRlLnJlYWxtLmtl\neWxlc3NoMB4XDTI2MDQxNDA2MTgxMloXDTM2MDQxMTA2MTgxMlowHjEcMBoGA1UE\nAwwTdGlkZS5yZWFsbS5rZXlsZXNzaDAqMAUGAytlcAMhAEa+vxqSva8MkUz2ESRE\n7Cc27PtOCXNlcNhDlqYzQ9ncoyMwITAPBgNVHRMBAf8EBTADAQH/MA4GA1UdDwEB\n/wQEAwIBBjAFBgMrZXADQQBrQwxxotuXrtYdr2qYmQa58kERG7S+668ZWoOJ/ypL\nWZaGfBcVKm2zMfw81t3ohkT3cryrb/3f3cGWgJM7R48F\n-----END CERTIFICATE-----",
+    "instanceId": "d9fda456-9500-4066-877a-ad3967af6519"
   }
 }
