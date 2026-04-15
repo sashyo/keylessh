@@ -15,7 +15,7 @@ REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 TC_PORT="${TC_PORT:-8080}"
 TC_CONTAINER="${TC_CONTAINER:-mytidecloak}"
 REALM_NAME="${NEW_REALM_NAME:-keylessh}"
-CLIENT_NAME="${CLIENT_NAME:-myclient}"
+CLIENT_NAME="${CLIENT_NAME:-keylessh}"
 STUN_SERVER_URL="${STUN_SERVER_URL:-wss://tidestun.codesyo.com:9090}"
 TC_PUBLIC_URL="${TC_PUBLIC_URL:-$(echo "$STUN_SERVER_URL" | sed 's|^wss://|https://|;s|^ws://|http://|;s|:[0-9]*$||')}"
 

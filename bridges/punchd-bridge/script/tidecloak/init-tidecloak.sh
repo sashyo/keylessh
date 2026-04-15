@@ -40,7 +40,7 @@ REALM_MGMT_CLIENT_ID="realm-management"
 ADMIN_ROLE_NAME="tide-realm-admin"
 KC_USER="${KC_USER:-admin}"
 KC_PASSWORD="${KC_PASSWORD:-password}"
-CLIENT_NAME="${CLIENT_NAME:-myclient}"
+CLIENT_NAME="${CLIENT_NAME:-keylessh}"
 SCRIPT_DIR="${SCRIPT_DIR:-$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)}"
 
 CURL_OPTS="-f"

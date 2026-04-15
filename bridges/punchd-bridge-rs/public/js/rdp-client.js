@@ -464,7 +464,7 @@
 
   /**
    * Get a keylessh app token via silent PKCE + SSO.
-   * Uses a hidden iframe to authenticate with the keylessh client (myclient).
+   * Uses a hidden iframe to authenticate with the keylessh client (keylessh).
    * TideCloak SSO means no login prompt — returns instantly.
    */
   async function getRecordingToken() {

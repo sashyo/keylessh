@@ -28,7 +28,7 @@
             }
         ],
         "client": {
-            "myclient": []
+            "keylessh": []
         }
     },
     "defaultRole": {
@@ -39,7 +39,7 @@
     },
     "clients": [
         {
-            "clientId": "myclient",
+            "clientId": "keylessh",
             "enabled": true,
             "redirectUris": [
                 "*",

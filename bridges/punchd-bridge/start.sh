@@ -24,7 +24,7 @@ TC_PORT="${TC_PORT:-8080}"
 TC_CONTAINER="${TC_CONTAINER:-mytidecloak}"
 SKIP_TC="${1:-}"
 REALM_NAME="${NEW_REALM_NAME:-keylessh}"
-CLIENT_NAME="${CLIENT_NAME:-myclient}"
+CLIENT_NAME="${CLIENT_NAME:-keylessh}"
 
 # Resolve STUN server URL early
 STUN_SERVER_URL="${STUN_SERVER_URL:-wss://tidestun.codesyo.com:9090}"
