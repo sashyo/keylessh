@@ -108,7 +108,7 @@
             "clientId": "keylessh-server",
             "enabled": true,
             "publicClient": false,
-            "clientAuthenticatorType": "client-x509",
+            "clientAuthenticatorType": "tide-mtls",
             "standardFlowEnabled": false,
             "implicitFlowEnabled": false,
             "directAccessGrantsEnabled": false,
@@ -116,8 +116,8 @@
             "fullScopeAllowed": true,
             "attributes": {
                 "tls.client.certificate.bound.access.tokens": "true",
-                "x509.subjectdn": "CN=keylessh",
-                "token.exchange.standard.flow.enabled": "true"
+                "token.exchange.standard.flow.enabled": "true",
+                "standard.token.exchange.enabled": true
             },
             "protocolMappers": [
                 {

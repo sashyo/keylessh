@@ -6,6 +6,7 @@ import {
   UserRepresentation,
 } from "./auth/keycloakTypes";
 import { Roles } from "@shared/config/roles";
+import fs from "fs";
 import path from "path";
 import { getAuthOverrideUrl, getRealm, getResource } from "./auth/tidecloakConfig";
 import { TideDelegation } from "@tidecloak/server";
@@ -919,9 +920,12 @@ export function getDelegation(): TideDelegation {
     // Read server client ID from adapter JSON if available
     let serverClientId: string | undefined;
     try {
-      const adapter = JSON.parse(require("fs").readFileSync(adapterPath, "utf-8"));
+      const adapter = JSON.parse(fs.readFileSync(adapterPath, "utf-8"));
       serverClientId = adapter.serverResource;
-    } catch { /* adapter not available yet */ }
+      console.log(`[delegation] adapterPath=${adapterPath} serverClientId=${serverClientId}`);
+    } catch (e: any) {
+      console.warn(`[delegation] Could not read adapter: ${adapterPath} - ${e.message}`);
+    }
 
     _delegation = new TideDelegation({
       tidecloakUrl: getAuthOverrideUrl(),
