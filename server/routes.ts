@@ -439,8 +439,41 @@ export async function registerRoutes(
   app.post("/api/sessions", authenticate, async (req: AuthenticatedRequest, res) => {
     try {
       const user = req.user!;
-      const { serverId, sshUser } = req.body;
+      const { serverId, sshUser, gatewayId, backendName } = req.body;
       const allowedSshUsersFromToken = getAllowedSshUsersFromToken(req.tokenPayload);
+
+      // Gateway SSH mode: backend accessed via gateway, no server record in DB
+      if (gatewayId && backendName) {
+        // Check if SSH access is blocked due to over-limit
+        const sshStatus = await subscriptionStorage.isSshBlocked();
+        if (sshStatus.blocked) {
+          res.status(403).json({ message: sshStatus.reason || "SSH access is currently disabled" });
+          return;
+        }
+
+        if (!allowedSshUsersFromToken.includes(sshUser)) {
+          res.status(403).json({ message: `Not allowed to SSH as '${sshUser}'` });
+          return;
+        }
+
+        const session = await storage.createSession({
+          userId: user.id,
+          userUsername: user.username,
+          userEmail: user.email,
+          serverId: backendName,
+          sshUser,
+          status: "active",
+          gatewayId,
+          backendName,
+        });
+
+        // Gateway SSH always enables recording (same as RDP gateway flow)
+        res.json({
+          ...session,
+          recordingEnabled: true,
+        });
+        return;
+      }
 
       const server = await storage.getServer(serverId);
       if (!server) {
@@ -742,37 +775,43 @@ export async function registerRoutes(
         return;
       }
 
-      const server = await storage.getServer(session.serverId);
-      if (!server) {
-        res.status(404).json({ error: "Server not found" });
-        return;
-      }
+      // Gateway sessions always allow recording; server-based sessions check server settings
+      const isGatewaySession = !!session.gatewayId;
+      const server = isGatewaySession ? null : await storage.getServer(session.serverId);
+      if (!isGatewaySession) {
+        if (!server) {
+          res.status(404).json({ error: "Server not found" });
+          return;
+        }
 
-      // Check if recording is enabled for this server/user
-      if (!server.recordingEnabled) {
-        res.status(400).json({ error: "Recording not enabled for this server" });
-        return;
-      }
+        if (!server.recordingEnabled) {
+          res.status(400).json({ error: "Recording not enabled for this server" });
+          return;
+        }
 
-      const recordedUsers = server.recordedUsers || [];
-      const shouldRecord = recordedUsers.length === 0 || recordedUsers.includes(session.sshUser);
-      if (!shouldRecord) {
-        res.status(400).json({ error: "Recording not enabled for this SSH user" });
-        return;
+        const recordedUsers = server.recordedUsers || [];
+        const shouldRecord = recordedUsers.length === 0 || recordedUsers.includes(session.sshUser);
+        if (!shouldRecord) {
+          res.status(400).json({ error: "Recording not enabled for this SSH user" });
+          return;
+        }
       }
 
       // Create recording
       const width = terminalWidth || 80;
       const height = terminalHeight || 24;
+      const serverName = server?.name || session.backendName || session.serverId;
       const recording = await recordingStorage.createRecording({
         sessionId,
         serverId: session.serverId,
-        serverName: server.name,
+        serverName,
         userId: user.id,
         userEmail: user.email || "",
         sshUser: session.sshUser,
         terminalWidth: width,
         terminalHeight: height,
+        backendName: session.backendName || undefined,
+        gatewayId: session.gatewayId || undefined,
       });
 
       // Write asciicast header

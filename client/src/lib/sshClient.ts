@@ -473,10 +473,8 @@ export class BrowserSSHClient {
 
       this.options.onStatusChange("connecting");
 
-      // Create session record (skip in gateway mode — gateway creates its own)
-      if (!this.options.gatewayUrl) {
-        this.sessionId = await this.createSessionRecord();
-      }
+      // Create session record (needed for recording + session tracking)
+      this.sessionId = await this.createSessionRecord();
       this.sessionEnded = false;
 
       // Register browser close/navigate handlers to end session on unexpected exit
@@ -655,6 +653,10 @@ export class BrowserSSHClient {
       body: JSON.stringify({
         serverId: this.options.serverId,
         sshUser: this.options.username,
+        ...(this.options.gatewayUrl ? {
+          gatewayId: this.options.gatewayId,
+          backendName: this.options.serverId,
+        } : {}),
       }),
     });
 
