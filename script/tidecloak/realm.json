@@ -33,7 +33,7 @@
                     "name": "allowConfigDownload",
                     "description": "Allow user to access configuration"
                 }
-            ],
+            ]
         }
     },
     "defaultRole": {
@@ -131,7 +131,7 @@
                     }
                 }
             ]
-        },
+        }
     ],
     "components": {
         "org.keycloak.userprofile.UserProfileProvider": [
