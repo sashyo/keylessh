@@ -125,6 +125,7 @@ import {
 import {
   getDelegation,
   getDelegationCertThumbprint,
+  requireDelegationWithLogging,
 } from "./lib/tidecloakApi";
 import type { ChangeSetRequest, AccessApproval } from "./lib/auth/keycloakTypes";
 import { getAllowedSshUsersFromToken } from "./lib/auth/sshUsers";
@@ -1772,7 +1773,7 @@ export async function registerRoutes(
     "/api/admin/users",
     authenticate,
     requireAdmin,
-    getDelegation().requireDelegation(),
+    requireDelegationWithLogging(),
     async (req: AuthenticatedRequest, res) => {
       try {
         const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
@@ -1889,7 +1890,7 @@ export async function registerRoutes(
     "/api/admin/users",
     authenticate,
     requireAdmin,
-    getDelegation().requireDelegation(),
+    requireDelegationWithLogging(),
     async (req: AuthenticatedRequest, res) => {
       try {
         const { id, rolesToAdd, rolesToRemove } = req.body;
@@ -1957,7 +1958,7 @@ export async function registerRoutes(
     "/api/admin/users",
     authenticate,
     requireAdmin,
-    getDelegation().requireDelegation(),
+    requireDelegationWithLogging(),
     async (req: AuthenticatedRequest, res) => {
       try {
         const { id, firstName, lastName, email } = req.body;
@@ -1989,7 +1990,7 @@ export async function registerRoutes(
     "/api/admin/users",
     authenticate,
     requireAdmin,
-    getDelegation().requireDelegation(),
+    requireDelegationWithLogging(),
     async (req: AuthenticatedRequest, res) => {
       try {
         const userId = req.query.userId as string;
@@ -2028,7 +2029,7 @@ export async function registerRoutes(
     "/api/admin/users/:id/enabled",
     authenticate,
     requireAdmin,
-    getDelegation().requireDelegation(),
+    requireDelegationWithLogging(),
     async (req: AuthenticatedRequest, res) => {
       try {
         const userId = req.params.id;
@@ -2074,7 +2075,7 @@ export async function registerRoutes(
     "/api/admin/users/add",
     authenticate,
     requireAdmin,
-    getDelegation().requireDelegation(),
+    requireDelegationWithLogging(),
     async (req: AuthenticatedRequest, res) => {
       try {
         const { username, firstName, lastName, email } = req.body;
@@ -2132,7 +2133,7 @@ export async function registerRoutes(
     "/api/admin/users/tide",
     authenticate,
     requireAdmin,
-    getDelegation().requireDelegation(),
+    requireDelegationWithLogging(),
     async (req: AuthenticatedRequest, res) => {
       try {
         const userId = req.query.userId as string;
@@ -2170,7 +2171,7 @@ export async function registerRoutes(
     "/api/admin/roles",
     authenticate,
     requireAdmin,
-    getDelegation().requireDelegation(),
+    requireDelegationWithLogging(),
     async (req: AuthenticatedRequest, res) => {
       try {
         const tcBaseUrl = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
@@ -2197,7 +2198,7 @@ export async function registerRoutes(
     "/api/admin/roles",
     authenticate,
     requireAdmin,
-    getDelegation().requireDelegation(),
+    requireDelegationWithLogging(),
     async (req: AuthenticatedRequest, res) => {
       try {
         const { name, description, policy } = req.body;
@@ -2249,7 +2250,7 @@ export async function registerRoutes(
     "/api/admin/roles",
     authenticate,
     requireAdmin,
-    getDelegation().requireDelegation(),
+    requireDelegationWithLogging(),
     async (req: AuthenticatedRequest, res) => {
       try {
         const { name, description } = req.body;
@@ -2284,7 +2285,7 @@ export async function registerRoutes(
     "/api/admin/roles",
     authenticate,
     requireAdmin,
-    getDelegation().requireDelegation(),
+    requireDelegationWithLogging(),
     async (req: AuthenticatedRequest, res) => {
       try {
         const roleName = req.query.roleName as string;
@@ -2383,7 +2384,7 @@ export async function registerRoutes(
     "/api/admin/roles/all",
     authenticate,
     requireAdmin,
-    getDelegation().requireDelegation(),
+    requireDelegationWithLogging(),
     async (req: AuthenticatedRequest, res) => {
       try {
         const tcBaseUrl = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
@@ -3126,7 +3127,7 @@ export async function registerRoutes(
     "/api/admin/access-approvals",
     authenticate,
     requireAdmin,
-    getDelegation().requireDelegation(),
+    requireDelegationWithLogging(),
     async (req: AuthenticatedRequest, res) => {
       try {
         const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
@@ -3177,7 +3178,7 @@ export async function registerRoutes(
     "/api/admin/access-approvals/raw",
     authenticate,
     requireAdmin,
-    getDelegation().requireDelegation(),
+    requireDelegationWithLogging(),
     async (req: AuthenticatedRequest, res) => {
       try {
         const { changeSet } = req.body as { changeSet: ChangeSetRequest };
@@ -3214,7 +3215,7 @@ export async function registerRoutes(
     "/api/admin/access-approvals/approve",
     authenticate,
     requireAdmin,
-    getDelegation().requireDelegation(),
+    requireDelegationWithLogging(),
     async (req: AuthenticatedRequest, res) => {
       try {
         const { changeSet, signedRequest } = req.body as {
@@ -3252,7 +3253,7 @@ export async function registerRoutes(
     "/api/admin/access-approvals/approve-with-id",
     authenticate,
     requireAdmin,
-    getDelegation().requireDelegation(),
+    requireDelegationWithLogging(),
     async (req: AuthenticatedRequest, res) => {
       try {
         const { changeSetId, actionType, changeSetType, signedRequest } = req.body as {
@@ -3290,7 +3291,7 @@ export async function registerRoutes(
     "/api/admin/access-approvals/reject",
     authenticate,
     requireAdmin,
-    getDelegation().requireDelegation(),
+    requireDelegationWithLogging(),
     async (req: AuthenticatedRequest, res) => {
       try {
         const { changeSet } = req.body as { changeSet: ChangeSetRequest };
@@ -3322,7 +3323,7 @@ export async function registerRoutes(
     "/api/admin/access-approvals/commit",
     authenticate,
     requireAdmin,
-    getDelegation().requireDelegation(),
+    requireDelegationWithLogging(),
     async (req: AuthenticatedRequest, res) => {
       try {
         const { changeSet } = req.body as { changeSet: ChangeSetRequest };
@@ -3353,7 +3354,7 @@ export async function registerRoutes(
     "/api/admin/access-approvals/cancel",
     authenticate,
     requireAdmin,
-    getDelegation().requireDelegation(),
+    requireDelegationWithLogging(),
     async (req: AuthenticatedRequest, res) => {
       try {
         const { changeSet } = req.body as { changeSet: ChangeSetRequest };
@@ -3388,7 +3389,7 @@ export async function registerRoutes(
     "/api/admin/role-approvals",
     authenticate,
     requireAdmin,
-    getDelegation().requireDelegation(),
+    requireDelegationWithLogging(),
     async (req: AuthenticatedRequest, res) => {
       try {
         const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
@@ -3429,7 +3430,7 @@ export async function registerRoutes(
     "/api/admin/role-approvals/raw",
     authenticate,
     requireAdmin,
-    getDelegation().requireDelegation(),
+    requireDelegationWithLogging(),
     async (req: AuthenticatedRequest, res) => {
       try {
         const { changeSet } = req.body as { changeSet: ChangeSetRequest };
@@ -3457,7 +3458,7 @@ export async function registerRoutes(
     "/api/admin/role-approvals/approve",
     authenticate,
     requireAdmin,
-    getDelegation().requireDelegation(),
+    requireDelegationWithLogging(),
     async (req: AuthenticatedRequest, res) => {
       try {
         const { changeSet, signedRequest } = req.body as {
@@ -3495,7 +3496,7 @@ export async function registerRoutes(
     "/api/admin/role-approvals/approve-with-id",
     authenticate,
     requireAdmin,
-    getDelegation().requireDelegation(),
+    requireDelegationWithLogging(),
     async (req: AuthenticatedRequest, res) => {
       try {
         const { changeSetId, actionType, changeSetType, signedRequest } = req.body as {
@@ -3533,7 +3534,7 @@ export async function registerRoutes(
     "/api/admin/role-approvals/reject",
     authenticate,
     requireAdmin,
-    getDelegation().requireDelegation(),
+    requireDelegationWithLogging(),
     async (req: AuthenticatedRequest, res) => {
       try {
         const { changeSet } = req.body as { changeSet: ChangeSetRequest };
@@ -3565,7 +3566,7 @@ export async function registerRoutes(
     "/api/admin/role-approvals/commit",
     authenticate,
     requireAdmin,
-    getDelegation().requireDelegation(),
+    requireDelegationWithLogging(),
     async (req: AuthenticatedRequest, res) => {
       try {
         const { changeSet } = req.body as { changeSet: ChangeSetRequest };
@@ -3596,7 +3597,7 @@ export async function registerRoutes(
     "/api/admin/role-approvals/cancel",
     authenticate,
     requireAdmin,
-    getDelegation().requireDelegation(),
+    requireDelegationWithLogging(),
     async (req: AuthenticatedRequest, res) => {
       try {
         const { changeSet } = req.body as { changeSet: ChangeSetRequest };
@@ -3627,7 +3628,7 @@ export async function registerRoutes(
     "/api/admin/logs/access",
     authenticate,
     requireAdmin,
-    getDelegation().requireDelegation(),
+    requireDelegationWithLogging(),
     async (req: AuthenticatedRequest, res) => {
       try {
         const limit = parseInt(req.query.limit as string) || 100;

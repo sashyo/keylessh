@@ -938,11 +938,34 @@ export function getDelegation(): TideDelegation {
   return _delegation;
 }
 
-// Initialize vault-backed key management on startup
+// Initialize key management on startup
 export async function initServerIdentity() {
   const delegation = getDelegation();
   await delegation.init();
   console.log(`[delegation] mTLS enabled: ${delegation.isMtlsEnabled()}`);
+}
+
+/**
+ * Middleware that requires delegation and logs the delegation token.
+ * Wraps getDelegation().requireDelegation() with server-side JWT logging.
+ */
+export function requireDelegationWithLogging() {
+  const inner = getDelegation().requireDelegation();
+  return async (req: any, res: any, next: any) => {
+    await inner(req, res, (err?: any) => {
+      if (err) return next(err);
+      if (req.delegation?.token) {
+        try {
+          const parts = req.delegation.token.split('.');
+          const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString());
+          console.log('[delegation] Token payload:', JSON.stringify(payload, null, 2));
+        } catch {
+          console.log('[delegation] Token (raw):', req.delegation.token);
+        }
+      }
+      next();
+    });
+  };
 }
 
 /**
