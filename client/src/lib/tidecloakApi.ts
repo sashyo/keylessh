@@ -3,7 +3,7 @@
  * These call TideCloak directly instead of proxying through the server,
  * so the DPoP proof htu matches the TideCloak URL.
  */
-import { appFetch } from "./appFetch";
+import { IAMService } from "@tidecloak/js";
 import type { AdminUser, AdminRole } from "@shared/schema";
 import type { ChangeSetRequest, AccessApproval, RoleApproval, TidecloakEvent } from "./api";
 
@@ -31,16 +31,9 @@ function getClientIdFromToken(): string {
 async function tcFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
   const baseUrl = getTcAdminUrl();
   const url = `${baseUrl}${path}`;
-  const token = localStorage.getItem("access_token");
 
-  const headers: HeadersInit = {
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    ...options.headers,
-  };
-
-  const response = await appFetch(url, {
+  const response = await IAMService.fetch(url, {
     ...options,
-    headers,
   });
 
   if (!response.ok) {
@@ -354,13 +347,11 @@ export async function getTideLinkUrl(userId: string, redirectUri?: string): Prom
 
   const baseUrl = getTcAdminUrl();
   const fullUrl = `${baseUrl}${url}`;
-  const token = localStorage.getItem("access_token");
 
-  const response = await appFetch(fullUrl, {
+  const response = await IAMService.fetch(fullUrl, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
     body: JSON.stringify(["link-tide-account-action"]),
   });

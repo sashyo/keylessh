@@ -945,6 +945,14 @@ export async function initServerIdentity() {
   console.log(`[delegation] mTLS enabled: ${delegation.isMtlsEnabled()}`);
 }
 
+/**
+ * Get the server's cert thumbprint for clients to include in delegation requests.
+ * Returns null if mTLS is not configured.
+ */
+export function getDelegationCertThumbprint(): string | null {
+  return getDelegation().getCertThumbprint();
+}
+
 export const AddApprovalWithSignedRequest = async (
   changeSet: ChangeSetRequest,
   signedRequest: string,

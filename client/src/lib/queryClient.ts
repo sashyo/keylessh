@@ -1,5 +1,5 @@
 import { QueryClient, QueryFunction } from "@tanstack/react-query";
-import { appFetch } from "./appFetch";
+import { IAMService } from "@tidecloak/js";
 
 function toAbsoluteUrl(path: string): string {
   if (path.startsWith("http://") || path.startsWith("https://")) return path;
@@ -18,16 +18,9 @@ export async function apiRequest<T = unknown>(
   url: string,
   data?: unknown | undefined,
 ): Promise<T> {
-  const token = localStorage.getItem("access_token");
-  const headers: HeadersInit = {
-    ...(data ? { "Content-Type": "application/json" } : {}),
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-  };
-
-  const res = await appFetch(toAbsoluteUrl(url), {
+  const res = await IAMService.fetch(toAbsoluteUrl(url), {
     method,
-    headers,
-    body: data ? JSON.stringify(data) : undefined,
+    ...(data ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) } : {}),
     credentials: "include",
   });
 
@@ -41,12 +34,8 @@ export const getQueryFn: <T>(options: {
 }) => QueryFunction<T> =
   ({ on401: unauthorizedBehavior }) =>
   async ({ queryKey }) => {
-    const token = localStorage.getItem("access_token");
-    const headers: HeadersInit = token ? { Authorization: `Bearer ${token}` } : {};
-
-    const res = await appFetch(toAbsoluteUrl(queryKey.join("/") as string), {
+    const res = await IAMService.fetch(toAbsoluteUrl(queryKey.join("/") as string), {
       credentials: "include",
-      headers,
     });
 
     if (unauthorizedBehavior === "returnNull" && res.status === 401) {

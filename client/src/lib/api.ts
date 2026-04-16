@@ -14,8 +14,7 @@ import type {
   InsertSignalServer,
 } from "@shared/schema";
 
-import { IAMService, createTideFetch } from "@tidecloak/js";
-import { appFetch, isDpopEnabled } from "./appFetch";
+import { IAMService } from "@tidecloak/js";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 
@@ -24,27 +23,22 @@ function toAbsoluteUrl(path: string): string {
   return `${window.location.origin}${path}`;
 }
 
-// Delegation-aware fetch: wraps appFetch (which uses secureFetch for DPoP)
-const tideFetch = createTideFetch(
-  (url: string | URL | Request, init?: RequestInit) => appFetch(url as string, init),
-  { delegationEndpoint: `${API_BASE}/api/delegation` }
-);
-
+/**
+ * Universal API request. Uses IAMService.fetch() which automatically handles:
+ * - Bearer token (if authenticated)
+ * - DPoP proof + scheme upgrade (if DPoP enabled)
+ * - X-Delegation-Request header (if delegation thumbprint set)
+ */
 async function apiRequest<T>(
   endpoint: string,
   options: RequestInit = {}
 ): Promise<T> {
-  const token = await IAMService.getToken();
-
-  const headers: HeadersInit = {
-    "Content-Type": "application/json",
-    ...(token && { Authorization: `Bearer ${token}` }),
-    ...options.headers,
-  };
-
-  const response = await tideFetch(toAbsoluteUrl(`${API_BASE}${endpoint}`), {
+  const response = await IAMService.fetch(toAbsoluteUrl(`${API_BASE}${endpoint}`), {
     ...options,
-    headers,
+    headers: {
+      "Content-Type": "application/json",
+      ...options.headers,
+    },
   });
 
   if (!response.ok) {
@@ -58,6 +52,9 @@ async function apiRequest<T>(
 
   return response.json();
 }
+
+// Admin endpoints use the same fetch — delegation is handled automatically
+const adminRequest = apiRequest;
 
 // Forseti contract ID computation result
 export interface ForsetiCompileResult {
@@ -172,55 +169,54 @@ export const api = {
         apiRequest<void>(`/api/admin/signal-servers/${id}`, { method: "DELETE" }),
     },
     users: {
-      list: () => apiRequest<AdminUser[]>("/api/admin/users"),
+      list: () => adminRequest<AdminUser[]>("/api/admin/users"),
       add: (data: { username: string; firstName: string; lastName: string; email: string }) =>
-        apiRequest<{ message: string }>("/api/admin/users/add", {
+        adminRequest<{ message: string }>("/api/admin/users/add", {
           method: "POST",
           body: JSON.stringify(data),
         }),
       updateProfile: (data: { id: string; firstName: string; lastName: string; email: string }) =>
-        apiRequest<{ message: string }>("/api/admin/users", {
+        adminRequest<{ message: string }>("/api/admin/users", {
           method: "PUT",
           body: JSON.stringify(data),
         }),
       updateRoles: (data: { id: string; rolesToAdd?: string[]; rolesToRemove?: string[] }) =>
-        apiRequest<{ message: string }>("/api/admin/users", {
+        adminRequest<{ message: string }>("/api/admin/users", {
           method: "POST",
           body: JSON.stringify(data),
         }),
       delete: (userId: string) =>
-        apiRequest<{ success: boolean }>(`/api/admin/users?userId=${userId}`, {
+        adminRequest<{ success: boolean }>(`/api/admin/users?userId=${userId}`, {
           method: "DELETE",
         }),
       getTideLinkUrl: (userId: string, redirectUri?: string) =>
-        apiRequest<{ linkUrl: string }>(`/api/admin/users/tide?userId=${userId}&redirect_uri=${encodeURIComponent(redirectUri || window.location.origin)}`),
+        adminRequest<{ linkUrl: string }>(`/api/admin/users/tide?userId=${userId}&redirect_uri=${encodeURIComponent(redirectUri || window.location.origin)}`),
       getRoles: async (userId: string): Promise<string[]> => {
-        // User roles are now included in the user list response from the server
-        const users = await apiRequest<AdminUser[]>("/api/admin/users");
+        const users = await adminRequest<AdminUser[]>("/api/admin/users");
         const user = users.find(u => u.id === userId);
         return user?.role || [];
       },
       setEnabled: (userId: string, enabled: boolean) =>
-        apiRequest<{ success: boolean; enabled: boolean }>(`/api/admin/users/${userId}/enabled`, {
+        adminRequest<{ success: boolean; enabled: boolean }>(`/api/admin/users/${userId}/enabled`, {
           method: "PUT",
           body: JSON.stringify({ enabled }),
         }),
     },
     roles: {
-      list: () => apiRequest<{ roles: AdminRole[] }>("/api/admin/roles"),
-      listAll: () => apiRequest<{ roles: AdminRole[] }>("/api/admin/roles/all"),
+      list: () => adminRequest<{ roles: AdminRole[] }>("/api/admin/roles"),
+      listAll: () => adminRequest<{ roles: AdminRole[] }>("/api/admin/roles/all"),
       create: (data: { name: string; description?: string; policy?: SshPolicyConfig }) =>
-        apiRequest<{ success: string }>("/api/admin/roles", {
+        adminRequest<{ success: string }>("/api/admin/roles", {
           method: "POST",
           body: JSON.stringify(data),
         }),
       update: (data: { name: string; description?: string }) =>
-        apiRequest<{ success: string }>("/api/admin/roles", {
+        adminRequest<{ success: string }>("/api/admin/roles", {
           method: "PUT",
           body: JSON.stringify(data),
         }),
       delete: (roleName: string) =>
-        apiRequest<{ success: string; approvalCreated: boolean }>(`/api/admin/roles?roleName=${encodeURIComponent(roleName)}`, {
+        adminRequest<{ success: string; approvalCreated: boolean }>(`/api/admin/roles?roleName=${encodeURIComponent(roleName)}`, {
           method: "DELETE",
         }),
       policies: {
@@ -273,74 +269,74 @@ export const api = {
     },
     logs: {
       access: (limit?: number, offset?: number) =>
-        apiRequest<TidecloakEvent[]>(`/api/admin/logs/access?limit=${limit || 100}&offset=${offset || 0}`),
+        adminRequest<TidecloakEvent[]>(`/api/admin/logs/access?limit=${limit || 100}&offset=${offset || 0}`),
       fileOperations: (limit?: number, offset?: number) =>
         apiRequest<{ operations: FileOperationLog[]; total: number }>(
           `/api/admin/logs/file-operations?limit=${limit || 100}&offset=${offset || 0}`
         ),
     },
     accessApprovals: {
-      list: () => apiRequest<AccessApproval[]>("/api/admin/access-approvals"),
+      list: () => adminRequest<AccessApproval[]>("/api/admin/access-approvals"),
       getRaw: (changeSet: ChangeSetRequest) =>
-        apiRequest<{ rawRequests: any[] }>("/api/admin/access-approvals/raw", {
+        adminRequest<{ rawRequests: any[] }>("/api/admin/access-approvals/raw", {
           method: "POST",
           body: JSON.stringify({ changeSet }),
         }),
       approve: (changeSet: ChangeSetRequest, signedRequest?: string) =>
-        apiRequest<{ message: string }>("/api/admin/access-approvals/approve", {
+        adminRequest<{ message: string }>("/api/admin/access-approvals/approve", {
           method: "POST",
           body: JSON.stringify({ changeSet, signedRequest }),
         }),
       approveWithId: (changeSetId: string, actionType: string, changeSetType: string, signedRequest: string) =>
-        apiRequest<{ message: string }>("/api/admin/access-approvals/approve-with-id", {
+        adminRequest<{ message: string }>("/api/admin/access-approvals/approve-with-id", {
           method: "POST",
           body: JSON.stringify({ changeSetId, actionType, changeSetType, signedRequest }),
         }),
       reject: (changeSet: ChangeSetRequest) =>
-        apiRequest<{ message: string }>("/api/admin/access-approvals/reject", {
+        adminRequest<{ message: string }>("/api/admin/access-approvals/reject", {
           method: "POST",
           body: JSON.stringify({ changeSet }),
         }),
       commit: (changeSet: ChangeSetRequest) =>
-        apiRequest<{ message: string }>("/api/admin/access-approvals/commit", {
+        adminRequest<{ message: string }>("/api/admin/access-approvals/commit", {
           method: "POST",
           body: JSON.stringify({ changeSet }),
         }),
       cancel: (changeSet: ChangeSetRequest) =>
-        apiRequest<{ message: string }>("/api/admin/access-approvals/cancel", {
+        adminRequest<{ message: string }>("/api/admin/access-approvals/cancel", {
           method: "POST",
           body: JSON.stringify({ changeSet }),
         }),
     },
     roleApprovals: {
-      list: () => apiRequest<RoleApproval[]>("/api/admin/role-approvals"),
+      list: () => adminRequest<RoleApproval[]>("/api/admin/role-approvals"),
       getRaw: (changeSet: ChangeSetRequest) =>
-        apiRequest<{ rawRequests: any[] }>("/api/admin/role-approvals/raw", {
+        adminRequest<{ rawRequests: any[] }>("/api/admin/role-approvals/raw", {
           method: "POST",
           body: JSON.stringify({ changeSet }),
         }),
       approve: (changeSet: ChangeSetRequest, signedRequest?: string) =>
-        apiRequest<{ message: string }>("/api/admin/role-approvals/approve", {
+        adminRequest<{ message: string }>("/api/admin/role-approvals/approve", {
           method: "POST",
           body: JSON.stringify({ changeSet, signedRequest }),
         }),
       approveWithId: (changeSetId: string, actionType: string, changeSetType: string, signedRequest: string) =>
-        apiRequest<{ message: string }>("/api/admin/role-approvals/approve-with-id", {
+        adminRequest<{ message: string }>("/api/admin/role-approvals/approve-with-id", {
           method: "POST",
           body: JSON.stringify({ changeSetId, actionType, changeSetType, signedRequest }),
         }),
       reject: (changeSet: ChangeSetRequest) =>
-        apiRequest<{ message: string }>("/api/admin/role-approvals/reject", {
+        adminRequest<{ message: string }>("/api/admin/role-approvals/reject", {
           method: "POST",
           body: JSON.stringify({ changeSet }),
         }),
       commit: (changeSet: ChangeSetRequest) =>
-        apiRequest<{ message: string }>("/api/admin/role-approvals/commit", {
+        adminRequest<{ message: string }>("/api/admin/role-approvals/commit", {
           method: "POST",
           body: JSON.stringify({ changeSet }),
         }),
       cancel: (changeSet: ChangeSetRequest) =>
-        apiRequest<{ message: string }>("/api/admin/role-approvals/cancel", {
+        adminRequest<{ message: string }>("/api/admin/role-approvals/cancel", {
           method: "POST",
           body: JSON.stringify({ changeSet }),
         }),

@@ -18,7 +18,6 @@ import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 import { RefreshButton } from "@/components/RefreshButton";
 import { VpnPanel } from "@/components/VpnPanel";
 import { IAMService } from "@tidecloak/js";
-import { appFetch } from "@/lib/appFetch";
 import { api, type GatewayEndpoint } from "@/lib/api";
 import { lazy, Suspense } from "react";
 const AdminServers = lazy(() => import("@/pages/AdminServers"));
@@ -1072,12 +1071,8 @@ export default function Dashboard() {
   }, [refetchServers, refetchSessions, refetchGatewayEndpoints]);
 
   const terminateSession = useCallback(async (sessionId: string) => {
-    const token = await IAMService.getToken();
-    if (!token) return;
-
-    await appFetch(`${window.location.origin}/api/sessions/${sessionId}`, {
+    await IAMService.fetch(`${window.location.origin}/api/sessions/${sessionId}`, {
       method: "DELETE",
-      headers: { Authorization: `Bearer ${token}` },
     });
     await refetchSessions();
   }, [refetchSessions]);

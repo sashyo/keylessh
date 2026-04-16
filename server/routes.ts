@@ -124,6 +124,7 @@ import {
 } from "./auth";
 import {
   getDelegation,
+  getDelegationCertThumbprint,
 } from "./lib/tidecloakApi";
 import type { ChangeSetRequest, AccessApproval } from "./lib/auth/keycloakTypes";
 import { getAllowedSshUsersFromToken } from "./lib/auth/sshUsers";
@@ -335,7 +336,10 @@ export async function registerRoutes(
   app.get("/api/auth/config", (_req, res) => {
     try {
       const config = GetConfig();
-      res.json(config);
+      res.json({
+        ...config,
+        delegationCertThumbprint: getDelegationCertThumbprint(),
+      });
     } catch (error) {
       log(`Failed to load auth config: ${error}`);
       res.status(500).json({ error: "Failed to load authentication configuration" });
@@ -4465,12 +4469,8 @@ export async function registerRoutes(
     }
   );
 
-  // ============================================
-  // Delegation Token Exchange (forgetful interrupt pattern)
-  // ============================================
-
-  // POST /api/delegation — handles delegation signatures from browser
-  app.post("/api/delegation", authenticate, getDelegation().handleDelegation());
+  // Delegation is now handled inline via inlineDelegation() middleware.
+  // The client signs a delegation request and sends it as X-Delegation-Request header.
 
   return httpServer;
 }

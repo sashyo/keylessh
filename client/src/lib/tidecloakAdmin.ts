@@ -1,11 +1,10 @@
 /**
  * Client-side TideCloak Admin API — calls TideCloak directly from the browser
- * using appFetch (DPoP-secured).
+ * using IAMService.fetch() (handles DPoP + delegation automatically).
  *
  * Requires TideCloak CORS to allow the app origin.
  */
 import { IAMService } from "@tidecloak/js";
-import { appFetch } from "./appFetch";
 
 // Lazy-loaded config from /api/auth/config
 let _config: { realm: string; "auth-server-url": string; resource: string } | null = null;
@@ -30,19 +29,16 @@ async function getClientId() {
 
 /**
  * Fetch wrapper for TideCloak admin API calls from the browser.
- * Uses appFetch which handles DPoP proof generation.
+ * Uses IAMService.fetch() which handles auth automatically.
  */
 async function tcFetch<T = any>(path: string, options: RequestInit = {}): Promise<T> {
   const base = await getTcUrl();
   const url = `${base}${path}`;
 
-  // secureFetch only adds DPoP when it sees Authorization: Bearer <our token>
-  const token = await IAMService.getToken();
-  const response = await appFetch(url, {
+  const response = await IAMService.fetch(url, {
     ...options,
     headers: {
       accept: "application/json",
-      Authorization: `Bearer ${token}`,
       ...((options.headers as Record<string, string>) || {}),
     },
   });
@@ -487,7 +483,7 @@ export async function addApprovalToChangeRequest(changeSet: ChangeSetRequest): P
   const token = await IAMService.getToken();
   const base = await getTcUrl();
   const url = `${base}/tideAdminResources/add-review`;
-  const response = await appFetch(url, { method: "POST", body: formData, headers: { Authorization: `Bearer ${token}` } });
+  const response = await IAMService.fetch(url, { method: "POST", body: formData });
   if (!response.ok) throw new Error(`Error adding approval: ${await response.text()}`);
 }
 
@@ -500,7 +496,7 @@ export async function addRejectionToChangeRequest(changeSet: ChangeSetRequest): 
   const token = await IAMService.getToken();
   const base = await getTcUrl();
   const url = `${base}/tideAdminResources/add-rejection`;
-  const response = await appFetch(url, { method: "POST", body: formData, headers: { Authorization: `Bearer ${token}` } });
+  const response = await IAMService.fetch(url, { method: "POST", body: formData });
   if (!response.ok) throw new Error(`Error adding rejection: ${await response.text()}`);
 }
 
@@ -541,7 +537,7 @@ export async function addApprovalWithSignedRequest(
   const token = await IAMService.getToken();
   const base = await getTcUrl();
   const url = `${base}/tideAdminResources/add-review`;
-  const response = await appFetch(url, { method: "POST", body: formData, headers: { Authorization: `Bearer ${token}` } });
+  const response = await IAMService.fetch(url, { method: "POST", body: formData });
   if (!response.ok) throw new Error(`Error adding approval with signed request: ${await response.text()}`);
 }
 
