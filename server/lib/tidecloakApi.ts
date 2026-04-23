@@ -9,7 +9,7 @@ import { Roles } from "@shared/config/roles";
 import fs from "fs";
 import path from "path";
 import { getAuthOverrideUrl, getRealm, getResource } from "./auth/tidecloakConfig";
-import { TideDelegation } from "@tidecloak/server";
+import { TideDelegation } from "asgard-tide/node";
 
 // Lazy-evaluated getters to avoid calling config functions at module load time
 const getKeycloakAuthServer = () => getAuthOverrideUrl();
