@@ -394,3 +394,33 @@ echo "✅ CustomAdminUIDomain updated + signed."
 
 echo ""
 echo "🎉 Tidecloak initialization complete!"
+
+# ============================================
+# Final UX: tell the user how to launch the admin UI
+# ============================================
+TIDE_ADMIN_UI_PATH="${TIDE_ADMIN_UI_PATH:-/home/sasha/project/tide-admin-ui-next}"
+
+# Respect NO_COLOR and non-TTY stdout
+if [ -n "$NO_COLOR" ] || [ ! -t 1 ]; then
+    C_BOLD=""
+    C_GREEN=""
+    C_CYAN=""
+    C_RESET=""
+else
+    C_BOLD=$'\033[1m'
+    C_GREEN=$'\033[0;32m'
+    C_CYAN=$'\033[0;36m'
+    C_RESET=$'\033[0m'
+fi
+
+echo ""
+echo "${C_GREEN}────────────────────────────────────────────────────────────────${C_RESET}"
+echo "${C_GREEN}✅ Realm '${C_BOLD}${REALM_NAME}${C_RESET}${C_GREEN}' is ready.${C_RESET}"
+echo ""
+echo "Start the admin UI:"
+echo ""
+echo "    ${C_CYAN}cd ${TIDE_ADMIN_UI_PATH}${C_RESET}"
+echo "    ${C_CYAN}VITE_REALM=${REALM_NAME} pnpm dev${C_RESET}"
+echo ""
+echo "Then open ${C_CYAN}http://localhost:5173${C_RESET} and log in as the admin user."
+echo "${C_GREEN}────────────────────────────────────────────────────────────────${C_RESET}"

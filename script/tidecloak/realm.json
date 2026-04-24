@@ -1,5 +1,5 @@
 {
-    "realm": "keylessh",
+    "realm": "KEYLESSH",
     "accessTokenLifespan": 600,
     "enabled": true,
     "sslRequired": "external",
