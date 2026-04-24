@@ -131,6 +131,27 @@
                     }
                 }
             ]
+        },
+        {
+            "clientId": "tide-admin-console-next",
+            "name": "Tide Admin Console (redesign)",
+            "description": "Standalone admin SPA for tide-admin-ui-next. Port 5173. Uses DPoP + PKCE S256.",
+            "protocol": "openid-connect",
+            "publicClient": true,
+            "standardFlowEnabled": true,
+            "implicitFlowEnabled": false,
+            "directAccessGrantsEnabled": false,
+            "serviceAccountsEnabled": false,
+            "fullScopeAllowed": false,
+            "enabled": true,
+            "clientAuthenticatorType": "client-secret",
+            "redirectUris": ["http://localhost:5173/*"],
+            "webOrigins": ["http://localhost:5173"],
+            "attributes": {
+                "pkce.code.challenge.method": "S256",
+                "dpop.bound.access.tokens": "true",
+                "post.logout.redirect.uris": "http://localhost:5173/*"
+            }
         }
     ],
     "components": {
