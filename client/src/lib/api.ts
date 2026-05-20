@@ -93,9 +93,17 @@ export const api = {
 
     /**
      * Gets the committed policy for a specific role.
+     *
+     * NOTE: role IDs contain `:` (e.g. ssh:Tide-GW:My Server:demo). RFC 3986 allows `:`
+     * in path segments as `pchar`, and the DPoP `htu` canonicalization on this server
+     * keeps colons raw. encodeURIComponent would encode them as %3A, which makes the
+     * server-computed htu diverge from what the DPoP proof signed and yields a 401
+     * with "htu mismatch". So we encode everything else, then restore the colons.
      */
     getByRole: (roleId: string) =>
-      apiRequest<CommittedPolicyResult>(`/api/ssh-policies/committed/${encodeURIComponent(roleId)}`),
+      apiRequest<CommittedPolicyResult>(
+        `/api/ssh-policies/committed/${encodeURIComponent(roleId).replace(/%3A/g, ":")}`,
+      ),
   },
   ssh: {
     getAccessStatus: async () => {
