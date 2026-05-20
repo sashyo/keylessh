@@ -17,6 +17,7 @@ import path from "path";
 const _currentFile = typeof __filename !== "undefined" ? __filename : import.meta.url;
 const require = createRequire(_currentFile);
 const { PolicySignRequest } = require("heimdall-tide");
+const { Tools: { TideMemory } } = require("@tideorg/js");
 
 // Resolve directory of this file (works in both CJS bundle and ESM dev)
 const _currentDir = typeof __dirname !== "undefined"
@@ -2636,24 +2637,36 @@ export async function registerRoutes(
           return res.status(404).json({ error: "Policy not found" });
         }
 
-        // Extract the Policy from the PolicySignRequest and store it WITH the VVK signature
+        // Compose the stored policy bytes from the ORIGINAL DataToVerify the ORK signed.
+        // We MUST NOT call policy.toBytes() — it rebuilds section 0 from fields, which
+        // can byte-differ from the original (PolicyParameters Map ordering, enum casing,
+        // length-prefix encoding). Sign #2 verifies the signature against the raw bytes
+        // of section 0, so any drift here breaks "Policy signature could not be verified".
         let policyDataBase64: string | undefined;
         try {
           const request = PolicySignRequest.decode(base64ToBytes(pendingPolicy.policyRequestData));
-          const policy = request.getRequestedPolicy();
 
-          // CRITICAL: Attach the VVK signature to the policy
-          // The client sends this signature after executing the PolicySignRequest against Ork
+          // request.draft.GetValue(0) = policy.toBytes() at the moment the request was created
+          // (no signature attached yet). Its inner section 0 IS the DataToVerify bytes the
+          // ORK saw and signed during Sign #1.
+          const policyBytesNoSig = request.draft.GetValue(0);
+          const policyMem = new TideMemory(policyBytesNoSig.length);
+          policyMem.set(policyBytesNoSig);
+          const dataToVerify = policyMem.GetValue(0);
+
           if (signature) {
             const signatureBytes = base64ToBytes(signature);
-            policy.signature = signatureBytes;
-            log(`Attached VVK signature to policy (${signatureBytes.length} bytes)`);
+            // Stored policyData layout: TideMemory([ DataToVerify, signature ])
+            // — section 0 byte-identical to what the ORK signed, section 1 = the new signature.
+            const composed = TideMemory.CreateFromArray([dataToVerify, signatureBytes]);
+            policyDataBase64 = bytesToBase64(composed);
+            log(`Composed signed policy: dtv=${dataToVerify.length}B sig=${signatureBytes.length}B total=${composed.length}B`);
           } else {
-            log(`Warning: No signature provided for policy commit`);
+            log(`Warning: No signature provided for policy commit — storing policy without signature`);
+            policyDataBase64 = bytesToBase64(policyBytesNoSig);
           }
 
-          const policyBytes = policy.toBytes();
-          policyDataBase64 = bytesToBase64(policyBytes);
+          const policyBytes = base64ToBytes(policyDataBase64);
 
           // Store the committed policy bytes in ssh_policies table
           await policyStorage.upsertPolicy({
