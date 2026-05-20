@@ -46,11 +46,14 @@ public class Contract : IAccessPolicy
         if (string.IsNullOrWhiteSpace(Role))
             return PolicyDecision.Deny("Role is missing.");
 
-        var parts = Role.Split(':', 2, StringSplitOptions.TrimEntries);
-        if (parts.Length != 2 || parts[1].Length == 0)
-            return PolicyDecision.Deny("Role must be in the form 'prefix:role'.");
+        // Role IDs are gateway-qualified: ssh:<gatewayId>:<serverId>:<sshUser>
+        // (or legacy short-form ssh:<sshUser>). The SSH username we compare against
+        // the challenge is always the LAST colon-separated segment.
+        var lastColon = Role.LastIndexOf(':');
+        if (lastColon < 0 || lastColon == Role.Length - 1)
+            return PolicyDecision.Deny("Role must end with ':<sshUser>'.");
 
-        var userRole = parts[1];
+        var userRole = Role.Substring(lastColon + 1).Trim();
 
         if (ctx == null || ctx.Data == null || ctx.Data.Length == 0)
             return PolicyDecision.Deny("No data provided for SSH challenge validation");
