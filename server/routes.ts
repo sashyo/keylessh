@@ -2660,7 +2660,10 @@ export async function registerRoutes(
             // — section 0 byte-identical to what the ORK signed, section 1 = the new signature.
             const composed = TideMemory.CreateFromArray([dataToVerify, signatureBytes]);
             policyDataBase64 = bytesToBase64(composed);
-            log(`Composed signed policy: dtv=${dataToVerify.length}B sig=${signatureBytes.length}B total=${composed.length}B`);
+            const dtvSha = createHash("sha256").update(dataToVerify).digest("hex");
+            const sigSha = createHash("sha256").update(signatureBytes).digest("hex");
+            const composedSha = createHash("sha256").update(composed).digest("hex");
+            log(`[PolicyTrace SIGN] role=${pendingPolicy.roleId} dtv_len=${dataToVerify.length} dtv_sha=${dtvSha} sig_len=${signatureBytes.length} sig_sha=${sigSha} composed_len=${composed.length} composed_sha=${composedSha}`);
           } else {
             log(`Warning: No signature provided for policy commit — storing policy without signature`);
             policyDataBase64 = bytesToBase64(policyBytesNoSig);
@@ -2885,6 +2888,21 @@ export async function registerRoutes(
         }
 
         log(`[PolicyMatch] Found policy for roleId: ${roleId}`);
+
+        // Log section 0 (DataToVerify) hash so we can compare against SIGN-time hash
+        try {
+          const policyBytes = base64ToBytes(policy.policyData);
+          const policyMem = new TideMemory(policyBytes.length);
+          policyMem.set(policyBytes);
+          const dtvBytes = policyMem.GetValue(0);
+          const sigBytes = policyMem.GetValue(1);
+          const dtvSha = createHash("sha256").update(dtvBytes).digest("hex");
+          const sigSha = sigBytes && sigBytes.length > 0 ? createHash("sha256").update(sigBytes).digest("hex") : "(none)";
+          const totalSha = createHash("sha256").update(policyBytes).digest("hex");
+          log(`[PolicyTrace USE] role=${roleId} dtv_len=${dtvBytes.length} dtv_sha=${dtvSha} sig_len=${sigBytes?.length ?? 0} sig_sha=${sigSha} total_len=${policyBytes.length} total_sha=${totalSha}`);
+        } catch (traceError) {
+          log(`[PolicyTrace USE] role=${roleId} — failed to parse stored bytes: ${traceError}`);
+        }
 
         res.json({
           roleId: policy.roleId,

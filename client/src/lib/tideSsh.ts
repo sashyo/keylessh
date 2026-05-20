@@ -130,6 +130,21 @@ export function createTideSshSigner(): SSHSigner {
 
     // Add the policy if we fetched one (for contract validation in the request model)
     if (policyBytes) {
+      // Trace the policy bytes EXACTLY as fetched — section 0 (DataToVerify) hash should
+      // match the [PolicyTrace SIGN] dtv_sha logged at commit time on the server.
+      const sha256Hex = async (buf: Uint8Array) =>
+        Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", buf as BufferSource)))
+          .map(b => b.toString(16).padStart(2, "0")).join("");
+      const policyMem = new Tools.TideMemory(policyBytes.length);
+      policyMem.set(policyBytes);
+      const dtvBytes = policyMem.GetValue(0);
+      const sigBytes = policyMem.GetValue(1);
+      const [totalSha, dtvSha, sigSha] = await Promise.all([
+        sha256Hex(policyBytes),
+        sha256Hex(dtvBytes),
+        sigBytes && sigBytes.length > 0 ? sha256Hex(sigBytes) : Promise.resolve("(none)"),
+      ]);
+      console.log(`[PolicyTrace ATTACH] role=ssh:${req.username} dtv_len=${dtvBytes.length} dtv_sha=${dtvSha} sig_len=${sigBytes?.length ?? 0} sig_sha=${sigSha} total_len=${policyBytes.length} total_sha=${totalSha}`);
       tideRequest.addPolicy(policyBytes);
       console.log(`[TideSsh] Added policy (${policyBytes.length} bytes)`);
     }
@@ -141,6 +156,7 @@ export function createTideSshSigner(): SSHSigner {
     const initializedRequestBytes = await tc.createTideRequest(tideRequest.encode());
 
     console.log(`[TideSsh] Executing sign request...`);
+    console.log(initializedRequestBytes)
     const sigs: Uint8Array[] = await tc.executeSignRequest(initializedRequestBytes, true);
 
     const sig = sigs?.[0];
