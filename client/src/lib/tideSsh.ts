@@ -82,22 +82,31 @@ export function createTideSshSigner(): SSHSigner {
       throw new Error("Tide signing APIs are not available (createTideRequest/executeSignRequest)");
     }
 
-    // Fetch the committed policy for this SSH user
-    // Policy is matched by role: ssh:<username>
+    // Fetch the committed policy by its fully-qualified role:
+    //   ssh:<gatewayId>:<serverId>:<sshUser>
+    // This must match the role ID that was used at commit time (which itself comes from
+    // the JWT's resource_access roles, e.g. "ssh:Tide-GW:My Server:demo").
+    const roleId = req.gatewayId && req.serverId
+      ? `ssh:${req.gatewayId}:${req.serverId}:${req.username}`
+      : null;
     let policyBytes: Uint8Array | null = null;
-    console.log(`[TideSsh] Fetching policy for SSH user '${req.username}' (role: ssh:${req.username})`);
-    try {
-      const policyResult = await api.sshPolicies.getForSshUser(req.username);
-      console.log(`[TideSsh] API response:`, policyResult);
-      if (policyResult.policyData) {
-        policyBytes = base64ToBytes(policyResult.policyData);
-        console.log(`[TideSsh] Decoded policy bytes: ${policyBytes.length} bytes`);
-      } else {
-        console.warn(`[TideSsh] API returned no policyData for user '${req.username}'`);
+    if (roleId) {
+      console.log(`[TideSsh] Fetching policy for role '${roleId}'`);
+      try {
+        const policyResult = await api.sshPolicies.getByRole(roleId);
+        console.log(`[TideSsh] API response:`, policyResult);
+        if (policyResult.policyData) {
+          policyBytes = base64ToBytes(policyResult.policyData);
+          console.log(`[TideSsh] Decoded policy bytes: ${policyBytes.length} bytes`);
+        } else {
+          console.warn(`[TideSsh] API returned no policyData for role '${roleId}'`);
+        }
+      } catch (err) {
+        console.error(`[TideSsh] Failed to fetch committed policy for role '${roleId}':`, err);
+        // Continue without policy - Ork will reject if policy is required
       }
-    } catch (err) {
-      console.error(`[TideSsh] Failed to fetch committed policy for SSH user '${req.username}':`, err);
-      // Continue without policy - Ork will reject if policy is required
+    } else {
+      console.warn(`[TideSsh] Skipping policy fetch — missing gatewayId or serverId (gatewayId=${req.gatewayId}, serverId=${req.serverId})`);
     }
 
     // New pattern: BasicCustom<SSH>:BasicCustom<1>
@@ -144,7 +153,7 @@ export function createTideSshSigner(): SSHSigner {
         sha256Hex(dtvBytes),
         sigBytes && sigBytes.length > 0 ? sha256Hex(sigBytes) : Promise.resolve("(none)"),
       ]);
-      console.log(`[PolicyTrace ATTACH] role=ssh:${req.username} dtv_len=${dtvBytes.length} dtv_sha=${dtvSha} sig_len=${sigBytes?.length ?? 0} sig_sha=${sigSha} total_len=${policyBytes.length} total_sha=${totalSha}`);
+      console.log(`[PolicyTrace ATTACH] role=${roleId} dtv_len=${dtvBytes.length} dtv_sha=${dtvSha} sig_len=${sigBytes?.length ?? 0} sig_sha=${sigSha} total_len=${policyBytes.length} total_sha=${totalSha}`);
       tideRequest.addPolicy(policyBytes);
       console.log(`[TideSsh] Added policy (${policyBytes.length} bytes)`);
     }
@@ -187,18 +196,25 @@ export function createDynamicTideSshSigner(): SSHSigner {
       throw new Error("Tide signing APIs are not available (createTideRequest/executeSignRequest)");
     }
 
-    // Fetch the committed policy for this SSH user
-    // Policy is matched by role: ssh:<username>
+    // Fetch the committed policy by its fully-qualified role:
+    //   ssh:<gatewayId>:<serverId>:<sshUser>
+    const roleId = req.gatewayId && req.serverId
+      ? `ssh:${req.gatewayId}:${req.serverId}:${req.username}`
+      : null;
     let policyBytes: Uint8Array | null = null;
-    try {
-      const policyResult = await api.sshPolicies.getForSshUser(req.username);
-      if (policyResult.policyData) {
-        policyBytes = base64ToBytes(policyResult.policyData);
-        console.log(`[TideSsh] Fetched policy for SSH user '${req.username}' (role: ${policyResult.roleId}), ${policyBytes.length} bytes`);
+    if (roleId) {
+      try {
+        const policyResult = await api.sshPolicies.getByRole(roleId);
+        if (policyResult.policyData) {
+          policyBytes = base64ToBytes(policyResult.policyData);
+          console.log(`[TideSsh] Fetched policy for role '${roleId}', ${policyBytes.length} bytes`);
+        }
+      } catch (err) {
+        console.warn(`[TideSsh] Failed to fetch committed policy for role '${roleId}':`, err);
+        // Continue without policy - Ork will reject if policy is required
       }
-    } catch (err) {
-      console.warn(`[TideSsh] Failed to fetch committed policy for SSH user '${req.username}':`, err);
-      // Continue without policy - Ork will reject if policy is required
+    } else {
+      console.warn(`[TideSsh] Skipping policy fetch — missing gatewayId or serverId`);
     }
 
     // DynamicCustom pattern: data to sign is in DynamicData

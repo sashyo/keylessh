@@ -160,6 +160,11 @@ export type SSHSignatureRequest = {
   publicKey?: Uint8Array;
   username: string;
   serverId: string;
+  /**
+   * Gateway through which this SSH connection is being made. Required for resolving
+   * the gateway-qualified policy role (`ssh:<gatewayId>:<serverId>:<username>`).
+   */
+  gatewayId?: string;
 };
 
 export type SSHSigner = (req: SSHSignatureRequest) => Promise<Uint8Array>;
@@ -559,6 +564,7 @@ export class BrowserSSHClient {
                   publicKey: publicKey ? new Uint8Array(publicKey) : undefined,
                   username: this.options.username,
                   serverId: this.options.serverId,
+                  gatewayId: this.options.gatewayId,
                 });
                 return Buffer.from(sig);
               }),
