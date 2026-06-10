@@ -73,16 +73,6 @@
                     }
                 },
                 {
-                    "name": "Tide IGA Role Mapper",
-                    "protocol": "openid-connect",
-                    "protocolMapper": "tide-roles-mapper",
-                    "consentRequired": false,
-                    "config": {
-                        "lightweight.claim": "true",
-                        "access.token.claim": "true"
-                    }
-                },
-                {
                     "name": "Tide vuid",
                     "protocol": "openid-connect",
                     "protocolMapper": "oidc-usermodel-attribute-mapper",

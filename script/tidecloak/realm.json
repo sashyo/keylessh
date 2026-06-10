@@ -1,5 +1,5 @@
 {
-    "realm": "KEYLESSH",
+    "realm": "__REALM_NAME__",
     "accessTokenLifespan": 600,
     "enabled": true,
     "sslRequired": "external",
@@ -77,16 +77,6 @@
                     }
                 },
                 {
-                    "name": "Tide IGA Role Mapper",
-                    "protocol": "openid-connect",
-                    "protocolMapper": "tide-roles-mapper",
-                    "consentRequired": false,
-                    "config": {
-                        "lightweight.claim": "true",
-                        "access.token.claim": "true"
-                    }
-                },
-                {
                     "name": "Tide vuid",
                     "protocol": "openid-connect",
                     "protocolMapper": "oidc-usermodel-attribute-mapper",
@@ -119,18 +109,7 @@
                 "token.exchange.standard.flow.enabled": "true",
                 "standard.token.exchange.enabled": true
             },
-            "protocolMappers": [
-                {
-                    "name": "Tide IGA Role Mapper",
-                    "protocol": "openid-connect",
-                    "protocolMapper": "tide-roles-mapper",
-                    "consentRequired": false,
-                    "config": {
-                        "lightweight.claim": "true",
-                        "access.token.claim": "true"
-                    }
-                }
-            ]
+            "protocolMappers": []
         },
         {
             "clientId": "tide-admin-console-next",
