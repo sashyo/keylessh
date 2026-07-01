@@ -1,7 +1,6 @@
 import { createContext, useContext, useState, useEffect, useCallback, useRef, type ReactNode } from "react";
 import { TideCloakContextProvider, useTideCloak } from "@tidecloak/react";
 import { IAMService } from "@tidecloak/js";
-import { setDpopEnabled } from "../lib/appFetch";
 import type { OIDCUser, UserRole, AuthState } from "@shared/schema";
 import { prefetchAdminData } from "../lib/tidecloakAdmin";
 
@@ -420,8 +419,6 @@ function AuthProviderWithTimeout({ children, authConfig }: { children: ReactNode
     useDPoP: { mode: 'strict' as const, alg: 'EdDSA' as const },
   };
 
-  setDpopEnabled(!!(tidecloakConfig as Record<string, any>).useDPoP);
-
   return (
     <TideCloakContextProvider config={tidecloakConfig}>
       <TideCloakAuthBridge authConfig={authConfig}>{children}</TideCloakAuthBridge>
@@ -443,6 +440,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
         const config = await response.json();
         setAuthConfig(config);
+        // Set delegation thumbprint on IAMService so adminFetch() works
+        if (config?.delegationCertThumbprint) {
+          IAMService.setDelegationThumbprint(config.delegationCertThumbprint);
+        }
+        try { localStorage.setItem("auth_config", JSON.stringify(config)); } catch { /* ignore */ }
       } catch (err) {
         console.error("Failed to load auth config:", err);
         setConfigError(err instanceof Error ? err.message : "Failed to load configuration");

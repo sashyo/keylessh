@@ -22,5 +22,6 @@
   "logoUrl": "https://login.dauth.me/realms/keylessh-demo-01/tide-idp-resources/images/LOGO",
   "homeOrkUrl": "https://ork1.tideprotocol.com",
   "client-origin-auth-https://punchd.keylessh.com": "isJMCNTe6zQ0xWhnm6BJ/81qQcE3jW6Xf1coVeYn83Gn25yr7NhcPUPMe3HFJ/VqnCZkJrwpcV4EpyG+no0hBw==",
-  "client-origin-auth-https://demo.keylessh.com": "gBXL+4B/wXKW09QR3GU2MHgQ4ZZHcmh2jKkOZBcZde7B14UCh36IJ/eXxHsVGljEusdJwOQfYKz393AIJL6pDA=="
+  "client-origin-auth-https://demo.keylessh.com": "gBXL+4B/wXKW09QR3GU2MHgQ4ZZHcmh2jKkOZBcZde7B14UCh36IJ/eXxHsVGljEusdJwOQfYKz393AIJL6pDA==",
+  "serverResource": "keylessh-server"
 }

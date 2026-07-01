@@ -6,6 +6,7 @@ import { createServer } from "http";
 import { log } from "./logger";
 import { setupWSBridge } from "./wsBridge";
 import { storage } from "./storage";
+import { initServerIdentity } from "./lib/tidecloakApi";
 
 const app = express();
 const httpServer = createServer(app);
@@ -69,6 +70,15 @@ app.use((req, res, next) => {
 });
 
 (async () => {
+  // Initialize the server-identity mTLS delegation (loads/creates the server
+  // key + requests the server-identity cert if absent). Non-fatal on failure so
+  // the app still boots; admin writes will fail until mTLS is available.
+  try {
+    await initServerIdentity();
+  } catch (err) {
+    log(`[delegation] initServerIdentity failed (continuing): ${err instanceof Error ? err.message : String(err)}`);
+  }
+
   await registerRoutes(httpServer, app);
 
   // Setup embedded WebSocket bridge for local development (when BRIDGE_URL not set)

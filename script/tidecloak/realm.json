@@ -33,8 +33,7 @@
                     "name": "allowConfigDownload",
                     "description": "Allow user to access configuration"
                 }
-            ],
-            "myclient-stun": []
+            ]
         }
     },
     "defaultRole": {
@@ -106,67 +105,21 @@
             ]
         },
         {
-            "clientId": "myclient-stun",
+            "clientId": "keylessh-server",
             "enabled": true,
-            "redirectUris": [
-                "http://localhost:19876/callback",
-                "http://localhost:19876/*",
-                "http://localhost:19876",
-                "https://punchd.keylessh.com",
-                "https://punchd.keylessh.com/*"
-            ],
-            "webOrigins": [
-                "http://localhost:19876",
-                "https://punchd.keylessh.com"
-            ],
-            "standardFlowEnabled": true,
+            "publicClient": false,
+            "clientAuthenticatorType": "tide-mtls",
+            "standardFlowEnabled": false,
             "implicitFlowEnabled": false,
-            "publicClient": true,
+            "directAccessGrantsEnabled": false,
+            "serviceAccountsEnabled": false,
             "fullScopeAllowed": true,
-            "protocolMappers": [
-                {
-                    "name": "Tide User Key",
-                    "protocol": "openid-connect",
-                    "protocolMapper": "oidc-usermodel-attribute-mapper",
-                    "consentRequired": false,
-                    "config": {
-                        "introspection.token.claim": "true",
-                        "userinfo.token.claim": "true",
-                        "user.attribute": "tideUserKey",
-                        "lightweight.claim": "true",
-                        "id.token.claim": "true",
-                        "access.token.claim": "true",
-                        "claim.name": "tideuserkey",
-                        "jsonType.label": "String"
-                    }
-                },
-                {
-                    "name": "Tide IGA Role Mapper",
-                    "protocol": "openid-connect",
-                    "protocolMapper": "tide-roles-mapper",
-                    "consentRequired": false,
-                    "config": {
-                        "lightweight.claim": "true",
-                        "access.token.claim": "true"
-                    }
-                },
-                {
-                    "name": "Tide vuid",
-                    "protocol": "openid-connect",
-                    "protocolMapper": "oidc-usermodel-attribute-mapper",
-                    "consentRequired": false,
-                    "config": {
-                        "introspection.token.claim": "true",
-                        "userinfo.token.claim": "true",
-                        "user.attribute": "vuid",
-                        "lightweight.claim": "true",
-                        "id.token.claim": "true",
-                        "access.token.claim": "true",
-                        "claim.name": "vuid",
-                        "jsonType.label": "String"
-                    }
-                }
-            ]
+            "attributes": {
+                "tls.client.certificate.bound.access.tokens": "true",
+                "token.exchange.standard.flow.enabled": "true",
+                "standard.token.exchange.enabled": true
+            },
+            "protocolMappers": []
         }
     ],
     "components": {

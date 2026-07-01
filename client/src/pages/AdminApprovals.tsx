@@ -30,7 +30,6 @@ import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
 import { queryClient } from "@/lib/queryClient";
 import { api, AccessApproval, RoleApproval, PendingSshPolicy, SshPolicyDecision } from "@/lib/api";
-import * as tc from "@/lib/tidecloakAdmin";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 import { CheckSquare, X, Upload, User, Shield, FileKey, Eye, Check, Clock, CheckCircle2, XCircle, ChevronDown, ChevronRight, Code, Trash2, Undo2, Users } from "lucide-react";
 import { SSH_FORSETI_CONTRACT } from "@/lib/sshPolicy";
@@ -815,40 +814,13 @@ function PolicyApprovalsTab({ isActive }: { isActive: boolean }) {
       // Dynamic import to avoid loading heimdall-tide at page mount
       const { PolicySignRequest } = await import("heimdall-tide");
 
-      // Fetch the tide-realm-admin authorization policy that the ORK PreSign
-      // requires attached to a policy-commit model. We attach it here, right
-      // before signing, so the model ALWAYS carries its policy. This uses the
-      // CLIENT-DIRECT DPoP path (tc.getAdminPolicy -> tcFetch, the same DPoP-
-      // authenticated mechanism the CR approve/commit ops use). The server-relay
-      // path (api.admin.sshPolicies.getAdminPolicy) 401s because the forwarded
-      // plain Bearer token has no DPoP proof and iga-core's admin surface rejects
-      // it. Without the policy the ORK rejects with "Model does not have a policy
-      // passed with it".
-      let adminPolicyBytes: Uint8Array | null = null;
-      try {
-        const adminPolicyB64 = await tc.getAdminPolicy();
-        if (adminPolicyB64) {
-          adminPolicyBytes = base64ToBytes(adminPolicyB64);
-        }
-      } catch (e) {
-        console.error("Failed to fetch admin policy for commit:", e);
-      }
-      if (!adminPolicyBytes) {
-        throw new Error(
-          "Could not fetch the tide-realm-admin policy required to commit. The ORK will reject the sign request without it."
-        );
-      }
-
       for (const policy of policiesToCommit) {
         try {
           // Decode the stored request into a PolicySignRequest object
+          // This is critical - the PolicySignRequest.encode() method
+          // properly attaches the policy to the request for Ork
           const requestBytes = base64ToBytes(policy.policyRequestData);
           const policyRequest = PolicySignRequest.decode(requestBytes);
-
-          // Attach the admin authorization policy to the model so the ORK
-          // PreSign has its policy (idempotent if it was already attached
-          // server-side at list time). addPolicy lives on BaseTideRequest.
-          (policyRequest as any).addPolicy(adminPolicyBytes);
 
           // Re-encode to get the properly formatted request with policy attached
           const signatures = await executeTideRequest(policyRequest.encode());

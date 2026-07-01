@@ -6,7 +6,10 @@ import {
   UserRepresentation,
 } from "./auth/keycloakTypes";
 import { Roles } from "@shared/config/roles";
+import fs from "fs";
+import path from "path";
 import { getAuthOverrideUrl, getRealm, getResource } from "./auth/tidecloakConfig";
+import { TideDelegation } from "asgard-tide/node";
 
 // Lazy-evaluated getters to avoid calling config functions at module load time
 const getKeycloakAuthServer = () => getAuthOverrideUrl();
@@ -98,8 +101,20 @@ const CLIENT_CACHE_TTL = 300_000; // 5 minutes — clients rarely change
 //      512 chars: it is the detached 64-byte Ed25519 signature (Base64, ~88
 //      chars) that keylessh already produced via the enclave/ORK sign — NOT the
 //      combined blob. The combined signed blob rides in `policy` (uncapped TEXT).
+// Since the server-side delegation refactor (asgard server-identity), the two
+// iga-core writes (/iga/forseti-contracts, /iga/role-policies) go through the
+// cert-bound delegation helper attached to the request by
+// getDelegation().requireDelegation() — req.delegation. Its `.fetch` carries the
+// delegated admin token over the mTLS channel, parses JSON, and throws on
+// non-2xx, so the mirror authenticates the same way every server-side admin op
+// does.
+export interface DelegationFetch {
+  token: string;
+  fetch: (url: string, opts?: { method?: string; body?: any; formData?: any }) => Promise<any>;
+}
+
 export const syncPolicyToTideCloak = async (
-  token: string,
+  delegation: DelegationFetch,
   policy: {
     roleId: string;
     contractCode?: string;
@@ -117,23 +132,12 @@ export const syncPolicyToTideCloak = async (
   let contractId: string | undefined;
   if (policy.contractCode) {
     const contractUrl = `${getTcUrl()}/iga/forseti-contracts`;
-    const contractResp = await fetch(contractUrl, {
+    // delegation.fetch returns the parsed JSON body and throws on non-2xx.
+    const contractBody = await delegation.fetch(contractUrl, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({ contractCode: policy.contractCode, name: policy.roleId }),
+      body: { contractCode: policy.contractCode, name: policy.roleId },
     });
-    const contractText = await contractResp.text();
-    if (!contractResp.ok) {
-      throw new Error(`Error upserting forseti contract: ${contractResp.status} ${contractText}`);
-    }
-    try {
-      contractId = JSON.parse(contractText)?.id;
-    } catch {
-      /* leave contractId undefined if body is not JSON */
-    }
+    contractId = contractBody?.id;
   }
 
   // Step 2: upsert the role policy keyed by the role NAME.
@@ -151,21 +155,8 @@ export const syncPolicyToTideCloak = async (
     policyData: policy.policyData,
   };
   console.log(`[PolicySync] POST ${url}`, JSON.stringify({ ...body, policy: "<redacted>", policySig: "<redacted>", policyData: "<redacted>" }));
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
-    },
-    body: JSON.stringify(body),
-  });
-
-  const responseBody = await response.text();
-  console.log(`[PolicySync] Response: ${response.status}`);
-
-  if (!response.ok) {
-    throw new Error(`Error syncing policy to TideCloak: ${response.status} ${responseBody}`);
-  }
+  await delegation.fetch(url, { method: "POST", body });
+  console.log(`[PolicySync] role-policy mirror upserted for ${policy.roleId}`);
 };
 
 // NOTE: the tide-realm-admin admin policy that the ORK PreSign requires is now
@@ -762,51 +753,128 @@ export const GetAllRoles = async (
 //   draftRecordId -> id ; changeSetType -> entityType ; payload -> rows[] ;
 //   state -> status (PENDING/APPROVED/DENIED/CANCELLED). actionType UNCHANGED.
 // requireManageRealm (admin bearer token).
-const getPendingChangeRequests = async (token: string): Promise<any[]> => {
-  const response = await fetch(
-    `${getTcUrl()}/iga/change-requests?status=PENDING`,
-    {
-      method: "GET",
-      headers: {
-        accept: "application/json",
-        Authorization: `Bearer ${token}`,
-      },
-    }
-  );
+const getPendingChangeRequests = async (delegation: DelegationFetch): Promise<any[]> => {
+  // delegation.fetch returns the parsed JSON body and throws on non-2xx.
+  return (await delegation.fetch(`${getTcUrl()}/iga/change-requests?status=PENDING`)) || [];
+};
 
-  if (!response.ok) {
-    const errorBody = await response.text();
-    console.error(`Error getting change requests: ${response.statusText}`);
-    throw new Error(`Error getting change requests: ${errorBody}`);
-  }
+// ── Server-side CR display name resolution (port of client commit 13d501d) ──
+// The new iga-core CRs carry the target user/role/client under `rows` (DB-row
+// shaped, UPPERCASE columns that vary by actionType) — GRANT_ROLES rows hold
+// only USER_ID/ROLE_ID UUIDs. Because the admin UI is now SERVER-routed, the
+// name resolution that used to run client-side must run here, or the CR list
+// shows "Unknown". We resolve UUIDs against server-fetched user/role/client
+// lists and inject userRecord/role/compositeRole/clientId onto `data`.
+interface CrLookups {
+  usersById: Map<string, UserRepresentation>;
+  rolesById: Map<string, RoleRepresentation>;
+  clientIdByUuid: Map<string, string>;
+}
 
-  return await response.json();
+const buildCrLookups = async (delegation: DelegationFetch): Promise<CrLookups> => {
+  const tcBase = getTcUrl();
+  const [users, appClients, rmClients] = await Promise.all([
+    delegation.fetch(`${tcBase}/users?briefRepresentation=false`).catch(() => [] as any[]),
+    delegation.fetch(`${tcBase}/clients?clientId=${getResource()}`).catch(() => [] as any[]),
+    delegation.fetch(`${tcBase}/clients?clientId=${REALM_MGMT}`).catch(() => [] as any[]),
+  ]);
+  const appClient = Array.isArray(appClients) && appClients.length ? appClients[0] : null;
+  const rmClient = Array.isArray(rmClients) && rmClients.length ? rmClients[0] : null;
+
+  // Resolve roles from both the app client and realm-management so GRANT_ROLES
+  // ROLE_IDs (app roles AND tide-realm-admin) map to names.
+  const roleFetches: Promise<any[]>[] = [];
+  if (appClient?.id) roleFetches.push(delegation.fetch(`${tcBase}/clients/${appClient.id}/roles`).catch(() => []));
+  if (rmClient?.id) roleFetches.push(delegation.fetch(`${tcBase}/clients/${rmClient.id}/roles`).catch(() => []));
+  const roleLists = await Promise.all(roleFetches);
+  const roles: any[] = ([] as any[]).concat(...roleLists);
+
+  const usersById = new Map<string, UserRepresentation>();
+  for (const u of (Array.isArray(users) ? users : [])) if (u.id) usersById.set(u.id, u);
+  const rolesById = new Map<string, RoleRepresentation>();
+  for (const r of roles) if (r.id) rolesById.set(r.id, r);
+  const clientIdByUuid = new Map<string, string>();
+  if (appClient?.id) clientIdByUuid.set(appClient.id, appClient.clientId || getResource());
+  if (rmClient?.id) clientIdByUuid.set(rmClient.id, rmClient.clientId || REALM_MGMT);
+  return { usersById, rolesById, clientIdByUuid };
+};
+
+// Pull display User / Role / Client out of a CR's `rows`.
+//   GRANT_ROLES : [{ USER_ID, ROLE_ID }]              (UUIDs only, resolve)
+//   CREATE_USER : [{ ID, USERNAME, REP_JSON, ... }]   (USERNAME present)
+//   CREATE_ROLE : [{ ID, NAME, CLIENT_ID, ... }]      (NAME + CLIENT_ID present)
+const extractCrDisplay = (
+  d: any,
+  lk: CrLookups
+): { userRecord: { username: string }[]; role: string; compositeRole: string | undefined; clientId: string } => {
+  const rows: any[] = Array.isArray(d.rows) ? d.rows : [];
+  const row = rows[0] || {};
+
+  const userId = row.USER_ID || row.ID || d.entityId;
+  const username: string | undefined = row.USERNAME || (userId ? lk.usersById.get(userId)?.username : undefined);
+
+  const roleId = row.ROLE_ID || (d.entityType === "ROLE" ? row.ID || d.entityId : undefined);
+  const resolvedRole = roleId ? lk.rolesById.get(roleId) : undefined;
+  const role: string | undefined = row.NAME || resolvedRole?.name;
+  const compositeRole: string | undefined = resolvedRole?.composite ? resolvedRole?.name : undefined;
+
+  const containerUuid = row.CLIENT_UUID || (resolvedRole as any)?.containerId;
+  const clientId: string | undefined = row.CLIENT_ID || (containerUuid ? lk.clientIdByUuid.get(containerUuid) : undefined);
+
+  return {
+    userRecord: username ? [{ username }] : [],
+    role: role || "Unknown",
+    compositeRole,
+    clientId: clientId || "Unknown",
+  };
 };
 
 // Map an IgaChangeRequestRepresentation to keylessh's {data, retrievalInfo}
-// shape. retrievalInfo carries the renamed fields (id / entityType). `data` is
-// the raw representation; callers read d.id and d.status/d.rows off it.
-const toRetrieval = (d: any): { data: any; retrievalInfo: ChangeSetRequest } => ({
-  data: d,
-  retrievalInfo: {
-    changeSetId: d.id,
-    changeSetType: d.entityType,
-    actionType: d.actionType,
-  } as ChangeSetRequest,
-});
+// shape, injecting resolved display fields (userRecord/role/compositeRole/
+// clientId) onto `data` so the route/UI can render names instead of "Unknown".
+const toRetrieval = (
+  d: any,
+  lk: CrLookups
+): { data: any; retrievalInfo: ChangeSetRequest } => {
+  const display = extractCrDisplay(d, lk);
+  return {
+    // Alias the legacy field names the route/UI mappers read (draftRecordId /
+    // changeSetType) from the new rep, and inject the resolved display fields.
+    data: {
+      ...d,
+      draftRecordId: d.id,
+      changeSetType: d.entityType,
+      userRecord: display.userRecord,
+      role: display.role,
+      compositeRole: display.compositeRole,
+      clientId: display.clientId,
+    },
+    retrievalInfo: {
+      changeSetId: d.id,
+      changeSetType: d.entityType,
+      actionType: d.actionType,
+    } as ChangeSetRequest,
+  };
+};
 
 export const GetUserChangeRequests = async (
-  token: string
+  delegation: DelegationFetch
 ): Promise<{ data: any; retrievalInfo: ChangeSetRequest }[]> => {
-  const all = await getPendingChangeRequests(token);
-  return all.filter((d: any) => d.entityType === "USER").map(toRetrieval);
+  const all = await getPendingChangeRequests(delegation);
+  const userCrs = all.filter((d: any) => d.entityType === "USER");
+  if (userCrs.length === 0) return [];
+  const lk = await buildCrLookups(delegation);
+  return userCrs.map((d) => toRetrieval(d, lk));
 };
 
 export const GetRoleChangeRequests = async (
-  token: string
+  delegation: DelegationFetch
 ): Promise<{ data: any; retrievalInfo: ChangeSetRequest }[]> => {
-  const all = await getPendingChangeRequests(token);
-  return all.filter((d: any) => d.entityType === "ROLE").map(toRetrieval);
+  const all = await getPendingChangeRequests(delegation);
+  const roleCrs = all.filter((d: any) => d.entityType === "ROLE");
+  if (roleCrs.length === 0) return [];
+  const lk = await buildCrLookups(delegation);
+  return roleCrs.map((d) => toRetrieval(d, lk));
 };
 
 // Response of the multiAdmin phase-1 /approve call.
@@ -985,3 +1053,54 @@ export const AddApprovalWithSignedRequest = async (
   return;
 };
 
+
+// ============================================
+// Server-side delegation (mTLS server identity)
+// ============================================
+// Admin writes to TideCloak's /iga/* and /admin/* surface authenticate via a
+// cert-bound delegation token exchanged over mTLS, NOT a forwarded browser
+// Bearer/DPoP token. The keylessh server holds a server-identity certificate
+// (SPIFFE SVID) issued by the realm; getDelegation() lazily builds the
+// TideDelegation instance from the adapter config (data/tidecloak.json).
+
+// Lazy TideDelegation instance (vault-backed mTLS)
+let _delegation: TideDelegation | null = null;
+export function getDelegation(): TideDelegation {
+  if (!_delegation) {
+    const adapterPath = path.join(process.cwd(), "data", "tidecloak.json");
+    // Read the server client ID from the adapter JSON if available.
+    let serverClientId: string | undefined;
+    try {
+      const adapter = JSON.parse(fs.readFileSync(adapterPath, "utf-8"));
+      serverClientId = adapter.serverResource;
+      console.log(`[delegation] adapterPath=${adapterPath} serverClientId=${serverClientId}`);
+    } catch (e: any) {
+      console.warn(`[delegation] Could not read adapter: ${adapterPath} - ${e.message}`);
+    }
+
+    _delegation = new TideDelegation({
+      tidecloakUrl: getAuthOverrideUrl(),
+      realm: getRealm(),
+      clientId: getResource(),
+      serverClientId,
+      adapterJsonPath: adapterPath,
+    });
+  }
+  return _delegation;
+}
+
+// Initialize vault-backed key management on startup (loads/creates the server
+// key, requests the server-identity cert if absent, wires the mTLS agent).
+export async function initServerIdentity() {
+  const delegation = getDelegation();
+  await delegation.init();
+  console.log(`[delegation] mTLS enabled: ${delegation.isMtlsEnabled()}`);
+}
+
+/**
+ * Get the server's cert thumbprint for clients to include in delegation
+ * requests. Returns null if mTLS is not configured.
+ */
+export function getDelegationCertThumbprint(): string | null {
+  return getDelegation().getCertThumbprint();
+}

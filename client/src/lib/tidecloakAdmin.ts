@@ -1,11 +1,10 @@
 /**
  * Client-side TideCloak Admin API — calls TideCloak directly from the browser
- * using appFetch (DPoP-secured).
+ * using IAMService.fetch() (handles DPoP + delegation automatically).
  *
  * Requires TideCloak CORS to allow the app origin.
  */
 import { IAMService } from "@tidecloak/js";
-import { appFetch } from "./appFetch";
 
 // Lazy-loaded config from /api/auth/config
 let _config: { realm: string; "auth-server-url": string; resource: string } | null = null;
@@ -30,19 +29,16 @@ async function getClientId() {
 
 /**
  * Fetch wrapper for TideCloak admin API calls from the browser.
- * Uses appFetch which handles DPoP proof generation.
+ * Uses IAMService.fetch() which handles auth automatically.
  */
 async function tcFetch<T = any>(path: string, options: RequestInit = {}): Promise<T> {
   const base = await getTcUrl();
   const url = `${base}${path}`;
 
-  // secureFetch only adds DPoP when it sees Authorization: Bearer <our token>
-  const token = await IAMService.getToken();
-  const response = await appFetch(url, {
+  const response = await IAMService.fetch(url, {
     ...options,
     headers: {
       accept: "application/json",
-      Authorization: `Bearer ${token}`,
       ...((options.headers as Record<string, string>) || {}),
     },
   });
@@ -454,139 +450,39 @@ export async function getClientEvents(first: number = 0, max: number = 100): Pro
 // Change Set / Approval Operations
 // ============================================
 
-// Repointed to the consolidated iga-core surface (the old /tide-admin/change-set/*
-// + /tideAdminResources/add-review|add-rejection endpoints were removed). This is
-// the LIVE admin-UI CR path (AdminApprovals.tsx -> api.ts -> here), running
-// client-direct over the DPoP-bound admin token via tcFetch (NO mTLS/delegation).
-// The /iga/* admin endpoints require a manage-realm-capable token, which the
-// admin-console user's token carries. The enclave-sign round-trip shape
-// (getRawChangeSetRequest -> sign -> addApprovalWithSignedRequest) is preserved.
-
-// GET /iga/change-requests?status=PENDING returns a flat list for ALL entity
-// types; filter by entityType here. Field renames vs the old surface:
-//   draftRecordId -> id ; changeSetType -> entityType ; state -> status.
-// The api.ts list mappers read item.data.draftRecordId, so we alias id ->
-// draftRecordId on the `data` object to keep them working unchanged.
-async function getPendingChangeRequests(): Promise<any[]> {
+// NEW iga-core: one GET /iga/change-requests?status=PENDING for all entity
+// types; filter client-side by entityType. Renames: draftRecordId -> id ;
+// changeSetType -> entityType ; actionType UNCHANGED.
+async function listPendingChangeRequests(): Promise<any[]> {
   return tcFetch<any[]>("/iga/change-requests?status=PENDING");
 }
 
-// Lookups the display mappers need to turn the new `rows` (which carry only
-// UUIDs for GRANT_ROLES) back into human-readable User / Role / Client values.
-interface CrLookups {
-  usersById: Map<string, UserRepresentation>;
-  rolesById: Map<string, RoleRepresentation>;
-  clientIdByUuid: Map<string, string>;
-}
-
-async function buildCrLookups(): Promise<CrLookups> {
-  const [users, roles, appClientId] = await Promise.all([
-    getUsers().catch(() => [] as UserRepresentation[]),
-    getAllRoles().catch(() => [] as RoleRepresentation[]),
-    getClientId(),
-  ]);
-  const usersById = new Map<string, UserRepresentation>();
-  for (const u of users) if (u.id) usersById.set(u.id, u);
-  const rolesById = new Map<string, RoleRepresentation>();
-  for (const r of roles) if (r.id) rolesById.set(r.id, r);
-
-  // Map a role's container (client) UUID to its clientId string so a
-  // resolved role can name its client. Only the two clients we ever touch
-  // (the app client + realm-management) need resolving.
-  const clientIdByUuid = new Map<string, string>();
-  const [appClient, rmClient] = await Promise.all([
-    getClientByClientId(appClientId).catch(() => null),
-    getClientByClientId(REALM_MGMT).catch(() => null),
-  ]);
-  if (appClient?.id) clientIdByUuid.set(appClient.id, appClient.clientId || appClientId);
-  if (rmClient?.id) clientIdByUuid.set(rmClient.id, rmClient.clientId || REALM_MGMT);
-  return { usersById, rolesById, clientIdByUuid };
-}
-
-// Pull display-friendly User / Role / Client out of the new iga-core CR `rows`.
-// `rows` is DB-row shaped with UPPERCASE column names that vary by actionType:
-//   GRANT_ROLES : [{ USER_ID, ROLE_ID }]              (UUIDs only, resolve to names)
-//   CREATE_USER : [{ ID, USERNAME, REP_JSON, ... }]   (USERNAME present)
-//   CREATE_ROLE : [{ ID, NAME, CLIENT_ID, ... }]      (NAME + CLIENT_ID present)
-function extractCrDisplay(d: any, lk: CrLookups): {
-  userRecord: { username: string }[];
-  role: string;
-  compositeRole: string | undefined;
-  clientId: string;
-} {
-  const rows: any[] = Array.isArray(d.rows) ? d.rows : [];
-  const row = rows[0] || {};
-  let username: string | undefined;
-  let role: string | undefined;
-  let compositeRole: string | undefined;
-  let clientId: string | undefined;
-
-  // User: prefer an explicit USERNAME (CREATE_USER), else resolve USER_ID.
-  const userId = row.USER_ID || row.ID || d.entityId;
-  username = row.USERNAME || (userId ? lk.usersById.get(userId)?.username : undefined);
-
-  // Role: prefer an explicit NAME (CREATE_ROLE), else resolve ROLE_ID.
-  const roleId = row.ROLE_ID || (d.entityType === "ROLE" ? row.ID || d.entityId : undefined);
-  const resolvedRole = roleId ? lk.rolesById.get(roleId) : undefined;
-  role = row.NAME || resolvedRole?.name;
-  compositeRole = resolvedRole?.composite ? resolvedRole?.name : undefined;
-
-  // Client: explicit CLIENT_ID (CREATE_ROLE), else the resolved role's container.
-  const containerUuid = row.CLIENT_UUID || resolvedRole?.containerId;
-  clientId = row.CLIENT_ID || (containerUuid ? lk.clientIdByUuid.get(containerUuid) : undefined);
-
-  return {
-    userRecord: username ? [{ username }] : [],
-    role: role || "Unknown",
-    compositeRole,
-    clientId: clientId || "Unknown",
-  };
-}
-
-function toRetrieval(d: any, lk: CrLookups) {
-  const display = extractCrDisplay(d, lk);
-  return {
-    // Preserve the legacy `data` field names the api.ts mappers read
-    // (draftRecordId / changeSetType), aliased from the new rep. Also inject
-    // the display fields (userRecord / role / compositeRole / clientId) the
-    // api.ts list mappers pull out of the OLD payload shape, recomputed from
-    // the new `rows`/`entityType`.
-    data: {
-      ...d,
-      draftRecordId: d.id,
-      changeSetType: d.entityType,
-      userRecord: display.userRecord,
-      role: display.role,
-      compositeRole: display.compositeRole,
-      clientId: display.clientId,
-    },
+export async function getUserChangeRequests(): Promise<any[]> {
+  const all = await listPendingChangeRequests();
+  return all.filter(d => d.entityType === "USER").map(d => ({
+    data: d,
     retrievalInfo: {
       changeSetId: d.id,
       changeSetType: d.entityType,
       actionType: d.actionType,
     } as ChangeSetRequest,
-  };
-}
-
-export async function getUserChangeRequests(): Promise<any[]> {
-  const all = await getPendingChangeRequests();
-  const userCrs = all.filter(d => d.entityType === "USER");
-  if (userCrs.length === 0) return [];
-  const lk = await buildCrLookups();
-  return userCrs.map(d => toRetrieval(d, lk));
+  }));
 }
 
 export async function getRoleChangeRequests(): Promise<any[]> {
-  const all = await getPendingChangeRequests();
-  const roleCrs = all.filter(d => d.entityType === "ROLE");
-  if (roleCrs.length === 0) return [];
-  const lk = await buildCrLookups();
-  return roleCrs.map(d => toRetrieval(d, lk));
+  const all = await listPendingChangeRequests();
+  return all.filter(d => d.entityType === "ROLE").map(d => ({
+    data: d,
+    retrievalInfo: {
+      changeSetId: d.id,
+      changeSetType: d.entityType,
+      actionType: d.actionType,
+    } as ChangeSetRequest,
+  }));
 }
 
-// Phase-1 /approve with empty body. multiAdmin returns
-// {mode:"needs-approval", requestModel,...}; firstAdmin/simple records AND
-// auto-commits in one call. Replaces the old add-review no-signature approve.
+// /approve = Authorize: records + auto-commits at quorum (collapses the old
+// add-review + commit). firstAdmin/simple sends {}.
 export async function addApprovalToChangeRequest(changeSet: ChangeSetRequest): Promise<void> {
   await tcFetch(`/iga/change-requests/${changeSet.changeSetId}/approve`, {
     method: "POST",
@@ -595,56 +491,53 @@ export async function addApprovalToChangeRequest(changeSet: ChangeSetRequest): P
   });
 }
 
-// REJECT maps to /deny on the new surface (the old add-rejection is gone).
+// /deny replaces add-rejection (id in path, no body, 204).
 export async function addRejectionToChangeRequest(changeSet: ChangeSetRequest): Promise<void> {
   await tcFetch(`/iga/change-requests/${changeSet.changeSetId}/deny`, {
     method: "POST",
   });
 }
 
-// Apply-only. Usually unnecessary (/approve auto-commits at quorum). id in path,
-// empty body. Replaces the removed /tide-admin/change-set/commit.
+// Explicit apply-only commit (id in path, empty body). Usually unnecessary
+// since /approve auto-commits at quorum; 412 QUORUM_NOT_MET if sub-quorum.
 export async function commitChangeRequest(changeSet: ChangeSetRequest): Promise<void> {
   await tcFetch(`/iga/change-requests/${changeSet.changeSetId}/commit`, {
     method: "POST",
   });
 }
 
-// CANCEL maps to /deny on the new surface (the old change-set/cancel is gone).
+// Cancel maps to /deny (id in path, no body, 204).
 export async function cancelChangeRequest(changeSet: ChangeSetRequest): Promise<void> {
   await tcFetch(`/iga/change-requests/${changeSet.changeSetId}/deny`, {
     method: "POST",
   });
 }
 
-// "Get raw request to sign" is now PHASE 1 of /approve: the empty-body call
-// returns the requestModel (multiAdmin) that the enclave signs. We adapt it into
-// the legacy [{changesetId, changeSetDraftRequests, requiresApprovalPopup}] shape
-// that AdminApprovals.tsx already consumes. If mode !== "needs-approval"
-// (firstAdmin/simple realms) the CR was already recorded/committed and there is
-// nothing to sign; return [] so the caller treats it as "no popup required".
+// Phase-1 /approve (empty body): requestModel == old changeSetDraftRequests;
+// mode === "needs-approval" == old requiresApprovalPopup. Mapped into the
+// legacy rawRequests shape so the enclave-signing UI flow holds.
 export async function getRawChangeSetRequest(changeSet: ChangeSetRequest): Promise<any[]> {
-  const phase1 = await tcFetch<any>(`/iga/change-requests/${changeSet.changeSetId}/approve`, {
+  const resp = await tcFetch<any>(`/iga/change-requests/${changeSet.changeSetId}/approve`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({}),
   });
-  const needsApproval = phase1?.mode === "needs-approval" && !!phase1?.requestModel;
-  if (!needsApproval) {
-    return [];
-  }
-  return [
-    {
-      changesetId: phase1.changeRequestId ?? changeSet.changeSetId,
-      changeSetDraftRequests: phase1.requestModel as string,
-      requiresApprovalPopup: true,
-    },
-  ];
+  const needsApproval = resp?.mode === "needs-approval";
+  return needsApproval
+    ? [{
+        changesetId: resp.changeRequestId || changeSet.changeSetId,
+        changeSetDraftRequests: resp.requestModel,
+        requiresApprovalPopup: true,
+      }]
+    : [{
+        changesetId: changeSet.changeSetId,
+        changeSetDraftRequests: "",
+        requiresApprovalPopup: false,
+      }];
 }
 
-// PHASE 2: submit the enclave-signed doken toward the CR's threshold via
-// /approve {requestModel:<signed>}. Auto-commits at quorum. Replaces the old
-// multipart add-review with a `requests` form field.
+// multiAdmin phase-2: signed doken in requestModel; /approve records it toward
+// threshold and auto-commits at quorum (the old multipart `requests` field).
 export async function addApprovalWithSignedRequest(
   changeSet: ChangeSetRequest,
   signedRequest: string
@@ -657,40 +550,17 @@ export async function addApprovalWithSignedRequest(
 }
 
 // ============================================
-// Admin policy (for policy-commit ORK PreSign)
+// SSH Policy Sync (consolidated iga-core role-policies / forseti-contracts)
 // ============================================
 
-// Fetch the tide-realm-admin authorization policy (base64) that the ORK PreSign
-// requires attached to a policy-commit sign-model. This uses the CLIENT-DIRECT
-// DPoP path (tcFetch -> IAMService.getToken() DPoP token + appFetch DPoP proof,
-// against {authServerUrl}/admin/realms/{realm}), the SAME mechanism the CR ops
-// (getUserChangeRequests / addApprovalWithSignedRequest / commitChangeRequest)
-// use to reach iga-core. The server-relay Bearer path 401s at iga-core because
-// the forwarded token carries no DPoP proof; this DPoP-authenticated request is
-// what iga-core's admin surface accepts. The role-policies READ is
-// authenticated-only (less privileged than the /iga/change-requests endpoints
-// the CR path already hits), so the same DPoP token satisfies it. Returns the
-// base64 `.policy` field of the IgaRolePolicyRepresentation.
-export async function getAdminPolicy(): Promise<string> {
-  const rep = await tcFetch<{ policy?: string }>(
-    "/iga/role-policies/name/tide-realm-admin"
-  );
-  return rep?.policy ?? "";
-}
-
-// ============================================
-// SSH Policy Sync (still goes through server)
-// ============================================
-
-// Repointed to the consolidated iga-core role-policies / forseti-contracts
-// surface (the old PUT /tide-admin/ssh-policies was removed). Two writes over
-// the same DPoP-bound admin token (NO mTLS/delegation):
-//   1. POST /iga/forseti-contracts {contractCode, name} -> {id}
-//   2. POST /iga/role-policies {name, policy, policySig, contractId, ...}
-// policySig is the detached 64-byte Ed25519 signature (Base64, <=512 chars) the
-// server returns in syncData — the same signature keylessh already produced via
-// the enclave/ORK sign. iga-core keys policies by NAME; keylessh uses the role
-// name (roleId). Note: the reserved name `tide-realm-admin` is rejected (400).
+// Repointed to the new surface (USER DIRECTION: repoint keylessh, not a shim).
+// Policy is keyed by NAME == the role name (policy.roleId). The new POST
+// requires `name`, `policy`, AND `policySig` as non-blank fields. iga-core's
+// POLICY_SIG column is VARCHAR(512) and rejects policySig.length > 512, so the
+// combined blob CANNOT go there. Correct split (mirrors the server):
+//   policy    = combined signed blob (uncapped TEXT).
+//   policySig = Base64 of the detached 64-byte Ed25519 sig (~88 chars, < 512).
+//   policyData= combined blob (iga-core ignores it).
 export async function syncPolicyToTideCloak(policy: {
   roleId: string;
   contractCode?: string;
@@ -698,12 +568,14 @@ export async function syncPolicyToTideCloak(policy: {
   executionType: string;
   threshold: number;
   policyData: string;
+  // Base64 of the detached 64-byte Ed25519 signature (the bare sig from the
+  // commit step, NOT the combined blob).
   policySig: string;
 }): Promise<void> {
   // Step 1: upsert the Forseti contract (if supplied) to obtain a contractId.
   let contractId: string | undefined;
   if (policy.contractCode) {
-    const contract = await tcFetch<{ id?: string }>("/iga/forseti-contracts", {
+    const contract = await tcFetch<any>("/iga/forseti-contracts", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ contractCode: policy.contractCode, name: policy.roleId }),

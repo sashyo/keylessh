@@ -134,8 +134,23 @@ import {
   GetRawChangeSetRequest,
   AddApprovalWithSignedRequest,
   GetClientEvents,
+  getDelegation,
+  syncPolicyToTideCloak,
+  type DelegationFetch,
 } from "./lib/tidecloakApi";
 import type { ChangeSetRequest, AccessApproval } from "./lib/auth/keycloakTypes";
+
+// The requireDelegation() middleware (asgard-tide) attaches a cert-bound
+// delegation helper to the request; admin-write routes read it as
+// `req.delegation`. Augment Express's Request so handlers are typed.
+declare global {
+  // eslint-disable-next-line @typescript-eslint/no-namespace
+  namespace Express {
+    interface Request {
+      delegation?: DelegationFetch;
+    }
+  }
+}
 import { getAllowedSshUsersFromToken } from "./lib/auth/sshUsers";
 import { parseDestRolesFromToken, hasDestAccess } from "./lib/auth/destRoles";
 import { verifyTideCloakToken } from "./lib/auth/tideJWT";
@@ -1817,10 +1832,110 @@ export async function registerRoutes(
     "/api/admin/users",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
-        const users = await tidecloakAdmin.getUsers(token);
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        // Fetch all users
+        const allUsers = await (req as any).delegation.fetch(`${tcBase}/users?briefRepresentation=false`);
+
+        // Build userId → role names map using role-centric fetching
+        const userRolesMap = new Map<string, string[]>();
+
+        // Get app client UUID
+        const clients = await (req as any).delegation.fetch(`${tcBase}/clients?clientId=${getResource()}`);
+        if (Array.isArray(clients) && clients.length > 0) {
+          const appClientId = clients[0].id;
+          // Fetch role list for the app client
+          const roles = await (req as any).delegation.fetch(`${tcBase}/clients/${appClientId}/roles`);
+          if (Array.isArray(roles)) {
+            // For each role, fetch its users (skip VPN firewall roles)
+            await Promise.all(
+              roles
+                .filter((role: any) => {
+                  const name = role.name || "";
+                  return !(name.includes(":allow:") || name.includes(":deny:"));
+                })
+                .map(async (role: any) => {
+                  try {
+                    const roleUsers = await (req as any).delegation.fetch(
+                      `${tcBase}/clients/${appClientId}/roles/${encodeURIComponent(role.name)}/users`
+                    );
+                    if (Array.isArray(roleUsers)) {
+                      for (const u of roleUsers) {
+                        const existing = userRolesMap.get(u.id) || [];
+                        existing.push(role.name);
+                        userRolesMap.set(u.id, existing);
+                      }
+                    }
+                  } catch { /* skip failed role lookup */ }
+                })
+            );
+
+            // For VPN firewall roles, get assignments via user role-mappings instead
+            const fwRoles = roles.filter((r: any) => {
+              const name = r.name || "";
+              return name.includes(":allow:") || name.includes(":deny:");
+            });
+            if (fwRoles.length > 0) {
+              const briefUsers = await (req as any).delegation.fetch(`${tcBase}/users?briefRepresentation=true`);
+              if (Array.isArray(briefUsers)) {
+                await Promise.all(
+                  briefUsers.map(async (user: any) => {
+                    try {
+                      const mappedRoles = await (req as any).delegation.fetch(
+                        `${tcBase}/users/${user.id}/role-mappings/clients/${appClientId}`
+                      );
+                      if (Array.isArray(mappedRoles)) {
+                        for (const mr of mappedRoles) {
+                          if (fwRoles.some((fw: any) => fw.id === mr.id)) {
+                            const existing = userRolesMap.get(user.id) || [];
+                            existing.push(mr.name);
+                            userRolesMap.set(user.id, existing);
+                          }
+                        }
+                      }
+                    } catch { /* skip */ }
+                  })
+                );
+              }
+            }
+          }
+        }
+
+        // Also check admin role members
+        try {
+          const rmClients = await (req as any).delegation.fetch(`${tcBase}/clients?clientId=realm-management`);
+          if (Array.isArray(rmClients) && rmClients.length > 0) {
+            const rmClientId = rmClients[0].id;
+            const adminUsers = await (req as any).delegation.fetch(
+              `${tcBase}/clients/${rmClientId}/roles/${encodeURIComponent("tide-realm-admin")}/users`
+            );
+            if (Array.isArray(adminUsers)) {
+              for (const u of adminUsers) {
+                const existing = userRolesMap.get(u.id) || [];
+                existing.push("tide-realm-admin");
+                userRolesMap.set(u.id, existing);
+              }
+            }
+          }
+        } catch { /* admin role fetch failed */ }
+
+        const users = (allUsers || []).map((u: any) => {
+          const userClientRoles = userRolesMap.get(u.id) || [];
+          const isAdmin = userClientRoles.includes("tide-realm-admin");
+          return {
+            id: u.id ?? "",
+            firstName: u.firstName ?? "",
+            lastName: u.lastName ?? "",
+            email: u.email ?? "",
+            username: u.username,
+            role: userClientRoles,
+            linked: !!u.attributes?.vuid?.[0],
+            enabled: u.enabled !== false,
+            isAdmin,
+          };
+        });
         res.json(users);
       } catch (error) {
         log(`Failed to fetch users: ${error}`);
@@ -1834,9 +1949,9 @@ export async function registerRoutes(
     "/api/admin/users",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
         const { id, rolesToAdd, rolesToRemove } = req.body;
 
         if (!id) {
@@ -1844,12 +1959,50 @@ export async function registerRoutes(
           return;
         }
 
-        await tidecloakAdmin.updateUserRoles(
-          token,
-          id,
-          rolesToAdd || [],
-          rolesToRemove || []
-        );
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        const ADMIN_ROLE = "tide-realm-admin";
+
+        for (const roleName of (rolesToAdd || [])) {
+          const isAdmin = roleName === ADMIN_ROLE;
+          const targetClientId = isAdmin ? "realm-management" : getResource();
+          const clients = await (req as any).delegation.fetch(`${tcBase}/clients?clientId=${targetClientId}`);
+          if (!Array.isArray(clients) || clients.length === 0) throw new Error(`Client '${targetClientId}' not found`);
+          const clientUuid = clients[0].id;
+
+          let role: any;
+          if (isAdmin) {
+            const adminRoles = await (req as any).delegation.fetch(`${tcBase}/clients/${clientUuid}/roles?search=${ADMIN_ROLE}`);
+            role = adminRoles[0];
+          } else {
+            role = await (req as any).delegation.fetch(`${tcBase}/clients/${clientUuid}/roles/${encodeURIComponent(roleName)}`);
+          }
+
+          await (req as any).delegation.fetch(`${tcBase}/users/${id}/role-mappings/clients/${clientUuid}`, {
+            method: 'POST',
+            body: [role],
+          });
+        }
+
+        for (const roleName of (rolesToRemove || [])) {
+          const isAdmin = roleName === ADMIN_ROLE;
+          const targetClientId = isAdmin ? "realm-management" : getResource();
+          const clients = await (req as any).delegation.fetch(`${tcBase}/clients?clientId=${targetClientId}`);
+          if (!Array.isArray(clients) || clients.length === 0) throw new Error(`Client '${targetClientId}' not found`);
+          const clientUuid = clients[0].id;
+
+          let role: any;
+          if (isAdmin) {
+            const adminRoles = await (req as any).delegation.fetch(`${tcBase}/clients/${clientUuid}/roles?search=${ADMIN_ROLE}`);
+            role = adminRoles[0];
+          } else {
+            role = await (req as any).delegation.fetch(`${tcBase}/clients/${clientUuid}/roles/${encodeURIComponent(roleName)}`);
+          }
+
+          await (req as any).delegation.fetch(`${tcBase}/users/${id}/role-mappings/clients/${clientUuid}`, {
+            method: 'DELETE',
+            body: [{ id: role.id, name: role.name }],
+          });
+        }
 
         res.json({ message: "User roles updated successfully" });
       } catch (error) {
@@ -1864,9 +2017,9 @@ export async function registerRoutes(
     "/api/admin/users",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
         const { id, firstName, lastName, email } = req.body;
 
         if (!id) {
@@ -1874,7 +2027,14 @@ export async function registerRoutes(
           return;
         }
 
-        await tidecloakAdmin.updateUser(token, id, { firstName, lastName, email });
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        // Fetch current user to preserve other fields
+        const user = await (req as any).delegation.fetch(`${tcBase}/users/${id}`);
+        const updatedUser = { ...user, firstName, lastName, email };
+        await (req as any).delegation.fetch(`${tcBase}/users/${id}`, {
+          method: 'PUT',
+          body: updatedUser,
+        });
 
         res.json({ message: "User profile updated successfully" });
       } catch (error) {
@@ -1889,9 +2049,9 @@ export async function registerRoutes(
     "/api/admin/users",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
         const userId = req.query.userId as string;
 
         if (!userId) {
@@ -1899,12 +2059,12 @@ export async function registerRoutes(
           return;
         }
 
-        await tidecloakAdmin.deleteUser(token, userId);
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        await (req as any).delegation.fetch(`${tcBase}/users/${userId}`, { method: 'DELETE' });
 
         // Update the over-limit status after deleting user
-        // Count ALL enabled users (including admins) for the limit check
-        const users = await tidecloakAdmin.getUsers(token);
-        const enabledCount = users.filter(u => u.enabled).length;
+        const allUsers = await (req as any).delegation.fetch(`${tcBase}/users?briefRepresentation=false`);
+        const enabledCount = (allUsers || []).filter((u: any) => u.enabled).length;
         const subscription = await subscriptionStorage.getSubscription();
         const tier = (subscription?.tier as SubscriptionTier) || 'free';
         const tierConfig = subscriptionTiers[tier];
@@ -1928,9 +2088,9 @@ export async function registerRoutes(
     "/api/admin/users/:id/enabled",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
         const userId = req.params.id;
         const { enabled } = req.body;
 
@@ -1939,12 +2099,18 @@ export async function registerRoutes(
           return;
         }
 
-        await tidecloakAdmin.setUserEnabled(token, userId, enabled);
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        // Fetch current user to preserve other fields
+        const user = await (req as any).delegation.fetch(`${tcBase}/users/${userId}`);
+        const updatedUser = { ...user, enabled };
+        await (req as any).delegation.fetch(`${tcBase}/users/${userId}`, {
+          method: 'PUT',
+          body: updatedUser,
+        });
 
         // Update the over-limit status after changing user enabled state
-        // Count ALL enabled users (including admins) for the limit check
-        const users = await tidecloakAdmin.getUsers(token);
-        const enabledCount = users.filter(u => u.enabled).length;
+        const allUsers = await (req as any).delegation.fetch(`${tcBase}/users?briefRepresentation=false`);
+        const enabledCount = (allUsers || []).filter((u: any) => u.enabled).length;
         const subscription = await subscriptionStorage.getSubscription();
         const tier = (subscription?.tier as SubscriptionTier) || 'free';
         const tierConfig = subscriptionTiers[tier];
@@ -1968,9 +2134,9 @@ export async function registerRoutes(
     "/api/admin/users/add",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
         const { username, firstName, lastName, email } = req.body;
 
         if (!username || !firstName || !lastName || !email) {
@@ -1978,9 +2144,11 @@ export async function registerRoutes(
           return;
         }
 
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+
         // Check user limit before creating
-        const users = await tidecloakAdmin.getUsers(token);
-        const limitCheck = await subscriptionStorage.checkCanAdd('user', users.length);
+        const currentUsers = await (req as any).delegation.fetch(`${tcBase}/users?briefRepresentation=false`);
+        const limitCheck = await subscriptionStorage.checkCanAdd('user', (currentUsers || []).length);
         if (!limitCheck.allowed) {
           res.status(403).json({
             error: 'User limit reached',
@@ -1993,12 +2161,14 @@ export async function registerRoutes(
           return;
         }
 
-        await tidecloakAdmin.addUser(token, { username, firstName, lastName, email });
+        await (req as any).delegation.fetch(`${tcBase}/users`, {
+          method: 'POST',
+          body: { username, firstName, lastName, email, enabled: true },
+        });
 
         // Update the over-limit status after adding user
-        // Count ALL enabled users (including admins) for the limit check
-        const updatedUsers = await tidecloakAdmin.getUsers(token);
-        const enabledCount = updatedUsers.filter(u => u.enabled).length;
+        const updatedUsers = await (req as any).delegation.fetch(`${tcBase}/users?briefRepresentation=false`);
+        const enabledCount = (updatedUsers || []).filter((u: any) => u.enabled).length;
         const subscription = await subscriptionStorage.getSubscription();
         const tier = (subscription?.tier as SubscriptionTier) || 'free';
         const tierConfig = subscriptionTiers[tier];
@@ -2022,9 +2192,9 @@ export async function registerRoutes(
     "/api/admin/users/tide",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
         const userId = req.query.userId as string;
         const redirectUri = req.query.redirect_uri as string;
 
@@ -2033,10 +2203,14 @@ export async function registerRoutes(
           return;
         }
 
-        const linkUrl = await tidecloakAdmin.getTideLinkUrl(
-          token,
-          userId,
-          redirectUri || `${req.protocol}://${req.get("host")}/`
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        const redirect = redirectUri || `${req.protocol}://${req.get("host")}/`;
+        const linkUrl = await (req as any).delegation.fetch(
+          `${tcBase}/tideAdminResources/get-required-action-link?userId=${userId}&lifespan=43200&redirect_uri=${redirect}&client_id=${getResource()}`,
+          {
+            method: 'POST',
+            body: ["link-tide-account-action"],
+          }
         );
 
         res.json({ linkUrl });
@@ -2056,10 +2230,20 @@ export async function registerRoutes(
     "/api/admin/roles",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
-        const roles = await tidecloakAdmin.getClientRoles(token);
+        const tcBaseUrl = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        const clients = await (req as any).delegation.fetch(
+          `${tcBaseUrl}/clients?clientId=${getResource()}`
+        );
+        if (!Array.isArray(clients) || clients.length === 0) {
+          res.status(500).json({ error: "Could not resolve client UUID" });
+          return;
+        }
+        const roles = await (req as any).delegation.fetch(
+          `${tcBaseUrl}/clients/${clients[0].id}/roles`
+        );
         res.json({ roles });
       } catch (error) {
         log(`Failed to fetch roles: ${error}`);
@@ -2073,9 +2257,9 @@ export async function registerRoutes(
     "/api/admin/roles",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
         const { name, description, policy } = req.body;
 
         if (!name) {
@@ -2083,8 +2267,18 @@ export async function registerRoutes(
           return;
         }
 
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        // Get app client UUID
+        const clients = await (req as any).delegation.fetch(`${tcBase}/clients?clientId=${getResource()}`);
+        if (!Array.isArray(clients) || clients.length === 0) {
+          res.status(500).json({ error: "Could not resolve client UUID" });
+          return;
+        }
         // Create the role in TideCloak
-        await tidecloakAdmin.createRole(token, { name, description });
+        await (req as any).delegation.fetch(`${tcBase}/clients/${clients[0].id}/roles`, {
+          method: 'POST',
+          body: { name, description },
+        });
 
         // If policy config is provided and enabled, store the SSH policy
         if (policy && policy.enabled) {
@@ -2099,7 +2293,6 @@ export async function registerRoutes(
             log(`Created SSH policy for role: ${name}`);
           } catch (policyError) {
             log(`Warning: Role created but failed to save policy: ${policyError}`);
-            // Continue - role was created successfully
           }
         }
 
@@ -2116,9 +2309,9 @@ export async function registerRoutes(
     "/api/admin/roles",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
         const { name, description } = req.body;
 
         if (!name) {
@@ -2126,7 +2319,17 @@ export async function registerRoutes(
           return;
         }
 
-        await tidecloakAdmin.updateRole(token, { name, description });
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        // Get app client UUID
+        const clients = await (req as any).delegation.fetch(`${tcBase}/clients?clientId=${getResource()}`);
+        if (!Array.isArray(clients) || clients.length === 0) {
+          res.status(500).json({ error: "Could not resolve client UUID" });
+          return;
+        }
+        await (req as any).delegation.fetch(`${tcBase}/clients/${clients[0].id}/roles/${encodeURIComponent(name)}`, {
+          method: 'PUT',
+          body: { name, description },
+        });
 
         res.json({ success: "Role has been updated!" });
       } catch (error) {
@@ -2141,9 +2344,9 @@ export async function registerRoutes(
     "/api/admin/roles",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
         const roleName = req.query.roleName as string;
 
         if (!roleName) {
@@ -2151,11 +2354,32 @@ export async function registerRoutes(
           return;
         }
 
-        // Delete the role in TideCloak
-        const result = await tidecloakAdmin.deleteRole(token, roleName);
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        // Get app client UUID
+        const clients = await (req as any).delegation.fetch(`${tcBase}/clients?clientId=${getResource()}`);
+        if (!Array.isArray(clients) || clients.length === 0) {
+          res.status(500).json({ error: "Could not resolve client UUID" });
+          return;
+        }
+        const clientUuid = clients[0].id;
 
-        // Also delete any associated SSH policy (only if role was actually deleted, not queued for approval)
-        if (!result.approvalCreated) {
+        // Delete the role in TideCloak
+        await (req as any).delegation.fetch(`${tcBase}/clients/${clientUuid}/roles/${encodeURIComponent(roleName)}`, {
+          method: 'DELETE',
+        });
+
+        // Check if role still exists (approval created instead of immediate delete)
+        let approvalCreated = false;
+        try {
+          await (req as any).delegation.fetch(`${tcBase}/clients/${clientUuid}/roles/${encodeURIComponent(roleName)}`);
+          // Role still exists — approval was created
+          approvalCreated = true;
+        } catch {
+          // Role doesn't exist — it was deleted immediately
+        }
+
+        // Delete associated SSH policy (only if role was actually deleted)
+        if (!approvalCreated) {
           try {
             await policyStorage.deletePolicy(roleName);
           } catch (policyError) {
@@ -2163,8 +2387,7 @@ export async function registerRoutes(
           }
         }
 
-        // Return appropriate message based on whether an approval was created
-        if (result.approvalCreated) {
+        if (approvalCreated) {
           res.json({ success: "Approval request created", approvalCreated: true });
         } else {
           res.json({ success: "Role has been deleted!", approvalCreated: false });
@@ -2220,11 +2443,35 @@ export async function registerRoutes(
     "/api/admin/roles/all",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
-        const roles = await tidecloakAdmin.getAllRoles(token);
-        res.json({ roles });
+        const tcBaseUrl = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        const clients = await (req as any).delegation.fetch(
+          `${tcBaseUrl}/clients?clientId=${getResource()}`
+        );
+        if (!Array.isArray(clients) || clients.length === 0) {
+          res.status(500).json({ error: "Could not resolve client UUID" });
+          return;
+        }
+        const clientRoles = await (req as any).delegation.fetch(
+          `${tcBaseUrl}/clients/${clients[0].id}/roles`
+        );
+        let allRoles = [...(Array.isArray(clientRoles) ? clientRoles : [])];
+        try {
+          const realmMgmt = await (req as any).delegation.fetch(
+            `${tcBaseUrl}/clients?clientId=realm-management`
+          );
+          if (Array.isArray(realmMgmt) && realmMgmt.length > 0) {
+            const adminRoles = await (req as any).delegation.fetch(
+              `${tcBaseUrl}/clients/${realmMgmt[0].id}/roles?search=tide-realm-admin`
+            );
+            if (Array.isArray(adminRoles) && adminRoles.length > 0) {
+              allRoles.push(adminRoles[0]);
+            }
+          }
+        } catch { /* admin role fetch failed */ }
+        res.json({ roles: allRoles });
       } catch (error) {
         log(`Failed to fetch all roles: ${error}`);
         res.status(500).json({ error: "Internal Server Error" });
@@ -2438,6 +2685,7 @@ export async function registerRoutes(
     "/api/admin/ssh-policies/pending/:id/commit",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
         const { id } = req.params;
@@ -2455,10 +2703,9 @@ export async function registerRoutes(
         // length-prefix encoding). Sign #2 verifies the signature against the raw bytes
         // of section 0, so any drift here breaks "Policy signature could not be verified".
         let policyDataBase64: string | undefined;
-        // Detached 64-byte Ed25519 signature (Base64) for the iga-core
-        // role-policies `policySig` mirror field. This is exactly the signature
-        // the client already produced via the enclave/ORK sign — NOT anything
-        // delegation/mTLS-related. Under the VARCHAR(512) cap (~88 chars).
+        // Base64 of the DETACHED 64-byte Ed25519 signature (the bare sig the ORK
+        // returned this commit). Kept separate from the combined policyData blob
+        // so the iga-core mirror write can put it in policySig (VARCHAR(512)).
         let policySigBase64: string | undefined;
         try {
           const request = PolicySignRequest.decode(base64ToBytes(pendingPolicy.policyRequestData));
@@ -2473,10 +2720,16 @@ export async function registerRoutes(
 
           if (signature) {
             const signatureBytes = base64ToBytes(signature);
-            policy.signature = signatureBytes;
-            // Preserve the detached sig for the iga-core policySig mirror field.
+            // The detached sig, preserved for the iga-core policySig mirror field.
             policySigBase64 = bytesToBase64(signatureBytes);
-            log(`Attached VVK signature to policy (${signatureBytes.length} bytes)`);
+            // Stored policyData layout: TideMemory([ DataToVerify, signature ])
+            // — section 0 byte-identical to what the ORK signed, section 1 = the new signature.
+            const composed = TideMemory.CreateFromArray([dataToVerify, signatureBytes]);
+            policyDataBase64 = bytesToBase64(composed);
+            const dtvSha = createHash("sha256").update(dataToVerify).digest("hex");
+            const sigSha = createHash("sha256").update(signatureBytes).digest("hex");
+            const composedSha = createHash("sha256").update(composed).digest("hex");
+            log(`[PolicyTrace SIGN] role=${pendingPolicy.roleId} dtv_len=${dataToVerify.length} dtv_sha=${dtvSha} sig_len=${signatureBytes.length} sig_sha=${sigSha} composed_len=${composed.length} composed_sha=${composedSha}`);
           } else {
             log(`Warning: No signature provided for policy commit — storing policy without signature`);
             policyDataBase64 = bytesToBase64(policyBytesNoSig);
@@ -2503,9 +2756,8 @@ export async function registerRoutes(
         await pendingPolicyStorage.commitPolicy(id, req.user?.email || "unknown");
         log(`SSH policy ${id} committed by ${req.user?.email}`);
 
-        // Return sync data so client can sync to TideCloak directly via DPoP.
-        // policySig = the detached Ed25519 signature (Base64) required by the new
-        // iga-core POST /iga/role-policies surface.
+        // Build the iga-core mirror payload. The local ssh_policies upsert above
+        // is the source of truth; this is a follow-on mirror into iga-core.
         const syncData = {
           roleId: pendingPolicy.roleId,
           contractCode: pendingPolicy.contractCode,
@@ -2513,8 +2765,20 @@ export async function registerRoutes(
           executionType: "private" as const,
           threshold: pendingPolicy.threshold,
           policyData: policyDataBase64 || "",
+          // Detached sig for the iga-core policySig (VARCHAR(512)) mirror field.
           policySig: policySigBase64 || "",
         };
+
+        // Mirror the committed policy into iga-core via the cert-bound delegation
+        // (the same admin auth path every other server-side admin op uses). This
+        // is best-effort: a mirror failure must NOT fail the commit or the HTTP
+        // response — the local ssh_policies row remains the SSH-signing source of
+        // truth. Mirrors the behaviour of the original (pre-fb7165b) call site.
+        try {
+          await syncPolicyToTideCloak((req as any).delegation, syncData);
+        } catch (e) {
+          console.warn("Failed to sync policy to TideCloak:", e);
+        }
 
         res.json({ success: true, syncData });
       } catch (error) {
@@ -2973,10 +3237,10 @@ export async function registerRoutes(
     "/api/admin/access-approvals",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
-        const data = await GetUserChangeRequests(token);
+        const data = await GetUserChangeRequests(req.delegation!);
 
         const approvals: AccessApproval[] = data.map((item) => {
           // Extract the first user record for display
@@ -3015,9 +3279,9 @@ export async function registerRoutes(
     "/api/admin/access-approvals/raw",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
         const { changeSet } = req.body as { changeSet: ChangeSetRequest };
 
         log(`Getting raw change set request for: ${JSON.stringify(changeSet)}`);
@@ -3032,8 +3296,29 @@ export async function registerRoutes(
           return;
         }
 
-        const rawRequests = await GetRawChangeSetRequest(changeSet, token);
-        // Return all sign requests (may include user + policy requests)
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        // NEW: phase-1 /approve (empty body) returns the bytes the enclave signs.
+        // multiAdmin => {mode:"needs-approval", requestModel,...}; firstAdmin/simple
+        // => {mode:"recorded", committed} (already recorded+committed, no popup).
+        // Map into the legacy rawRequests shape the UI expects:
+        //   changeSetDraftRequests <- requestModel ; requiresApprovalPopup <-
+        //   (mode === "needs-approval").
+        const approveResp = await (req as any).delegation.fetch(
+          `${tcBase}/iga/change-requests/${changeSet.changeSetId}/approve`,
+          { method: 'POST', body: {} }
+        );
+        const needsApproval = approveResp?.mode === "needs-approval";
+        const rawRequests = needsApproval
+          ? [{
+              changesetId: approveResp.changeRequestId || changeSet.changeSetId,
+              changeSetDraftRequests: approveResp.requestModel,
+              requiresApprovalPopup: true,
+            }]
+          : [{
+              changesetId: changeSet.changeSetId,
+              changeSetDraftRequests: "",
+              requiresApprovalPopup: false,
+            }];
         res.json({ rawRequests });
       } catch (error) {
         const errorMsg = error instanceof Error ? error.message : String(error);
@@ -3048,9 +3333,9 @@ export async function registerRoutes(
     "/api/admin/access-approvals/approve",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
         const { changeSet, signedRequest } = req.body as {
           changeSet: ChangeSetRequest;
           signedRequest?: string;
@@ -3061,12 +3346,14 @@ export async function registerRoutes(
           return;
         }
 
-        // If signedRequest is provided, use the new approval with signature
-        if (signedRequest) {
-          await AddApprovalWithSignedRequest(changeSet, signedRequest, token);
-        } else {
-          await AddApprovalToChangeRequest(changeSet, token);
-        }
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        // NEW /approve: records the authorization AND auto-commits at quorum
+        // (collapses the old add-review + commit two-step). For multiAdmin the
+        // enclave-signed bytes ride in requestModel; firstAdmin/simple send {}.
+        await (req as any).delegation.fetch(
+          `${tcBase}/iga/change-requests/${changeSet.changeSetId}/approve`,
+          { method: 'POST', body: signedRequest ? { requestModel: signedRequest } : {} }
+        );
         res.json({ message: "Access request approved" });
       } catch (error) {
         log(`Failed to approve access request: ${error}`);
@@ -3080,9 +3367,9 @@ export async function registerRoutes(
     "/api/admin/access-approvals/approve-with-id",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
         const { changeSetId, actionType, changeSetType, signedRequest } = req.body as {
           changeSetId: string;
           actionType: string;
@@ -3095,14 +3382,14 @@ export async function registerRoutes(
           return;
         }
 
-        // Build changeSet object from explicit IDs
-        const changeSet: ChangeSetRequest = {
-          changeSetId,
-          actionType,
-          changeSetType,
-        };
-
-        await AddApprovalWithSignedRequest(changeSet, signedRequest, token);
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        // NEW multiAdmin phase-2: the signed doken rides in requestModel; /approve
+        // records it toward threshold and auto-commits at quorum. actionType /
+        // changeSetType are no longer sent (id in path identifies the CR).
+        await (req as any).delegation.fetch(
+          `${tcBase}/iga/change-requests/${changeSetId}/approve`,
+          { method: 'POST', body: { requestModel: signedRequest } }
+        );
         res.json({ message: "Access request approved" });
       } catch (error) {
         log(`Failed to approve access request with id: ${error}`);
@@ -3116,9 +3403,9 @@ export async function registerRoutes(
     "/api/admin/access-approvals/reject",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
         const { changeSet } = req.body as { changeSet: ChangeSetRequest };
 
         if (!changeSet || !changeSet.changeSetId) {
@@ -3126,7 +3413,12 @@ export async function registerRoutes(
           return;
         }
 
-        await AddRejectionToChangeRequest(changeSet, token);
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        // NEW: /deny replaces the old add-rejection (id in path, no body, 204).
+        await (req as any).delegation.fetch(
+          `${tcBase}/iga/change-requests/${changeSet.changeSetId}/deny`,
+          { method: 'POST' }
+        );
         res.json({ message: "Access request rejected" });
       } catch (error) {
         log(`Failed to reject access request: ${error}`);
@@ -3140,9 +3432,9 @@ export async function registerRoutes(
     "/api/admin/access-approvals/commit",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
         const { changeSet } = req.body as { changeSet: ChangeSetRequest };
 
         log(`Committing change set: ${JSON.stringify(changeSet)}`);
@@ -3152,7 +3444,13 @@ export async function registerRoutes(
           return;
         }
 
-        await CommitChangeRequest(changeSet, token);
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        // NEW: explicit apply-only commit (id in path, empty body). Usually
+        // unnecessary since /approve auto-commits at quorum; 412 if sub-quorum.
+        await (req as any).delegation.fetch(
+          `${tcBase}/iga/change-requests/${changeSet.changeSetId}/commit`,
+          { method: 'POST' }
+        );
         res.json({ message: "Access request committed" });
       } catch (error) {
         const errorMsg = error instanceof Error ? error.message : String(error);
@@ -3167,9 +3465,9 @@ export async function registerRoutes(
     "/api/admin/access-approvals/cancel",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
         const { changeSet } = req.body as { changeSet: ChangeSetRequest };
 
         log(`Cancelling change set: ${JSON.stringify(changeSet)}`);
@@ -3179,7 +3477,12 @@ export async function registerRoutes(
           return;
         }
 
-        await CancelChangeRequest(changeSet, token);
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        // NEW: cancel maps to /deny (id in path, no body, 204).
+        await (req as any).delegation.fetch(
+          `${tcBase}/iga/change-requests/${changeSet.changeSetId}/deny`,
+          { method: 'POST' }
+        );
         res.json({ message: "Access request cancelled" });
       } catch (error) {
         const errorMsg = error instanceof Error ? error.message : String(error);
@@ -3198,10 +3501,10 @@ export async function registerRoutes(
     "/api/admin/role-approvals",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
-        const requests = await GetRoleChangeRequests(token);
+        const requests = await GetRoleChangeRequests(req.delegation!);
 
         // Transform to match frontend expectations
         const approvals: AccessApproval[] = requests.map((req) => ({
@@ -3230,9 +3533,9 @@ export async function registerRoutes(
     "/api/admin/role-approvals/raw",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
         const { changeSet } = req.body as { changeSet: ChangeSetRequest };
 
         if (!changeSet || !changeSet.changeSetId) {
@@ -3240,7 +3543,25 @@ export async function registerRoutes(
           return;
         }
 
-        const rawRequests = await GetRawChangeSetRequest(changeSet, token);
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        // NEW: phase-1 /approve returns the bytes the enclave signs (requestModel).
+        // Mapped into the legacy rawRequests shape (see access-approvals/raw).
+        const approveResp = await (req as any).delegation.fetch(
+          `${tcBase}/iga/change-requests/${changeSet.changeSetId}/approve`,
+          { method: 'POST', body: {} }
+        );
+        const needsApproval = approveResp?.mode === "needs-approval";
+        const rawRequests = needsApproval
+          ? [{
+              changesetId: approveResp.changeRequestId || changeSet.changeSetId,
+              changeSetDraftRequests: approveResp.requestModel,
+              requiresApprovalPopup: true,
+            }]
+          : [{
+              changesetId: changeSet.changeSetId,
+              changeSetDraftRequests: "",
+              requiresApprovalPopup: false,
+            }];
         res.json({ rawRequests });
       } catch (error) {
         log(`Failed to get raw role change request: ${error}`);
@@ -3254,9 +3575,9 @@ export async function registerRoutes(
     "/api/admin/role-approvals/approve",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
         const { changeSet, signedRequest } = req.body as {
           changeSet: ChangeSetRequest;
           signedRequest?: string;
@@ -3267,11 +3588,13 @@ export async function registerRoutes(
           return;
         }
 
-        if (signedRequest) {
-          await AddApprovalWithSignedRequest(changeSet, signedRequest, token);
-        } else {
-          await AddApprovalToChangeRequest(changeSet, token);
-        }
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        // NEW /approve: records + auto-commits at quorum (collapses add-review +
+        // commit). multiAdmin signed bytes ride in requestModel; else send {}.
+        await (req as any).delegation.fetch(
+          `${tcBase}/iga/change-requests/${changeSet.changeSetId}/approve`,
+          { method: 'POST', body: signedRequest ? { requestModel: signedRequest } : {} }
+        );
         res.json({ message: "Role change request approved" });
       } catch (error) {
         log(`Failed to approve role change request: ${error}`);
@@ -3285,9 +3608,9 @@ export async function registerRoutes(
     "/api/admin/role-approvals/approve-with-id",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
         const { changeSetId, actionType, changeSetType, signedRequest } = req.body as {
           changeSetId: string;
           actionType: string;
@@ -3300,13 +3623,13 @@ export async function registerRoutes(
           return;
         }
 
-        const changeSet: ChangeSetRequest = {
-          changeSetId,
-          actionType,
-          changeSetType,
-        };
-
-        await AddApprovalWithSignedRequest(changeSet, signedRequest, token);
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        // NEW multiAdmin phase-2: signed doken in requestModel; /approve records
+        // toward threshold and auto-commits at quorum (id in path).
+        await (req as any).delegation.fetch(
+          `${tcBase}/iga/change-requests/${changeSetId}/approve`,
+          { method: 'POST', body: { requestModel: signedRequest } }
+        );
         res.json({ message: "Role change request approved" });
       } catch (error) {
         log(`Failed to approve role change request with id: ${error}`);
@@ -3320,9 +3643,9 @@ export async function registerRoutes(
     "/api/admin/role-approvals/reject",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
         const { changeSet } = req.body as { changeSet: ChangeSetRequest };
 
         if (!changeSet || !changeSet.changeSetId) {
@@ -3330,7 +3653,12 @@ export async function registerRoutes(
           return;
         }
 
-        await AddRejectionToChangeRequest(changeSet, token);
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        // NEW: /deny replaces add-rejection (id in path, no body, 204).
+        await (req as any).delegation.fetch(
+          `${tcBase}/iga/change-requests/${changeSet.changeSetId}/deny`,
+          { method: 'POST' }
+        );
         res.json({ message: "Role change request rejected" });
       } catch (error) {
         log(`Failed to reject role change request: ${error}`);
@@ -3344,9 +3672,9 @@ export async function registerRoutes(
     "/api/admin/role-approvals/commit",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
         const { changeSet } = req.body as { changeSet: ChangeSetRequest };
 
         log(`Committing role change set: ${JSON.stringify(changeSet)}`);
@@ -3356,7 +3684,12 @@ export async function registerRoutes(
           return;
         }
 
-        await CommitChangeRequest(changeSet, token);
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        // NEW: explicit apply-only commit (id in path, empty body). 412 if sub-quorum.
+        await (req as any).delegation.fetch(
+          `${tcBase}/iga/change-requests/${changeSet.changeSetId}/commit`,
+          { method: 'POST' }
+        );
         res.json({ message: "Role change request committed" });
       } catch (error) {
         const errorMsg = error instanceof Error ? error.message : String(error);
@@ -3371,9 +3704,9 @@ export async function registerRoutes(
     "/api/admin/role-approvals/cancel",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
-        const token = req.accessToken!;
         const { changeSet } = req.body as { changeSet: ChangeSetRequest };
 
         log(`Cancelling role change set: ${JSON.stringify(changeSet)}`);
@@ -3383,7 +3716,12 @@ export async function registerRoutes(
           return;
         }
 
-        await CancelChangeRequest(changeSet, token);
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        // NEW: cancel maps to /deny (id in path, no body, 204).
+        await (req as any).delegation.fetch(
+          `${tcBase}/iga/change-requests/${changeSet.changeSetId}/deny`,
+          { method: 'POST' }
+        );
         res.json({ message: "Role change request cancelled" });
       } catch (error) {
         const errorMsg = error instanceof Error ? error.message : String(error);
@@ -3398,12 +3736,19 @@ export async function registerRoutes(
     "/api/admin/logs/access",
     authenticate,
     requireAdmin,
+    getDelegation().requireDelegation(),
     async (req: AuthenticatedRequest, res) => {
       try {
         const limit = parseInt(req.query.limit as string) || 100;
         const offset = parseInt(req.query.offset as string) || 0;
-        const token = req.accessToken!;
-        const events = await GetClientEvents(token, offset, limit);
+        const tcBase = `${getAuthServerUrl()}/admin/realms/${getRealm()}`;
+        const clientId = getResource();
+        const params = new URLSearchParams({
+          first: String(offset),
+          max: String(limit),
+          client: clientId,
+        });
+        const events = await (req as any).delegation.fetch(`${tcBase}/events?${params.toString()}`);
         res.json(events);
       } catch (error) {
         log(`Failed to fetch access logs: ${error}`);

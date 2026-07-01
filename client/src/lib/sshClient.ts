@@ -12,7 +12,6 @@ import type { KeyPair } from "@microsoft/dev-tunnels-ssh";
 import type { Signer } from "@microsoft/dev-tunnels-ssh";
 import type { Verifier } from "@microsoft/dev-tunnels-ssh";
 import { IAMService } from "@tidecloak/js";
-import { appFetch } from "./appFetch";
 import { SftpClient } from "./sftp";
 import { ScpClient } from "./scp";
 
@@ -405,7 +404,7 @@ export class BrowserSSHClient {
     // Fire and forget - don't await to avoid blocking terminal I/O
     IAMService.getToken().then((token) => {
       if (!token) return;
-      return appFetch(toAbsoluteUrl(`/api/sessions/${this.sessionId}/record`), {
+      return IAMService.fetch(toAbsoluteUrl(`/api/sessions/${this.sessionId}/record`), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -453,7 +452,7 @@ export class BrowserSSHClient {
     // Fire and forget - don't await to avoid blocking file operations
     IAMService.getToken().then((token) => {
       if (!token) return;
-      return appFetch(toAbsoluteUrl(`/api/sessions/${this.sessionId}/file-op`), {
+      return IAMService.fetch(toAbsoluteUrl(`/api/sessions/${this.sessionId}/file-op`), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -478,8 +477,10 @@ export class BrowserSSHClient {
 
       this.options.onStatusChange("connecting");
 
-      // Create session record (needed for recording + session tracking)
-      this.sessionId = await this.createSessionRecord();
+      // Create session record (skip in gateway mode — gateway creates its own)
+      if (!this.options.gatewayUrl) {
+        this.sessionId = await this.createSessionRecord();
+      }
       this.sessionEnded = false;
 
       // Register browser close/navigate handlers to end session on unexpected exit
@@ -650,7 +651,7 @@ export class BrowserSSHClient {
     }
     this.managedToken = token;
 
-    const res = await appFetch(toAbsoluteUrl("/api/sessions"), {
+    const res = await IAMService.fetch(toAbsoluteUrl("/api/sessions"), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -659,10 +660,6 @@ export class BrowserSSHClient {
       body: JSON.stringify({
         serverId: this.options.serverId,
         sshUser: this.options.username,
-        ...(this.options.gatewayUrl ? {
-          gatewayId: this.options.gatewayId,
-          backendName: this.options.serverId,
-        } : {}),
       }),
     });
 
@@ -718,7 +715,7 @@ export class BrowserSSHClient {
 
     try {
       // Use managedToken so secureFetch recognises it and attaches DPoP
-      appFetch(toAbsoluteUrl(`/api/sessions/${this.sessionId}`), {
+      IAMService.fetch(toAbsoluteUrl(`/api/sessions/${this.sessionId}`), {
         method: "DELETE",
         headers: { Authorization: `Bearer ${token}` },
         keepalive: true,
@@ -736,7 +733,7 @@ export class BrowserSSHClient {
     if (!token) return;
 
     try {
-      await appFetch(toAbsoluteUrl(`/api/sessions/${this.sessionId}`), {
+      await IAMService.fetch(toAbsoluteUrl(`/api/sessions/${this.sessionId}`), {
         method: "DELETE",
         headers: {
           Authorization: `Bearer ${token}`,
@@ -745,7 +742,7 @@ export class BrowserSSHClient {
     } catch {
       // Retry once on failure
       try {
-        await appFetch(toAbsoluteUrl(`/api/sessions/${this.sessionId}`), {
+        await IAMService.fetch(toAbsoluteUrl(`/api/sessions/${this.sessionId}`), {
           method: "DELETE",
           headers: {
             Authorization: `Bearer ${token}`,
@@ -919,7 +916,7 @@ export class BrowserSSHClient {
     if (!token) return;
 
     try {
-      const res = await appFetch(toAbsoluteUrl(`/api/sessions/${this.sessionId}/start-recording`), {
+      const res = await IAMService.fetch(toAbsoluteUrl(`/api/sessions/${this.sessionId}/start-recording`), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -958,7 +955,7 @@ export class BrowserSSHClient {
     if (!token) return;
 
     try {
-      await appFetch(toAbsoluteUrl(`/api/sessions/${this.sessionId}/end-recording`), {
+      await IAMService.fetch(toAbsoluteUrl(`/api/sessions/${this.sessionId}/end-recording`), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

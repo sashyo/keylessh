@@ -3,9 +3,9 @@
  * These call TideCloak directly instead of proxying through the server,
  * so the DPoP proof htu matches the TideCloak URL.
  */
-import { appFetch } from "./appFetch";
+import { IAMService } from "@tidecloak/js";
 import type { AdminUser, AdminRole } from "@shared/schema";
-import type { TidecloakEvent } from "./api";
+import type { ChangeSetRequest, AccessApproval, RoleApproval, TidecloakEvent } from "./api";
 
 const ADMIN_ROLE = "tide-realm-admin";
 const REALM_MGMT = "realm-management";
@@ -31,16 +31,9 @@ function getClientIdFromToken(): string {
 async function tcFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
   const baseUrl = getTcAdminUrl();
   const url = `${baseUrl}${path}`;
-  const token = localStorage.getItem("access_token");
 
-  const headers: HeadersInit = {
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    ...options.headers,
-  };
-
-  const response = await appFetch(url, {
+  const response = await IAMService.fetch(url, {
     ...options,
-    headers,
   });
 
   if (!response.ok) {
@@ -54,13 +47,144 @@ async function tcFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
   return JSON.parse(text) as T;
 }
 
-// NOTE: The former client-direct change-request helpers (listAccessApprovals,
-// listRoleApprovals, getRawChangeSet, approveChangeRequest, rejectChangeRequest,
-// commitChangeRequest, cancelChangeRequest) were removed here: they targeted the
-// REMOVED /tide-admin/change-set/* and /tideAdminResources/add-review|add-rejection
-// endpoints, had no callers (the live CR flow runs through ./tidecloakAdmin via
-// api.ts and the server relay), and would 404 against the consolidated iga-core
-// surface. Deleted rather than repointed since nothing referenced them.
+// --- Change Requests (NEW consolidated iga-core surface) ---
+//
+// A single GET /iga/change-requests?status=PENDING returns a flat list of
+// IgaChangeRequestRepresentation for ALL entity types; we filter client-side by
+// entityType. Field renames vs the old surface: draftRecordId -> id ;
+// changeSetType -> entityType ; payload -> rows[] ; state -> status. actionType
+// is UNCHANGED. There is no userRecord / deleteStatus.
+async function listPendingChangeRequests(): Promise<any[]> {
+  return tcFetch<any[]>("/iga/change-requests?status=PENDING");
+}
+
+// --- Access Approvals (User Change Requests) ---
+
+export async function listAccessApprovals(): Promise<AccessApproval[]> {
+  const all = await listPendingChangeRequests();
+  const data = all.filter((item) => item.entityType === "USER");
+
+  return data.map((item) => {
+    return {
+      id: item.id,
+      timestamp: new Date().toISOString(),
+      username: item.requestedBy || "Unknown",
+      role: item.role || "Unknown",
+      clientId: item.clientId || "Unknown",
+      commitReady: item.readyToCommit === true || item.status === "APPROVED" || false,
+      decisionMade: false,
+      rejectionFound: false,
+      retrievalInfo: {
+        changeSetId: item.id,
+        changeSetType: item.entityType,
+        actionType: item.actionType,
+      },
+      data: item,
+    } as AccessApproval;
+  });
+}
+
+// --- Role Approvals (Role Change Requests) ---
+
+export async function listRoleApprovals(): Promise<RoleApproval[]> {
+  const all = await listPendingChangeRequests();
+  const data = all.filter((item) => item.entityType === "ROLE");
+
+  return data.map((item) => ({
+    id: item.id,
+    requestType: item.actionType || item.action,
+    status: item.status,
+    requestedBy: item.requestedBy || "Unknown",
+    requestedAt: item.createdAt || new Date().toISOString(),
+    role: item.role,
+    compositeRole: item.compositeRole,
+    clientId: item.clientId,
+    changeSetType: item.entityType,
+    userRecords: [],
+    retrievalInfo: {
+      changeSetId: item.id,
+      changeSetType: item.entityType,
+      actionType: item.actionType,
+    },
+  })) as RoleApproval[];
+}
+
+// --- Shared approval operations ---
+
+// Phase-1 /approve (empty body): the bytes the enclave signs arrive as
+// requestModel (== old changeSetDraftRequests); mode === "needs-approval"
+// (== old requiresApprovalPopup). For firstAdmin/simple the response is
+// {mode:"recorded", committed} (already recorded + auto-committed). Mapped into
+// the legacy rawRequests shape so the existing enclave-signing UI flow holds.
+export async function getRawChangeSet(
+  changeSet: ChangeSetRequest
+): Promise<
+  Array<{
+    changesetId: string;
+    changeSetDraftRequests: string;
+    requiresApprovalPopup: boolean | string;
+  }>
+> {
+  const resp = await tcFetch<any>(`/iga/change-requests/${changeSet.changeSetId}/approve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  const needsApproval = resp?.mode === "needs-approval";
+  return needsApproval
+    ? [{
+        changesetId: resp.changeRequestId || changeSet.changeSetId,
+        changeSetDraftRequests: resp.requestModel,
+        requiresApprovalPopup: true,
+      }]
+    : [{
+        changesetId: changeSet.changeSetId,
+        changeSetDraftRequests: "",
+        requiresApprovalPopup: false,
+      }];
+}
+
+// /approve = Authorize: records the authorization AND auto-commits at quorum
+// (collapses the old add-review + commit two-step). multiAdmin signed bytes
+// ride in requestModel; firstAdmin/simple send {}.
+export async function approveChangeRequest(
+  changeSet: ChangeSetRequest,
+  signedRequest?: string
+): Promise<void> {
+  await tcFetch(`/iga/change-requests/${changeSet.changeSetId}/approve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(signedRequest ? { requestModel: signedRequest } : {}),
+  });
+}
+
+// /deny replaces the old add-rejection (id in path, no body, 204).
+export async function rejectChangeRequest(
+  changeSet: ChangeSetRequest
+): Promise<void> {
+  await tcFetch(`/iga/change-requests/${changeSet.changeSetId}/deny`, {
+    method: "POST",
+  });
+}
+
+// Explicit apply-only commit (id in path, empty body). Usually unnecessary
+// since /approve auto-commits at quorum; 412 QUORUM_NOT_MET if sub-quorum.
+export async function commitChangeRequest(
+  changeSet: ChangeSetRequest
+): Promise<void> {
+  await tcFetch(`/iga/change-requests/${changeSet.changeSetId}/commit`, {
+    method: "POST",
+  });
+}
+
+// Cancel maps to /deny (id in path, no body, 204).
+export async function cancelChangeRequest(
+  changeSet: ChangeSetRequest
+): Promise<void> {
+  await tcFetch(`/iga/change-requests/${changeSet.changeSetId}/deny`, {
+    method: "POST",
+  });
+}
 
 // --- Helper: resolve client internal UUID from clientId string ---
 
@@ -239,13 +363,11 @@ export async function getTideLinkUrl(userId: string, redirectUri?: string): Prom
 
   const baseUrl = getTcAdminUrl();
   const fullUrl = `${baseUrl}${url}`;
-  const token = localStorage.getItem("access_token");
 
-  const response = await appFetch(fullUrl, {
+  const response = await IAMService.fetch(fullUrl, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
     body: JSON.stringify(["link-tide-account-action"]),
   });
