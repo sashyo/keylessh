@@ -79,6 +79,11 @@ fi
 REALM_NAME="${REALM_NAME:-myrealm}"
 REALM_JSON_PATH="${REALM_JSON_PATH:-${SCRIPT_DIR}/realm.json}"
 CLIENT_NAME="${CLIENT_NAME:-myclient}"
+# The confidential (tide-mtls) backend client used by the server-side delegation.
+# The app client carries an oidc-audience-mapper targeting this client, and the
+# generated adapter's serverResource points at it, so the delegation set is
+# auto-provisioned end to end. Override alongside CLIENT_NAME to rename both.
+SERVER_CLIENT_NAME="${SERVER_CLIENT_NAME:-keylessh-server}"
 CLIENT_APP_URL="${CLIENT_APP_URL:-http://localhost:3000}"
 ADAPTER_OUTPUT_PATH="${ADAPTER_OUTPUT_PATH:-${SCRIPT_DIR}/tidecloak.json}"
 
@@ -319,15 +324,26 @@ TMP_REALM_JSON="$(mktemp)"
 # issuers/broker URLs), extend the jq below to rewrite "/realms/keylessh" ->
 # "/realms/$rn" in those specific fields only.
 #
-# Also fix the app-auth client ($CLIENT_NAME, default "myclient") so the browser
-# token exchange is not CORS-blocked: the /token endpoint sets its
-# Access-Control-Allow-Origin from the client's webOrigins. We set webOrigins to
-# ["+"] (Keycloak special value = allow CORS from every registered redirect-URI
-# origin), and ensure $CLIENT_APP_URL (the app origin, e.g. http://localhost:3000)
-# is present in redirectUris. "+" is robust: it always tracks redirectUris, so a
-# different app host only needs the redirectUri added. We do NOT touch the other
-# clients (e.g. myclient-stun / punchd.keylessh.com app identity).
-jq --arg rn "$REALM_NAME" --arg cn "$CLIENT_NAME" --arg appurl "$CLIENT_APP_URL" '
+# Also fix the app-auth client so the browser token exchange is not CORS-blocked:
+# the /token endpoint sets its Access-Control-Allow-Origin from the client's
+# webOrigins. We set webOrigins to ["+"] (Keycloak special value = allow CORS from
+# every registered redirect-URI origin), and ensure $CLIENT_APP_URL (the app
+# origin, e.g. http://localhost:3000) is present in redirectUris. "+" is robust: it
+# always tracks redirectUris, so a different app host only needs the redirectUri
+# added.
+#
+# DELEGATION NAMING + AUDIENCE: the realm.json template ships the app client as
+# "myclient" and the confidential (tide-mtls) backend as "keylessh-server", plus
+# an oidc-audience-mapper on the app client. Here we (a) rename the app client to
+# $CLIENT_NAME and the backend to $SERVER_CLIENT_NAME (default no-op), (b) rename
+# the app client's roles.client key to match, and (c) retarget the audience
+# mapper's `included.client.audience` to $SERVER_CLIENT_NAME so the app token
+# always carries the backend as an aud (required for the server-side delegation
+# token exchange; the ORK attests CLIENT audiences, so this MUST be
+# included.client.audience, not included.custom.audience). This makes a fresh
+# realm delegation-ready with whatever client names the operator picks, with no
+# hand-created mapper.
+jq --arg rn "$REALM_NAME" --arg cn "$CLIENT_NAME" --arg scn "$SERVER_CLIENT_NAME" --arg appurl "$CLIENT_APP_URL" '
   .realm = $rn
   | (if (.defaultRole.name // "") == "default-roles-keylessh"
        then .defaultRole.name = ("default-roles-" + $rn) else . end)
@@ -335,11 +351,24 @@ jq --arg rn "$REALM_NAME" --arg cn "$CLIENT_NAME" --arg appurl "$CLIENT_APP_URL"
        then .roles.realm |= map(if .name == "default-roles-keylessh"
                                   then .name = ("default-roles-" + $rn) else . end)
        else . end)
+  # Rename the app client roles.client key myclient -> $cn (if renaming).
+  | (if ($cn != "myclient") and has("roles") and (.roles | has("client"))
+        and (.roles.client | has("myclient"))
+       then .roles.client[$cn] = .roles.client["myclient"] | del(.roles.client["myclient"])
+       else . end)
   | (if has("clients")
        then .clients |= map(
-              if .clientId == $cn then
-                .webOrigins = ["+"]
+              if .clientId == "myclient" then
+                .clientId = $cn
+                | .webOrigins = ["+"]
                 | .redirectUris = (((.redirectUris // []) + [$appurl, ($appurl + "/*")]) | unique)
+                | (if has("protocolMappers")
+                     then .protocolMappers |= map(
+                            if .protocolMapper == "oidc-audience-mapper"
+                              then .config["included.client.audience"] = $scn else . end)
+                     else . end)
+              elif .clientId == "keylessh-server" then
+                .clientId = $scn
               else . end)
        else . end)
 ' "$REALM_JSON_PATH" > "$TMP_REALM_JSON"
@@ -528,7 +557,19 @@ CLIENT_UUID=$(curl -s $CURL_OPTS -X GET "${TIDECLOAK_URL}/admin/realms/${REALM_N
 curl -s $CURL_OPTS -X GET "${TIDECLOAK_URL}/admin/realms/${REALM_NAME}/vendorResources/get-installations-provider?clientId=${CLIENT_UUID}&providerId=keycloak-oidc-keycloak-json" \
   -H "Authorization: Bearer $TOKEN" > "$ADAPTER_OUTPUT_PATH"
 
-log_info "Adapter config saved to $ADAPTER_OUTPUT_PATH"
+# Inject serverResource = the confidential (tide-mtls) backend client id. The
+# stock adapter JSON has no serverResource field, but the app's server-side
+# delegation (getDelegation() in server/lib/tidecloakApi.ts) reads
+# adapter.serverResource to resolve the client it exchanges the cert-bound
+# delegation token for. Without this the delegation cannot find the backend on a
+# fresh realm. Only inject if the fetched adapter is valid JSON.
+if jq -e . "$ADAPTER_OUTPUT_PATH" > /dev/null 2>&1; then
+  TMP_ADAPTER="$(mktemp)"
+  jq --arg sr "$SERVER_CLIENT_NAME" '. + {serverResource: $sr}' "$ADAPTER_OUTPUT_PATH" > "$TMP_ADAPTER" \
+    && mv "$TMP_ADAPTER" "$ADAPTER_OUTPUT_PATH"
+fi
+
+log_info "Adapter config saved to $ADAPTER_OUTPUT_PATH (serverResource=${SERVER_CLIENT_NAME})"
 
 # Validate the fetched adapter before installing it, then copy it to the location
 # the app ACTUALLY reads at runtime: <repo>/data/tidecloak.json. The server serves
