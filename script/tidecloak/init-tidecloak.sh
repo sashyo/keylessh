@@ -472,53 +472,6 @@ fi
 sign_all_change_requests
 
 # =============================================
-#  3b. Re-run the IGA ADOPT scan (OFF -> ON) so the app clients get stamped
-# =============================================
-#
-# ROOT CAUSE this addresses: setUpTideRealm (run above with IGA still OFF) calls
-# provisionTideClaimsScope, which retroactively attaches the `tide-claims` client
-# scope to EVERY existing client via direct DB writes (client.addClientScope).
-# That creates CLIENT_SCOPE_CLIENT rows for keylessh's OWN app clients
-# (${CLIENT_NAME} + the mTLS backend client) with attestation=NULL. The FIRST
-# toggle-on ADOPT scan (line above) runs immediately after those writes and, in
-# practice, leaves those specific app-client scope-assignment edges unstamped ->
-# the client's ClientEntity.clientScopeAssignmentAttestation stays NULL. At login
-# the fail-closed TVE producer emits the `client_scope_assignment_set` unit for
-# that client, finds no signature, and 500s the token mint. Built-in clients are
-# stamped fine; the gap is specific to the app clients touched by
-# provisionTideClaimsScope.
-#
-# The reliable fix (identical to the manual "re-toggle IGA" that unblocks an
-# already-broken realm): flip IGA OFF then ON again. toggle-iga always computes
-# next=!current (the isIGAEnabled form field is informational), so calling it
-# TWICE is an OFF->ON cycle. OFF runs IgaAdoptCancel (non-destructive: PENDING
-# ADOPT CRs -> CANCELLED, sidecar cleared; no attestations are removed); the
-# second ON re-runs the ADOPT scan against the now-settled state and emits +
-# stamps ADOPT CRs for the still-NULL app-client scope-assignment edges. sign_all
-# then commits them. ADOPT is idempotent (already-committed adopts are skipped),
-# so this only stamps what the first pass missed.
-log_info "Re-running IGA ADOPT scan (OFF->ON) to stamp app-client scope assignments..."
-TOKEN="$(get_admin_token)"
-# Flip OFF (current is ON -> next=OFF): cancels any PENDING ADOPT CRs + clears
-# the sidecar; does NOT remove existing attestations.
-curl -s $CURL_OPTS -X POST "${TIDECLOAK_URL}/admin/realms/${REALM_NAME}/tide-admin/toggle-iga" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  --data-urlencode "isIGAEnabled=false" > /dev/null 2>&1
-sleep 2
-TOKEN="$(get_admin_token)"
-# Flip ON again (current is OFF -> next=ON): re-runs the ADOPT scan, which now
-# sees the app-client scope edges as unattested and emits ADOPT CRs for them.
-curl -s $CURL_OPTS -X POST "${TIDECLOAK_URL}/admin/realms/${REALM_NAME}/tide-admin/toggle-iga" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  --data-urlencode "isIGAEnabled=true" > /dev/null 2>&1
-sleep 2
-# Commit the ADOPT CRs from the re-scan so the app clients' scope-assignment set
-# gets its attestation stamped before the app ever mints a token.
-sign_all_change_requests
-
-# =============================================
 #  4. Create admin user
 # =============================================
 
