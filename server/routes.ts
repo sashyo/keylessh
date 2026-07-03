@@ -135,6 +135,7 @@ import {
   AddApprovalWithSignedRequest,
   GetClientEvents,
   getDelegation,
+  getDelegationCertThumbprint,
   syncPolicyToTideCloak,
   type DelegationFetch,
 } from "./lib/tidecloakApi";
@@ -360,7 +361,18 @@ export async function registerRoutes(
   app.get("/api/auth/config", (_req, res) => {
     try {
       const config = GetConfig();
-      res.json(config);
+      // Expose the server's delegation cert thumbprint so the browser can build
+      // the signed X-Delegation-Request the delegated admin routes require. The
+      // client (AuthContext) reads config.delegationCertThumbprint and calls
+      // IAMService.setDelegationThumbprint(); IAMService.fetch() then attaches
+      // the X-Delegation-Request header on /api/admin/* calls. Null until the
+      // server-identity cert is enrolled (see initServerIdentity /
+      // requestServerCert); while null the client sends no header and the
+      // delegated routes 401 with "Delegation required".
+      res.json({
+        ...config,
+        delegationCertThumbprint: getDelegationCertThumbprint(),
+      });
     } catch (error) {
       log(`Failed to load auth config: ${error}`);
       res.status(500).json({ error: "Failed to load authentication configuration" });
