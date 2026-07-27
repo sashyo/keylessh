@@ -2473,10 +2473,13 @@ export async function registerRoutes(
 
           if (signature) {
             const signatureBytes = base64ToBytes(signature);
-            policy.signature = signatureBytes;
+            // Stored policyData layout: TideMemory([ DataToVerify, signature ])
+            // — section 0 byte-identical to what the ORK signed, section 1 = the new signature.
+            const composed = TideMemory.CreateFromArray([dataToVerify, signatureBytes]);
+            policyDataBase64 = bytesToBase64(composed);
             // Preserve the detached sig for the iga-core policySig mirror field.
             policySigBase64 = bytesToBase64(signatureBytes);
-            log(`Attached VVK signature to policy (${signatureBytes.length} bytes)`);
+            log(`Composed signed policy: dtv=${dataToVerify.length}B sig=${signatureBytes.length}B total=${composed.length}B`);
           } else {
             log(`Warning: No signature provided for policy commit — storing policy without signature`);
             policyDataBase64 = bytesToBase64(policyBytesNoSig);
