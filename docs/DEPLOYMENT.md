@@ -331,7 +331,7 @@ Download from TideCloak: **Clients** → your client → **Action** → **Downlo
 #### Docker (recommended)
 
 ```bash
-git clone https://github.com/sashyo/keylessh.git --branch vpn --depth 1
+git clone https://github.com/sashyo/keylessh.git --depth 1
 cd keylessh/bridges/punchd-bridge-rs
 docker build -t punchd-gateway .
 
@@ -359,7 +359,7 @@ curl http://localhost:7892/health
 
 #### Linux .deb
 
-> **Note:** The .deb is built on Ubuntu 22.04. For older distros, build from source instead.
+> **Note:** The .deb is built on Ubuntu 22.04. For older distros, use the MUSL build from [releases](../../releases) or build from source instead.
 
 ```bash
 sudo apt install ./punchd-gateway-linux-x64.deb
@@ -378,7 +378,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source ~/.cargo/env
 
 # Build
-git clone https://github.com/sashyo/keylessh.git --branch vpn --depth 1
+git clone https://github.com/sashyo/keylessh.git --depth 1
 cd keylessh/bridges/punchd-bridge-rs
 cargo build --release --bin punchd-bridge-rs
 sudo cp target/release/punchd-bridge-rs /usr/bin/
@@ -418,9 +418,22 @@ sudo systemctl enable --now punchd-gateway
 Check it's running:
 
 ```bash
-sudo systemctl status punchd-gateway
-curl http://localhost:7892/health
-curl http://localhost:7891/api/info
+sudo systemctl status punchd-gateway          # Check service status
+curl http://localhost:7892/health             # Verify web endpoint is up
+curl http://localhost:7891/api/info           # Check local server is running
+sudo journalctl -u punchd-gateway.service -f  # See live service logs
+```
+
+If you want to uninstall but keep the config:
+
+```bash
+sudo apt remove punchd-gateway
+```
+
+To uninstall and remove entirely:
+
+```bash
+sudo apt purge punchd-gateway
 ```
 
 ### Step 3: Add to KeyleSSH UI
@@ -459,7 +472,7 @@ curl http://localhost:7892/health
 # {"status":"ok"}
 
 # View logs
-curl http://localhost:7892/logs       # browser-friendly HTML
+curl http://localhost:7892/logs        # browser-friendly HTML
 curl http://localhost:7892/logs/buffer # JSON array
 ```
 
