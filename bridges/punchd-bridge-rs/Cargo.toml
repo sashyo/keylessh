@@ -53,6 +53,7 @@ arc-swap = "1"
 ipnet = "2"
 wry = { version = "0.55", optional = true }
 tao = { version = "0.35", optional = true }
+openssl = { version = "0.10.81", features = ["vendored"] }
 
 [features]
 default = []

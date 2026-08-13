@@ -7,51 +7,51 @@ use std::path::PathBuf;
 
 use base64::Engine;
 use rand::Rng;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 // ── Config file schema (gateway.toml) ───────────────────────────
 
-#[derive(Deserialize, Default, Debug)]
+#[derive(Deserialize, Serialize, Default, Debug, Clone)]
 struct GatewayToml {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     gateway_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     stun_server_url: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     api_secret: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     backends: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     listen_port: Option<u16>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     health_port: Option<u16>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     https: Option<bool>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     tls_hostname: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     display_name: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     description: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     ice_servers: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     turn_server: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     turn_secret: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     tidecloak_config_path: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     tidecloak_config_b64: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     auth_server_public_url: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     tc_internal_url: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     strip_auth_header: Option<bool>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     server_url: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     quic_port: Option<u16>,
 }
 
@@ -133,6 +133,18 @@ pub struct TidecloakConfig {
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
+impl TidecloakConfig {
+    /// OIDC issuer this gateway trusts — the tenancy identity advertised to the
+    /// signal server so consoles only list gateways sharing their TideCloak realm.
+    pub fn issuer(&self) -> String {
+        format!(
+            "{}/realms/{}",
+            self.auth_server_url.trim_end_matches('/'),
+            self.realm
+        )
+    }
+}
+
 // ── Config file path ────────────────────────────────────────────
 
 /// Config directory: ~/.keylessh/ (or %APPDATA%\KeyleSSH\ on Windows)
@@ -167,6 +179,14 @@ static ON_CONFIG_CHANGE: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>> = std:
 /// Register a callback that fires when config files change.
 pub fn on_config_change(cb: impl Fn() + Send + Sync + 'static) {
     let _ = ON_CONFIG_CHANGE.set(Box::new(cb));
+}
+
+/// Run the reload callback now. Used after a remote config push, which writes
+/// the file itself and so does not need to wait for the watcher.
+pub fn notify_config_changed() {
+    if let Some(cb) = ON_CONFIG_CHANGE.get() {
+        cb();
+    }
 }
 
 /// Watch gateway.toml and tidecloak config for changes using OS-native file notifications
@@ -272,6 +292,199 @@ pub fn config_file_path() -> PathBuf {
         }
     }
     dir.join("gateway.toml")
+}
+
+// ── Remote config push ──────────────────────────────────────────
+
+/// Fields that may never be set from a remote push.
+///
+/// `tidecloak_config_*`, `auth_server_public_url` and `tc_internal_url` define
+/// which TideCloak this gateway trusts — accepting them over the wire would let
+/// anyone holding the signal server's shared API secret repoint a gateway at
+/// their own IdP and mint access to every backend behind it. `gateway_id`,
+/// `stun_server_url` and `api_secret` are this gateway's own identity and
+/// bootstrap; letting a push rewrite them would allow hijacking it onto a
+/// different signal server. All of these stay a deliberate local action.
+pub const PROTECTED_FIELDS: &[&str] = &[
+    "gateway_id",
+    "stun_server_url",
+    "api_secret",
+    "tidecloak_config_b64",
+    "tidecloak_config_path",
+    "auth_server_public_url",
+    "tc_internal_url",
+];
+
+#[derive(Debug, Default, Serialize)]
+pub struct RejectedField {
+    pub field: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct RemoteConfigOutcome {
+    /// Fields whose value actually changed.
+    pub applied: Vec<String>,
+    /// Fields refused, with why.
+    pub rejected: Vec<RejectedField>,
+    /// False when every field was already at the requested value.
+    pub changed: bool,
+    /// Set when the config could not be read or written at all.
+    pub error: Option<String>,
+}
+
+impl RemoteConfigOutcome {
+    fn failed(error: impl Into<String>) -> Self {
+        Self { error: Some(error.into()), ..Default::default() }
+    }
+
+    fn reject(&mut self, field: &str, reason: impl Into<String>) {
+        self.rejected.push(RejectedField { field: field.to_string(), reason: reason.into() });
+    }
+}
+
+fn try_load_toml() -> Result<GatewayToml, String> {
+    let path = config_file_path();
+    if !path.exists() {
+        return Ok(GatewayToml::default());
+    }
+    let content = fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    toml::from_str(&content).map_err(|e| format!("parse {}: {e}", path.display()))
+}
+
+/// Merge a remotely-pushed config patch into gateway.toml.
+///
+/// Only the fields outside [`PROTECTED_FIELDS`] are honoured; everything else is
+/// reported back as rejected so the console can show what was refused.
+pub fn apply_remote_config(patch: &serde_json::Map<String, serde_json::Value>) -> RemoteConfigOutcome {
+    let original = match try_load_toml() {
+        Ok(c) => c,
+        Err(e) => return RemoteConfigOutcome::failed(e),
+    };
+
+    let (updated, mut outcome) = merge_remote_config(&original, patch);
+    if !outcome.changed {
+        return outcome;
+    }
+
+    if let Err(e) = write_toml(&updated) {
+        outcome.error = Some(e);
+        outcome.applied.clear();
+        outcome.changed = false;
+        return outcome;
+    }
+
+    tracing::info!("[Config] Applied remote config: {}", outcome.applied.join(", "));
+
+    // Trigger the reload directly rather than waiting on the file watcher: the
+    // watcher follows an inode, and the atomic rename in `write_toml` replaces
+    // it, so it cannot be relied on for a second push.
+    notify_config_changed();
+    outcome
+}
+
+/// Pure part of [`apply_remote_config`]: overlay the patch onto a config and
+/// report what was applied or refused, touching no files.
+fn merge_remote_config(
+    original: &GatewayToml,
+    patch: &serde_json::Map<String, serde_json::Value>,
+) -> (GatewayToml, RemoteConfigOutcome) {
+    let mut outcome = RemoteConfigOutcome::default();
+    let mut updated = original.clone();
+
+    // Coercion helpers: record a rejection when the pushed JSON type is wrong.
+    macro_rules! set_str {
+        ($field:ident, $key:expr, $value:expr) => {
+            match $value {
+                serde_json::Value::Null => updated.$field = None,
+                serde_json::Value::String(s) => updated.$field = Some(s.clone()),
+                _ => outcome.reject($key, "expected a string"),
+            }
+        };
+    }
+    macro_rules! set_port {
+        ($field:ident, $key:expr, $value:expr) => {
+            match $value.as_u64() {
+                Some(n) if n > 0 && n <= u16::MAX as u64 => updated.$field = Some(n as u16),
+                _ if $value.is_null() => updated.$field = None,
+                _ => outcome.reject($key, "expected a port between 1 and 65535"),
+            }
+        };
+    }
+    macro_rules! set_bool {
+        ($field:ident, $key:expr, $value:expr) => {
+            match $value.as_bool() {
+                Some(b) => updated.$field = Some(b),
+                None if $value.is_null() => updated.$field = None,
+                None => outcome.reject($key, "expected true or false"),
+            }
+        };
+    }
+
+    for (key, value) in patch {
+        if PROTECTED_FIELDS.contains(&key.as_str()) {
+            outcome.reject(key, "set locally on the gateway only");
+            continue;
+        }
+        match key.as_str() {
+            "backends" => set_str!(backends, key, value),
+            "display_name" => set_str!(display_name, key, value),
+            "description" => set_str!(description, key, value),
+            "ice_servers" => set_str!(ice_servers, key, value),
+            "turn_server" => set_str!(turn_server, key, value),
+            "turn_secret" => set_str!(turn_secret, key, value),
+            "tls_hostname" => set_str!(tls_hostname, key, value),
+            "server_url" => set_str!(server_url, key, value),
+            "listen_port" => set_port!(listen_port, key, value),
+            "health_port" => set_port!(health_port, key, value),
+            "quic_port" => set_port!(quic_port, key, value),
+            "https" => set_bool!(https, key, value),
+            "strip_auth_header" => set_bool!(strip_auth_header, key, value),
+            _ => outcome.reject(key, "unknown field"),
+        }
+    }
+
+    // Report only fields that genuinely differ, so a repeated push does not
+    // churn the gateway into a pointless reload.
+    outcome.applied = changed_fields(original, &updated);
+    outcome.changed = !outcome.applied.is_empty();
+    (updated, outcome)
+}
+
+/// Names of the fields that differ between two configs.
+fn changed_fields(a: &GatewayToml, b: &GatewayToml) -> Vec<String> {
+    let (av, bv) = (
+        serde_json::to_value(a).unwrap_or_default(),
+        serde_json::to_value(b).unwrap_or_default(),
+    );
+    let (ao, bo) = match (av.as_object(), bv.as_object()) {
+        (Some(ao), Some(bo)) => (ao, bo),
+        _ => return Vec::new(),
+    };
+    let mut keys: Vec<&String> = ao.keys().chain(bo.keys()).collect();
+    keys.sort();
+    keys.dedup();
+    keys.into_iter()
+        .filter(|key| ao.get(*key) != bo.get(*key))
+        .cloned()
+        .collect()
+}
+
+/// Write gateway.toml atomically so a crash mid-write cannot truncate the config
+/// the gateway needs to restart.
+fn write_toml(config: &GatewayToml) -> Result<(), String> {
+    let path = config_file_path();
+    let body = toml::to_string_pretty(config).map_err(|e| format!("serialize config: {e}"))?;
+    let contents = format!(
+        "# Punchd Gateway Configuration\n\
+         # Managed from the KeyleSSH console — edits here are overwritten on the next push.\n\
+         # TideCloak settings and signal server identity are local-only and never pushed.\n\n{body}"
+    );
+
+    let tmp = path.with_extension("toml.tmp");
+    fs::write(&tmp, contents).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    fs::rename(&tmp, &path).map_err(|e| format!("replace {}: {e}", path.display()))?;
+    Ok(())
 }
 
 fn load_toml() -> GatewayToml {
@@ -564,5 +777,158 @@ fn detect_lan_ip() -> String {
 mod hex {
     pub fn encode(bytes: &[u8]) -> String {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+}
+
+#[cfg(test)]
+mod remote_config_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn patch(value: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+        value.as_object().expect("patch must be an object").clone()
+    }
+
+    fn base() -> GatewayToml {
+        GatewayToml {
+            gateway_id: Some("gw-1".into()),
+            stun_server_url: Some("wss://signal.example.com".into()),
+            api_secret: Some("shared-secret".into()),
+            backends: Some("App=http://10.0.0.5:8080".into()),
+            tidecloak_config_b64: Some("ZXhpc3Rpbmc=".into()),
+            auth_server_public_url: Some("https://tc.example.com".into()),
+            listen_port: Some(7891),
+            https: Some(true),
+            ..Default::default()
+        }
+    }
+
+    fn rejected_reason(outcome: &RemoteConfigOutcome, field: &str) -> Option<String> {
+        outcome.rejected.iter().find(|r| r.field == field).map(|r| r.reason.clone())
+    }
+
+    #[test]
+    fn applies_backends_and_ports() {
+        let p = patch(json!({
+            "backends": "App=http://10.0.0.5:8080, Db=rdp://10.0.0.9:3389;eddsa",
+            "listen_port": 9000,
+        }));
+        let (updated, outcome) = merge_remote_config(&base(), &p);
+
+        assert!(outcome.changed);
+        assert_eq!(outcome.rejected.len(), 0);
+        assert_eq!(updated.backends.as_deref(), Some("App=http://10.0.0.5:8080, Db=rdp://10.0.0.9:3389;eddsa"));
+        assert_eq!(updated.listen_port, Some(9000));
+        let mut applied = outcome.applied.clone();
+        applied.sort();
+        assert_eq!(applied, vec!["backends", "listen_port"]);
+    }
+
+    #[test]
+    fn refuses_to_repoint_the_trust_anchor() {
+        let p = patch(json!({
+            "tidecloak_config_b64": "YXR0YWNrZXI=",
+            "auth_server_public_url": "https://attacker.example.com",
+            "tc_internal_url": "https://attacker.example.com",
+        }));
+        let (updated, outcome) = merge_remote_config(&base(), &p);
+
+        assert!(!outcome.changed, "a push must never change the trust anchor");
+        assert!(outcome.applied.is_empty());
+        assert_eq!(updated.tidecloak_config_b64.as_deref(), Some("ZXhpc3Rpbmc="));
+        assert_eq!(updated.auth_server_public_url.as_deref(), Some("https://tc.example.com"));
+        for field in ["tidecloak_config_b64", "auth_server_public_url", "tc_internal_url"] {
+            assert_eq!(rejected_reason(&outcome, field).as_deref(), Some("set locally on the gateway only"));
+        }
+    }
+
+    #[test]
+    fn refuses_to_hijack_gateway_identity() {
+        let p = patch(json!({
+            "gateway_id": "someone-elses-gateway",
+            "stun_server_url": "wss://attacker.example.com",
+            "api_secret": "new-secret",
+        }));
+        let (updated, outcome) = merge_remote_config(&base(), &p);
+
+        assert!(!outcome.changed);
+        assert_eq!(updated.gateway_id.as_deref(), Some("gw-1"));
+        assert_eq!(updated.stun_server_url.as_deref(), Some("wss://signal.example.com"));
+        assert_eq!(updated.api_secret.as_deref(), Some("shared-secret"));
+        assert_eq!(outcome.rejected.len(), 3);
+    }
+
+    #[test]
+    fn a_rejected_field_does_not_block_the_allowed_ones() {
+        let p = patch(json!({ "backends": "App=http://10.0.0.6:8080", "api_secret": "nope" }));
+        let (updated, outcome) = merge_remote_config(&base(), &p);
+
+        assert_eq!(outcome.applied, vec!["backends"]);
+        assert_eq!(updated.backends.as_deref(), Some("App=http://10.0.0.6:8080"));
+        assert_eq!(updated.api_secret.as_deref(), Some("shared-secret"));
+    }
+
+    #[test]
+    fn repeated_push_of_the_same_values_is_a_no_op() {
+        let p = patch(json!({ "backends": "App=http://10.0.0.5:8080", "listen_port": 7891 }));
+        let (_, outcome) = merge_remote_config(&base(), &p);
+
+        assert!(!outcome.changed, "unchanged values must not trigger a reload");
+        assert!(outcome.applied.is_empty());
+    }
+
+    #[test]
+    fn wrong_types_are_rejected_not_coerced() {
+        let p = patch(json!({ "listen_port": "9000", "https": "yes", "backends": 42 }));
+        let (updated, outcome) = merge_remote_config(&base(), &p);
+
+        assert!(!outcome.changed);
+        assert_eq!(updated.listen_port, Some(7891));
+        assert_eq!(updated.https, Some(true));
+        assert_eq!(rejected_reason(&outcome, "listen_port").as_deref(), Some("expected a port between 1 and 65535"));
+        assert_eq!(rejected_reason(&outcome, "https").as_deref(), Some("expected true or false"));
+        assert_eq!(rejected_reason(&outcome, "backends").as_deref(), Some("expected a string"));
+    }
+
+    #[test]
+    fn out_of_range_ports_are_rejected() {
+        let p = patch(json!({ "listen_port": 0, "health_port": 70000 }));
+        let (updated, outcome) = merge_remote_config(&base(), &p);
+
+        assert!(!outcome.changed);
+        assert_eq!(updated.listen_port, Some(7891));
+        assert_eq!(outcome.rejected.len(), 2);
+    }
+
+    #[test]
+    fn unknown_fields_are_reported_rather_than_silently_dropped() {
+        let p = patch(json!({ "totally_made_up": "x" }));
+        let (_, outcome) = merge_remote_config(&base(), &p);
+
+        assert_eq!(rejected_reason(&outcome, "totally_made_up").as_deref(), Some("unknown field"));
+    }
+
+    #[test]
+    fn null_clears_an_optional_field() {
+        let p = patch(json!({ "turn_server": null }));
+        let mut original = base();
+        original.turn_server = Some("turn:1.2.3.4:3478".into());
+        let (updated, outcome) = merge_remote_config(&original, &p);
+
+        assert!(outcome.changed);
+        assert_eq!(updated.turn_server, None);
+    }
+
+    #[test]
+    fn serialized_config_omits_unset_fields() {
+        let (updated, _) = merge_remote_config(&base(), &patch(json!({ "listen_port": 9000 })));
+        let rendered = toml::to_string_pretty(&updated).expect("serializes");
+
+        assert!(rendered.contains("listen_port = 9000"));
+        assert!(!rendered.contains("description"), "unset fields must not be written as empty keys");
+        // Round-trips: the gateway must be able to read back what it wrote.
+        let reparsed: GatewayToml = toml::from_str(&rendered).expect("parses");
+        assert_eq!(reparsed.listen_port, Some(9000));
+        assert_eq!(reparsed.gateway_id.as_deref(), Some("gw-1"));
     }
 }

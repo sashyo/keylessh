@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::config::Config;
 use crate::registry::Registry;
@@ -36,6 +36,12 @@ pub struct AppState {
     pub registry: Arc<Registry>,
     pub pending_requests: Arc<DashMap<String, PendingRequest>>,
     pub connections_by_ip: Arc<DashMap<String, usize>>,
+    /// In-flight config pushes, keyed by request id, awaiting the gateway's ack.
+    pub pending_config_acks: Arc<DashMap<String, oneshot::Sender<serde_json::Value>>>,
+    /// Config pushed to a gateway that was offline, keyed by gateway id, and
+    /// delivered when it next registers. Only the newest push per gateway is
+    /// kept — an older one has already been superseded.
+    pub pending_configs: Arc<DashMap<String, serde_json::Value>>,
 }
 
 impl AppState {
@@ -45,6 +51,8 @@ impl AppState {
             registry: Arc::new(Registry::new()),
             pending_requests: Arc::new(DashMap::new()),
             connections_by_ip: Arc::new(DashMap::new()),
+            pending_config_acks: Arc::new(DashMap::new()),
+            pending_configs: Arc::new(DashMap::new()),
         }
     }
 }

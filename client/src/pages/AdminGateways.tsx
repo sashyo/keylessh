@@ -19,14 +19,21 @@ import {
 } from "@/components/ui/table";
 import { useToast } from "@/hooks/use-toast";
 import { queryClient } from "@/lib/queryClient";
-import { api, type GatewayConfigSummary } from "@/lib/api";
+import { api, type GatewayConfigSummary, type GatewayPushResult } from "@/lib/api";
+import {
+  parseBackends,
+  serializeBackends,
+  backendProtocol,
+  EMPTY_BACKEND,
+  type BackendRow,
+} from "@/lib/backends";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 import { RefreshButton } from "@/components/RefreshButton";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Router, Plus, Pencil, Trash2, Download, Wifi, Copy, Check, KeyRound, FileDown, Shield, Settings } from "lucide-react";
+import { Router, Plus, Pencil, Trash2, Download, Wifi, Copy, Check, KeyRound, FileDown, Shield, Settings, UploadCloud, Loader2 } from "lucide-react";
 import type { SignalServer } from "@shared/schema";
 import { useAuth, useAuthConfig } from "@/contexts/AuthContext";
 import { useMemo } from "react";
@@ -73,6 +80,120 @@ function SshPublicKeyBanner() {
       </div>
     </div>
   );
+}
+
+/**
+ * Edit backends as rows instead of the `Name=url;flags` string the gateway
+ * stores. The string stays the source of truth — rows are derived on each
+ * render — so anything hand-written elsewhere still round-trips.
+ */
+function BackendsEditor({ value, onChange }: { value: string; onChange: (backends: string) => void }) {
+  const rows = useMemo(() => parseBackends(value), [value]);
+  const [raw, setRaw] = useState(false);
+
+  const update = (index: number, patch: Partial<BackendRow>) => {
+    const next = rows.map((row, i) => (i === index ? { ...row, ...patch } : row));
+    onChange(serializeBackends(next));
+  };
+
+  const add = () => onChange(serializeBackends([...rows, { ...EMPTY_BACKEND, name: "", url: "http://" }]));
+  const remove = (index: number) => onChange(serializeBackends(rows.filter((_, i) => i !== index)));
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <Label className="text-xs">Backends <span className="text-muted-foreground font-normal">(optional)</span></Label>
+        <button
+          type="button"
+          onClick={() => setRaw(!raw)}
+          className="text-[10px] text-muted-foreground hover:text-foreground underline underline-offset-2"
+        >
+          {raw ? "Edit as rows" : "Edit as text"}
+        </button>
+      </div>
+
+      {raw ? (
+        <Input
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder="Name=rdp://host:3389;eddsa"
+          className="font-mono text-xs"
+        />
+      ) : (
+        <div className="space-y-2">
+          {rows.map((row, i) => (
+            <div key={i} className="rounded-md border border-border p-2 space-y-2">
+              <div className="flex gap-2">
+                <Input
+                  value={row.name}
+                  onChange={(e) => update(i, { name: e.target.value })}
+                  placeholder="Name"
+                  className="h-8 text-xs w-1/3"
+                />
+                <Input
+                  value={row.url}
+                  onChange={(e) => update(i, { url: e.target.value })}
+                  placeholder="rdp://10.0.0.9:3389"
+                  className="h-8 text-xs flex-1 font-mono"
+                />
+                <Badge variant="outline" className="h-8 px-2 text-[10px] uppercase shrink-0 flex items-center">
+                  {backendProtocol(row.url)}
+                </Badge>
+                <Button type="button" size="icon" variant="ghost" className="h-8 w-8 shrink-0" onClick={() => remove(i)}>
+                  <Trash2 className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 pl-1">
+                {([
+                  ["eddsa", "EdDSA", "Passwordless RDP using EdDSA certificates"],
+                  ["noAuth", "No auth", "Skip JWT verification for this backend"],
+                  ["stripAuth", "Strip auth", "Remove auth headers before forwarding"],
+                ] as const).map(([key, label, title]) => (
+                  <label key={key} className="flex items-center gap-1.5 text-[11px] text-muted-foreground" title={title}>
+                    <input
+                      type="checkbox"
+                      checked={row[key]}
+                      onChange={(e) => update(i, { [key]: e.target.checked })}
+                      className="h-3 w-3 accent-[hsl(var(--neon-cyan))]"
+                    />
+                    {label}
+                  </label>
+                ))}
+              </div>
+            </div>
+          ))}
+
+          <Button type="button" variant="outline" size="sm" className="w-full gap-1.5 h-8 text-xs" onClick={add}>
+            <Plus className="h-3.5 w-3.5" /> Add backend
+          </Button>
+        </div>
+      )}
+
+      <p className="text-[10px] text-muted-foreground">
+        Pre-configured endpoints. Leave empty to use custom IP connections only.
+      </p>
+    </div>
+  );
+}
+
+/** Turn a push result into something worth reading in a toast. */
+function describePush(push: GatewayPushResult): { title: string; description?: string; variant?: "destructive" } {
+  if (push.error) {
+    return { title: "Saved — gateway not updated", description: push.error, variant: "destructive" };
+  }
+  if (push.pending) {
+    return { title: "Saved — gateway offline", description: push.message || "Config will apply when the gateway reconnects." };
+  }
+  const refused = push.rejected.length
+    ? ` Refused: ${push.rejected.map((r) => `${r.field} (${r.reason})`).join(", ")}.`
+    : "";
+  if (!push.changed) {
+    return { title: "Gateway already up to date", description: refused.trim() || undefined };
+  }
+  return {
+    title: "Applied to gateway",
+    description: `Updated ${push.applied.join(", ")}.${refused}`,
+  };
 }
 
 const defaultForm: Partial<GatewayConfigSummary> = {
@@ -132,12 +253,20 @@ export default function AdminGateways() {
 
   const updateMutation = useMutation({
     mutationFn: ({ id, data }: { id: string; data: any }) => api.admin.gatewayConfigs.update(id, data),
-    onSuccess: () => {
+    onSuccess: (result: GatewayConfigSummary & { push?: GatewayPushResult }) => {
       queryClient.invalidateQueries({ queryKey: ["/api/admin/gateway-configs"] });
       setEditing(null);
-      toast({ title: "Gateway config updated" });
+      // Saving pushes to the running gateway — report what actually happened
+      // there, since that is the part the admin cannot otherwise see.
+      toast(result.push ? describePush(result.push) : { title: "Gateway config updated" });
     },
     onError: (e: Error) => toast({ title: "Failed to update", description: e.message, variant: "destructive" }),
+  });
+
+  const pushMutation = useMutation({
+    mutationFn: (id: string) => api.admin.gatewayConfigs.push(id),
+    onSuccess: (push) => toast(describePush(push)),
+    onError: (e: Error) => toast({ title: "Push failed", description: e.message, variant: "destructive" }),
   });
 
   const deleteMutation = useMutation({
@@ -235,16 +364,10 @@ export default function AdminGateways() {
         <p className="text-[10px] text-muted-foreground">STUN/TURN and API secret are inherited from the signal server config.</p>
       </div>
 
-      <div className="space-y-1">
-        <Label className="text-xs">Backends <span className="text-muted-foreground font-normal">(optional)</span></Label>
-        <Input value={form.backends || ""} onChange={(e) => setForm({ ...form, backends: e.target.value })} placeholder="Name=rdp://host:3389;eddsa" />
-        <p className="text-[10px] text-muted-foreground">Pre-configured endpoints. Leave empty to use custom IP connections only. Format: Name=url;flags, comma-separated.</p>
-        <ul className="text-[10px] text-muted-foreground list-disc pl-4 space-y-0.5">
-          <li><code className="bg-muted px-0.5 rounded">noauth</code> — skip JWT verification for this backend</li>
-          <li><code className="bg-muted px-0.5 rounded">eddsa</code> — passwordless RDP using EdDSA certificates</li>
-          <li><code className="bg-muted px-0.5 rounded">stripauth</code> — remove auth headers before forwarding to backend</li>
-        </ul>
-      </div>
+      <BackendsEditor
+        value={form.backends || ""}
+        onChange={(backends) => setForm({ ...form, backends })}
+      />
 
       <div className="space-y-1">
         <Label className="text-xs">Punchd Client TideCloak Config</Label>
@@ -388,6 +511,17 @@ export default function AdminGateways() {
                       </TableCell>
                       <TableCell className="text-right">
                         <div className="flex items-center justify-end gap-1">
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            title="Push config to the running gateway"
+                            disabled={pushMutation.isPending}
+                            onClick={() => pushMutation.mutate(config.id)}
+                          >
+                            {pushMutation.isPending && pushMutation.variables === config.id
+                              ? <Loader2 className="h-4 w-4 animate-spin" />
+                              : <UploadCloud className="h-4 w-4" />}
+                          </Button>
                           <Button size="icon" variant="ghost" title="Download gateway.toml" onClick={() => handleDownload(config)}>
                             <Download className="h-4 w-4" />
                           </Button>

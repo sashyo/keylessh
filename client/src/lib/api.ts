@@ -548,14 +548,27 @@ export const api = {
       list: () => apiRequest<GatewayConfigSummary[]>("/api/admin/gateway-configs"),
       get: (id: string) => apiRequest<GatewayConfigSummary>(`/api/admin/gateway-configs/${id}`),
       create: (data: any) => apiRequest<GatewayConfigSummary>("/api/admin/gateway-configs", { method: "POST", body: JSON.stringify(data) }),
-      update: (id: string, data: any) => apiRequest<GatewayConfigSummary>(`/api/admin/gateway-configs/${id}`, { method: "PUT", body: JSON.stringify(data) }),
+      // Saving also pushes to the running gateway; `push` reports how that went.
+      update: (id: string, data: any) => apiRequest<GatewayConfigSummary & { push?: GatewayPushResult }>(`/api/admin/gateway-configs/${id}`, { method: "PUT", body: JSON.stringify(data) }),
       delete: (id: string) => apiRequest<void>(`/api/admin/gateway-configs/${id}`, { method: "DELETE" }),
+      push: (id: string) => apiRequest<GatewayPushResult>(`/api/admin/gateway-configs/${id}/push`, { method: "POST" }),
       downloadUrl: (id: string) => `/api/admin/gateway-configs/${id}/download`,
       vpnConfigUrl: (id: string) => `/api/admin/gateway-configs/${id}/vpn-config`,
       tidecloakConfigUrl: (id: string) => `/api/admin/gateway-configs/${id}/tidecloak-config`,
     },
   },
 };
+
+// Result of pushing a gateway config to the running gateway via the signal server
+export interface GatewayPushResult {
+  delivered: boolean;
+  pending: boolean;
+  applied: string[];
+  rejected: { field: string; reason: string }[];
+  changed: boolean;
+  error?: string | null;
+  message?: string;
+}
 
 // Gateway config (managed from admin UI)
 export interface GatewayConfigSummary {
@@ -595,6 +608,10 @@ export interface GatewayEndpoint {
   signalServerName: string;
   signalServerUrl: string;
   directUrl?: string;
+  /// TideCloak issuer the gateway trusts. The server only returns gateways
+  /// matching this instance's issuer, so a shared signal server does not leak
+  /// another deployment's gateways into this list.
+  issuer?: string | null;
 }
 
 // Re-export types for convenience

@@ -15,6 +15,13 @@ pub struct GatewayMetadata {
     pub backends: Option<Vec<BackendInfo>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub realm: Option<String>,
+    /// TideCloak issuer this gateway trusts (`<auth-server-url>/realms/<realm>`).
+    /// Descriptive only — unlike `realm` it is always advertised, so it can be
+    /// used to tell tenants apart without affecting HTTP relay routing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issuer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub public_url: Option<String>,
 }
@@ -235,6 +242,8 @@ mod tests {
             description: None,
             backends: None,
             realm: None,
+            issuer: None,
+            client_id: None,
             public_url: None,
         }
     }
@@ -255,6 +264,8 @@ mod tests {
             description: Some("Test gateway".into()),
             backends: Some(vec![BackendInfo { name: "App".into(), protocol: Some("http".into()), auth: None }]),
             realm: Some("keylessh".into()),
+            issuer: Some("https://tc.example.com/realms/keylessh".into()),
+            client_id: Some("punchd".into()),
             public_url: None,
         };
         r.register_gateway("gw-1".into(), vec!["1.2.3.4:443".into()], sender(), m, None);
@@ -263,6 +274,8 @@ mod tests {
         assert_eq!(gw.metadata.description.as_deref(), Some("Test gateway"));
         assert_eq!(gw.metadata.backends.as_ref().unwrap().len(), 1);
         assert_eq!(gw.metadata.realm.as_deref(), Some("keylessh"));
+        assert_eq!(gw.metadata.issuer.as_deref(), Some("https://tc.example.com/realms/keylessh"));
+        assert_eq!(gw.metadata.client_id.as_deref(), Some("punchd"));
     }
 
     #[test]
