@@ -166,6 +166,10 @@ async fn run_gateway() {
             if hosts_tc_locally {
                 meta["realm"] = serde_json::json!(tc_config.realm);
             }
+            // Always advertised, unlike `realm` — descriptive only, so it never
+            // affects HTTP relay routing. Lets consoles filter to their own tenant.
+            meta["issuer"] = serde_json::json!(tc_config.issuer());
+            meta["clientId"] = serde_json::json!(tc_config.resource);
             if let Ok(public_url) = std::env::var("PUBLIC_URL") {
                 meta["publicUrl"] = serde_json::json!(public_url);
             }
@@ -217,6 +221,8 @@ async fn run_gateway() {
             if hosts_tc_locally {
                 meta["realm"] = serde_json::json!(new_tc_config.realm);
             }
+            meta["issuer"] = serde_json::json!(new_tc_config.issuer());
+            meta["clientId"] = serde_json::json!(new_tc_config.resource);
             stun_reg.update_metadata(meta);
         });
     }

@@ -7,7 +7,7 @@ mod proxy;
 mod quic;
 mod http;
 
-use axum::{routing::get, Router};
+use axum::{routing::{get, post}, Router};
 use axum::http::Request;
 use axum::middleware::Next;
 use axum::response::Response;
@@ -59,6 +59,7 @@ async fn main() {
         .route("/health", get(http::routes::health))
         .route("/webrtc-config", get(http::routes::webrtc_config))
         .route("/api/gateways", get(http::routes::gateways))
+        .route("/api/gateways/{id}/config", post(http::routes::push_gateway_config))
         .route("/ws/ssh", get(proxy::ssh::ssh_ws_handler))
         // WebSocket signaling on root path
         .route("/", get(signaling::handler::ws_handler))

@@ -139,6 +139,7 @@ import type { ChangeSetRequest, AccessApproval } from "./lib/auth/keycloakTypes"
 import { getAllowedSshUsersFromToken } from "./lib/auth/sshUsers";
 import { parseDestRolesFromToken, hasDestAccess } from "./lib/auth/destRoles";
 import { verifyTideCloakToken } from "./lib/auth/tideJWT";
+import { pushGatewayConfig, matchSignalServer } from "./lib/gatewayPush";
 
 // SSH connections are handled via WebSocket TCP bridge
 // The browser runs SSH client (using @microsoft/dev-tunnels-ssh)
@@ -1590,14 +1591,38 @@ export async function registerRoutes(
   });
 
   // PUT /api/admin/gateway-configs/:id - Update a gateway config
+  // Saving also pushes to the running gateway, so backends can be edited without
+  // copying gateway.toml onto the box. A gateway that is offline or unreachable
+  // still saves — the push result rides along in the response for the console.
   app.put("/api/admin/gateway-configs/:id", authenticate, requireAdminOrConfigDownload, async (req: AuthenticatedRequest, res) => {
     try {
       const config = await gatewayConfigStorage.update(req.params.id, req.body);
       if (!config) return res.status(404).json({ message: "Gateway config not found" });
-      res.json(config);
+
+      const signalServers = await signalServerStorage.getSignalServers();
+      const push = await pushGatewayConfig(config, matchSignalServer(config, signalServers));
+      if (push.error) log(`Gateway ${config.gatewayId} config push: ${push.error}`);
+
+      res.json({ ...config, push });
     } catch (error) {
       log(`Failed to update gateway config: ${error}`);
       res.status(500).json({ message: "Failed to update gateway config" });
+    }
+  });
+
+  // POST /api/admin/gateway-configs/:id/push - Re-push the stored config to its gateway
+  app.post("/api/admin/gateway-configs/:id/push", authenticate, requireAdminOrConfigDownload, async (req: AuthenticatedRequest, res) => {
+    try {
+      const config = await gatewayConfigStorage.getById(req.params.id);
+      if (!config) return res.status(404).json({ message: "Gateway config not found" });
+
+      const signalServers = await signalServerStorage.getSignalServers();
+      const push = await pushGatewayConfig(config, matchSignalServer(config, signalServers));
+      log(`[gateway-push] ${config.gatewayId} delivered=${push.delivered} pending=${push.pending} applied=${push.applied.join(",")}`);
+      res.json(push);
+    } catch (error) {
+      log(`Failed to push gateway config: ${error}`);
+      res.status(500).json({ message: "Failed to push gateway config" });
     }
   });
 
@@ -1715,14 +1740,24 @@ export async function registerRoutes(
           signalServerId: string;
           signalServerName: string;
           signalServerUrl: string;
+          issuer?: string | null;
         }> = [];
+
+        // A single signal server is shared across deployments (e.g. demo and
+        // devops), so only list gateways that trust this instance's TideCloak
+        // realm — gateways on another realm could never verify our tokens.
+        const ownIssuer = `${getAuthServerUrl().replace(/\/+$/, "")}/realms/${getRealm()}`;
+        const sameTenant = (issuer?: string | null) =>
+          // Gateways predating issuer advertisement report nothing — keep them
+          // visible so an in-progress rollout doesn't blank the list.
+          !issuer || issuer.replace(/\/+$/, "").toLowerCase() === ownIssuer.toLowerCase();
 
         // Fetch gateways from each signal server in parallel (with timeout)
         const fetches = enabledServers.map(async (ss) => {
           try {
             const controller = new AbortController();
             const timeout = setTimeout(() => controller.abort(), 5000);
-            const apiUrl = ss.url.replace(/\/$/, "") + "/api/gateways";
+            const apiUrl = ss.url.replace(/\/$/, "") + "/api/gateways?issuer=" + encodeURIComponent(ownIssuer);
             const resp = await fetch(apiUrl, { signal: controller.signal });
             clearTimeout(timeout);
             if (!resp.ok) return;
@@ -1733,9 +1768,12 @@ export async function registerRoutes(
               backends: { name: string; protocol?: string; auth?: string }[];
               online: boolean;
               clientCount: number;
+              issuer?: string | null;
             }> };
             if (data.gateways) {
               for (const gw of data.gateways) {
+                // Filter again locally: older signal servers ignore ?issuer=
+                if (!sameTenant(gw.issuer)) continue;
                 results.push({
                   ...gw,
                   backends: gw.backends || [],

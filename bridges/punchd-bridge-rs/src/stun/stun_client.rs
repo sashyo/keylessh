@@ -445,6 +445,31 @@ async fn connect_and_run(
                                     options.gateway_id
                                 );
                             }
+                            "config_update" => {
+                                // Config pushed from the console. Trust-anchor and
+                                // identity fields are refused by apply_remote_config;
+                                // everything applied lands in gateway.toml and triggers
+                                // the normal reload path.
+                                let request_id = parsed["requestId"].as_str().unwrap_or("").to_string();
+                                let empty = serde_json::Map::new();
+                                let patch = parsed["config"].as_object().unwrap_or(&empty);
+                                tracing::info!("[STUN-Reg] Config push received ({} field(s))", patch.len());
+
+                                let outcome = crate::config::apply_remote_config(patch);
+                                if let Some(ref err) = outcome.error {
+                                    tracing::warn!("[STUN-Reg] Config push failed: {err}");
+                                }
+
+                                let _ = signaling_tx.send(serde_json::json!({
+                                    "type": "config_ack",
+                                    "requestId": request_id,
+                                    "gatewayId": options.gateway_id,
+                                    "applied": outcome.applied,
+                                    "rejected": outcome.rejected,
+                                    "changed": outcome.changed,
+                                    "error": outcome.error,
+                                }));
+                            }
                             "paired" => {
                                 if let Some(client) = parsed.get("client") {
                                     let client_id = client["id"].as_str().unwrap_or("unknown").to_string();

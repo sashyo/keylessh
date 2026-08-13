@@ -861,12 +861,14 @@ async fn main() {
 
     vpn_tray::set_refresh_callback(|| {
         tracing::info!("[Tray] Refresh Token requested");
-        // Clear cached token so next reconnect re-authenticates via WebView
-        if let Some(store) = webview_auth::get_latest_token() {
-            let _ = store; // token exists, will be refreshed on reconnect
+        // Drop the cached token and bring the login window back up. The window is
+        // hidden after the first login, so without this there is no way to reach a
+        // sign-in prompt once the session goes stale.
+        if webview_auth::webview_running() {
+            webview_auth::request_reauth();
+        } else {
+            tracing::warn!("[Tray] No login window available — reconnect to sign in");
         }
-        // Trigger WebView to show login window for fresh token
-        // (WebView is still running in background — it refreshes automatically)
     });
 
     vpn_tray::set_reconnect_callback(|| {
@@ -1427,10 +1429,19 @@ async fn oidc_login(_tc: &TcConfig) -> Result<String, String> {
     let app_url = std::env::var("SERVER_URL")
         .unwrap_or_else(|_| "https://demo.keylessh.com".to_string());
 
-    // If WebView is running in background, it may have a refreshed token already
+    // Reuse the WebView's token only while it is still good — get_latest_token
+    // returns None for an expired one so we fall through to a real login.
     if let Some(token) = webview_auth::get_latest_token() {
         tracing::info!("Using refreshed token from WebView");
         return Ok(token);
+    }
+
+    // A WebView already running means this is a re-auth: surface its window
+    // instead of spawning a second event loop that would never get a token.
+    if webview_auth::webview_running() {
+        tracing::info!("Token expired — reopening login window");
+        webview_auth::request_reauth();
+        return webview_auth::wait_for_token(std::time::Duration::from_secs(300)).await;
     }
 
     // Open embedded WebView for OIDC login (full DPoP via Heimdall)

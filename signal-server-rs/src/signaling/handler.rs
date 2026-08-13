@@ -100,6 +100,8 @@ async fn handle_signaling(socket: WebSocket, client_ip: String, state: AppState)
                                     }).collect()
                                 }),
                                 realm: parsed["metadata"]["realm"].as_str().map(|s| s.to_string()),
+                                issuer: parsed["metadata"]["issuer"].as_str().map(|s| s.trim_end_matches('/').to_string()),
+                                client_id: parsed["metadata"]["clientId"].as_str().map(|s| s.to_string()),
                                 public_url: parsed["metadata"]["publicUrl"].as_str().map(|s| s.to_string()),
                             };
 
@@ -118,6 +120,17 @@ async fn handle_signaling(socket: WebSocket, client_ip: String, state: AppState)
                             let _ = tx.send(Message::Text(
                                 serde_json::json!({"type": "registered", "role": "gateway", "id": id}).to_string().into()
                             ));
+
+                            // Hand over any config pushed while this gateway was
+                            // offline. Removed on send: if the gateway drops again
+                            // before applying it, the console's next push re-queues it.
+                            if let Some((_, config)) = state.pending_configs.remove(&id) {
+                                let request_id = uuid::Uuid::new_v4().to_string();
+                                tracing::info!("[Signal] Delivering queued config to gateway {id}");
+                                let _ = tx.send(Message::Text(
+                                    crate::http::routes::config_update_message(&request_id, &config).into()
+                                ));
+                            }
                         } else if role == "client" {
                             let token = parsed["token"].as_str().unwrap_or("").to_string();
                             tracing::info!("[Signal] Client registered: {id}");
@@ -239,6 +252,22 @@ async fn handle_signaling(socket: WebSocket, client_ip: String, state: AppState)
                     }
                     "punch" => {
                         // Forwarded internally — not expected from external clients
+                    }
+                    "config_ack" => {
+                        // Gateway confirming a pushed config. Hand the result to
+                        // whichever HTTP caller is still waiting on it.
+                        let req_id = parsed["requestId"].as_str().unwrap_or("").to_string();
+                        if let Some((_, ack_tx)) = state.pending_config_acks.remove(&req_id) {
+                            let _ = ack_tx.send(parsed.clone());
+                        } else {
+                            // Queued push applied after reconnect — nobody is waiting.
+                            tracing::info!(
+                                "[Signal] Config ack from {}: applied={} rejected={}",
+                                parsed["gatewayId"].as_str().unwrap_or("?"),
+                                parsed["applied"],
+                                parsed["rejected"],
+                            );
+                        }
                     }
                     "http_response" | "http_response_start" | "http_response_chunk" | "http_response_end" | "http_abort" => {
                         let req_id = parsed["id"].as_str().unwrap_or("").to_string();
@@ -402,6 +431,8 @@ mod tests {
             description: None,
             backends: None,
             realm: None,
+            issuer: None,
+            client_id: None,
             public_url: None,
         }
     }
