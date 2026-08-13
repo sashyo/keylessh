@@ -483,6 +483,27 @@ jobs:
           cmake -B tide-ssp/build -S tide-ssp -A x64
           cmake --build tide-ssp/build --config Release
 
+      # TideSSP.dll and TideSubAuth.dll load into LSASS, which under LSA
+      # Protection loads only Microsoft-signed modules. Package them for
+      # submission to Microsoft's file signing service. Unsigned by design —
+      # sign the CAB locally with the EV cert tied to your Partner Center
+      # account, since the key is on hardware CI cannot reach.
+      - name: Package LSA binaries for Microsoft signing
+        shell: pwsh
+        run: |
+          ./tide-ssp/signing/build-lsa-cab.ps1 `
+            -BinDir tide-ssp/build/Release `
+            -OutDir tide-ssp/out/signing `
+            -SkipSign
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TideSSP-lsa-signing-request
+          path: |
+            tide-ssp/out/signing/TideSSP-LSA.cab
+            tide-ssp/build/Release/TideSSP.dll
+            tide-ssp/build/Release/TideSubAuth.dll
+
       - name: Build MSI
         run: |
           New-Item -ItemType Directory -Force -Path tide-ssp/out
@@ -491,9 +512,13 @@ jobs:
             -bindpath InstallerDir=tide-ssp/installer `
             -o tide-ssp/out/TideSSP.msi
 
+      # Built from freshly compiled, unsigned DLLs, so it will NOT load under
+      # LSA Protection. For development on machines with RunAsPPL disabled.
+      # The shippable MSI is built from the Microsoft-signed DLLs — see
+      # tide-ssp/signed/README.md.
       - uses: actions/upload-artifact@v4
         with:
-          name: TideSSP-installer
+          name: TideSSP-installer-unsigned
           path: tide-ssp/out/TideSSP.msi
 
   # ════════════════════════════════════════════════════════════════
