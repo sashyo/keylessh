@@ -441,11 +441,25 @@ jobs:
           New-Item -ItemType Directory -Force -Path target/release
           Copy-Item target/x86_64-pc-windows-gnu/release/punchd-bridge-rs.exe target/release/
 
+      - name: Compile installer custom actions (MSVC)
+        working-directory: bridges/punchd-bridge-rs/installer
+        shell: cmd
+        run: |
+          rem Locate Visual Studio via vswhere rather than a hardcoded path — the
+          rem runner image's VS edition and version change without notice.
+          set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+          if not exist "%VSWHERE%" (echo ERROR: vswhere.exe not found & exit /b 1)
+          for /f "usebackq tokens=*" %%i in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSPATH=%%i"
+          if not defined VSPATH (echo ERROR: no Visual Studio install with the C++ toolset & exit /b 1)
+          call "%VSPATH%\Common7\Tools\VsDevCmd.bat" -arch=amd64 || exit /b 1
+          cl /LD /O2 GatewayCA.c GatewayCA.def /Fe:GatewayCA.dll /link msi.lib advapi32.lib shell32.lib user32.lib ole32.lib comdlg32.lib || exit /b 1
+
       - name: Build MSI
         run: |
           New-Item -ItemType Directory -Force -Path bridges/punchd-bridge-rs/out
           wix build bridges/punchd-bridge-rs/installer/GatewayProduct.wxs -arch x64 `
             -bindpath PunchdDir=bridges/punchd-bridge-rs/target/release `
+            -bindpath CaDir=bridges/punchd-bridge-rs/installer `
             -o bridges/punchd-bridge-rs/out/PunchdGateway.msi
 
       - uses: actions/upload-artifact@v4
