@@ -30,7 +30,7 @@ export interface LiveGateway {
 }
 
 /** A stored config, or a live gateway that has no record yet. */
-export type ListedGateway = (GatewayConfig & { discovered?: false }) | DiscoveredGateway;
+export type ListedGateway = (GatewayConfig & { discovered?: false; online?: boolean }) | DiscoveredGateway;
 
 export interface DiscoveredGateway {
   /** Synthetic id — no database row exists yet. */
@@ -51,6 +51,23 @@ export interface DiscoveredGateway {
   serverUrl: string | null;
   iceServers: string | null;
   turnServer: string | null;
+}
+
+
+/**
+ * Whether a gateway belongs to this deployment.
+ *
+ * Strict: a gateway must report an issuer, and it must match. A gateway that
+ * reports none is not listed anywhere — during the rollout these were shown on
+ * every console, which is exactly the cross-tenant leakage the issuer is meant
+ * to prevent, so the tolerance ends once gateways are reporting.
+ *
+ * Comparison ignores a trailing slash and case, since the same realm can be
+ * written either way in a gateway's tidecloak.json.
+ */
+export function belongsToTenant(issuer: string | null | undefined, ownIssuer: string): boolean {
+  if (!issuer) return false;
+  return issuer.replace(/\/+$/, "").toLowerCase() === ownIssuer.replace(/\/+$/, "").toLowerCase();
 }
 
 /** Prefix marking an id as not-yet-adopted, so the UI and API can tell. */
@@ -112,6 +129,7 @@ export function mergeDiscovered(
   live: LiveGateway[]
 ): ListedGateway[] {
   const known = new Set(stored.map((c) => c.gatewayId.toLowerCase()));
+  const liveIds = new Set(live.filter((g) => g.online !== false).map((g) => g.id.toLowerCase()));
   const seen = new Set<string>();
   const discovered: DiscoveredGateway[] = [];
 
@@ -123,7 +141,11 @@ export function mergeDiscovered(
     discovered.push(toDiscovered(gw));
   }
 
-  return [...stored, ...discovered];
+  // A stored record says a gateway is configured, not that it is connected.
+  // Whether it is currently registered is what an admin actually wants to see.
+  const annotated = stored.map((c) => ({ ...c, online: liveIds.has(c.gatewayId.toLowerCase()) }));
+
+  return [...annotated, ...discovered];
 }
 
 /**

@@ -592,7 +592,9 @@ export interface DiscoveredGateway {
   turnServer: string | null;
 }
 
-export type ListedGateway = GatewayConfigSummary | DiscoveredGateway;
+// Stored records are annotated with whether the gateway is currently registered
+// — a record means configured, not connected.
+export type ListedGateway = (GatewayConfigSummary & { online?: boolean }) | DiscoveredGateway;
 
 export function isDiscovered(g: ListedGateway): g is DiscoveredGateway {
   return (g as DiscoveredGateway).discovered === true;

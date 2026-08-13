@@ -20,13 +20,7 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { queryClient } from "@/lib/queryClient";
 import { api, isDiscovered, type GatewayConfigSummary, type GatewayPushResult, type ListedGateway } from "@/lib/api";
-import {
-  parseBackends,
-  serializeBackends,
-  backendProtocol,
-  EMPTY_BACKEND,
-  type BackendRow,
-} from "@/lib/backends";
+import { BackendsEditor } from "@/components/BackendsEditor";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 import { RefreshButton } from "@/components/RefreshButton";
 import {
@@ -78,100 +72,6 @@ function SshPublicKeyBanner() {
           </Button>
         </div>
       </div>
-    </div>
-  );
-}
-
-/**
- * Edit backends as rows instead of the `Name=url;flags` string the gateway
- * stores. The string stays the source of truth — rows are derived on each
- * render — so anything hand-written elsewhere still round-trips.
- */
-function BackendsEditor({ value, onChange }: { value: string; onChange: (backends: string) => void }) {
-  const rows = useMemo(() => parseBackends(value), [value]);
-  const [raw, setRaw] = useState(false);
-
-  const update = (index: number, patch: Partial<BackendRow>) => {
-    const next = rows.map((row, i) => (i === index ? { ...row, ...patch } : row));
-    onChange(serializeBackends(next));
-  };
-
-  const add = () => onChange(serializeBackends([...rows, { ...EMPTY_BACKEND, name: "", url: "http://" }]));
-  const remove = (index: number) => onChange(serializeBackends(rows.filter((_, i) => i !== index)));
-
-  return (
-    <div className="space-y-2">
-      <div className="flex items-center justify-between">
-        <Label className="text-xs">Backends <span className="text-muted-foreground font-normal">(optional)</span></Label>
-        <button
-          type="button"
-          onClick={() => setRaw(!raw)}
-          className="text-[10px] text-muted-foreground hover:text-foreground underline underline-offset-2"
-        >
-          {raw ? "Edit as rows" : "Edit as text"}
-        </button>
-      </div>
-
-      {raw ? (
-        <Input
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          placeholder="Name=rdp://host:3389;eddsa"
-          className="font-mono text-xs"
-        />
-      ) : (
-        <div className="space-y-2">
-          {rows.map((row, i) => (
-            <div key={i} className="rounded-md border border-border p-2 space-y-2">
-              <div className="flex gap-2">
-                <Input
-                  value={row.name}
-                  onChange={(e) => update(i, { name: e.target.value })}
-                  placeholder="Name"
-                  className="h-8 text-xs w-1/3"
-                />
-                <Input
-                  value={row.url}
-                  onChange={(e) => update(i, { url: e.target.value })}
-                  placeholder="rdp://10.0.0.9:3389"
-                  className="h-8 text-xs flex-1 font-mono"
-                />
-                <Badge variant="outline" className="h-8 px-2 text-[10px] uppercase shrink-0 flex items-center">
-                  {backendProtocol(row.url)}
-                </Badge>
-                <Button type="button" size="icon" variant="ghost" className="h-8 w-8 shrink-0" onClick={() => remove(i)}>
-                  <Trash2 className="h-3.5 w-3.5" />
-                </Button>
-              </div>
-              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 pl-1">
-                {([
-                  ["eddsa", "EdDSA", "Passwordless RDP using EdDSA certificates"],
-                  ["noAuth", "No auth", "Skip JWT verification for this backend"],
-                  ["stripAuth", "Strip auth", "Remove auth headers before forwarding"],
-                ] as const).map(([key, label, title]) => (
-                  <label key={key} className="flex items-center gap-1.5 text-[11px] text-muted-foreground" title={title}>
-                    <input
-                      type="checkbox"
-                      checked={row[key]}
-                      onChange={(e) => update(i, { [key]: e.target.checked })}
-                      className="h-3 w-3 accent-[hsl(var(--neon-cyan))]"
-                    />
-                    {label}
-                  </label>
-                ))}
-              </div>
-            </div>
-          ))}
-
-          <Button type="button" variant="outline" size="sm" className="w-full gap-1.5 h-8 text-xs" onClick={add}>
-            <Plus className="h-3.5 w-3.5" /> Add backend
-          </Button>
-        </div>
-      )}
-
-      <p className="text-[10px] text-muted-foreground">
-        Pre-configured endpoints. Leave empty to use custom IP connections only.
-      </p>
     </div>
   );
 }
@@ -365,9 +265,25 @@ export default function AdminGateways() {
       </div>
 
       <BackendsEditor
+        key={editing?.id ?? "new"}
         value={form.backends || ""}
         onChange={(backends) => setForm({ ...form, backends })}
       />
+
+      {editing && isDiscovered(editing) && editing.issuer && (
+        <div className="rounded-md border border-border bg-muted/40 p-3 space-y-1">
+          <p className="text-xs font-medium flex items-center gap-1.5">
+            <Shield className="h-3.5 w-3.5 text-[hsl(var(--neon-cyan))]" />
+            This gateway trusts
+          </p>
+          <p className="text-[11px] font-mono break-all">{editing.issuer}</p>
+          <p className="text-[10px] text-muted-foreground">
+            Reported by the gateway. The tidecloak.json itself is never sent over the
+            wire and is not pushable — paste it below to let the console generate that
+            file for this gateway.
+          </p>
+        </div>
+      )}
 
       <div className="space-y-1">
         <Label className="text-xs">Punchd Client TideCloak Config</Label>
@@ -476,7 +392,8 @@ export default function AdminGateways() {
                     <TableHead>Gateway</TableHead>
                     <TableHead className="hidden md:table-cell">STUN Server</TableHead>
                     <TableHead className="hidden lg:table-cell">Backends</TableHead>
-                    <TableHead>VPN</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead className="hidden sm:table-cell">VPN</TableHead>
                     <TableHead className="text-right">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -512,10 +429,18 @@ export default function AdminGateways() {
                         <p className="text-xs text-muted-foreground truncate max-w-[200px]">{config.backends || "—"}</p>
                       </TableCell>
                       <TableCell>
-                        {isDiscovered(config) ? (
-                          <Badge variant="outline" className="text-muted-foreground">
-                            {config.online ? "Online" : "Offline"}
+                        {config.online ? (
+                          <Badge variant="outline" className="gap-1 bg-green-50 text-green-700 border-green-200 dark:bg-green-950/30 dark:text-green-400">
+                            <span className="h-1.5 w-1.5 rounded-full bg-current" /> Online
                           </Badge>
+                        ) : (
+                          <Badge variant="outline" className="text-muted-foreground">Offline</Badge>
+                        )}
+                      </TableCell>
+                      <TableCell className="hidden sm:table-cell">
+                        {isDiscovered(config) ? (
+                          // Not reported by the gateway, so it is unknown rather than off.
+                          <span className="text-xs text-muted-foreground">—</span>
                         ) : config.vpnEnabled ? (
                           <Badge variant="outline" className="gap-1 bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950/30 dark:text-blue-400">
                             <Wifi className="h-3 w-3" /> On
@@ -565,7 +490,7 @@ export default function AdminGateways() {
                   ))}
                   {(!configs || configs.length === 0) && !isLoading && (
                     <TableRow>
-                      <TableCell colSpan={5} className="text-center text-muted-foreground py-8">
+                      <TableCell colSpan={6} className="text-center text-muted-foreground py-8">
                         No gateway configs. Click "Add Gateway" to create one.
                       </TableCell>
                     </TableRow>
