@@ -294,6 +294,32 @@ pub fn config_file_path() -> PathBuf {
     dir.join("gateway.toml")
 }
 
+// ── Log hygiene ─────────────────────────────────────────────────
+
+/// Strip credential-bearing query parameters before a URL reaches the logs.
+///
+/// Tunnel paths carry the user's access token. Logged verbatim it lands in a
+/// log file, decodable, complete with the user's roles and email.
+pub fn redact_query_secrets(url: &str) -> String {
+    const SECRET_PARAMS: &[&str] = &["token", "access_token", "secret", "api_secret", "password"];
+
+    let Some((base, query)) = url.split_once('?') else {
+        return url.to_string();
+    };
+
+    let redacted: Vec<String> = query
+        .split('&')
+        .map(|pair| match pair.split_once('=') {
+            Some((key, _)) if SECRET_PARAMS.contains(&key.to_ascii_lowercase().as_str()) => {
+                format!("{key}=<redacted>")
+            }
+            _ => pair.to_string(),
+        })
+        .collect();
+
+    format!("{base}?{}", redacted.join("&"))
+}
+
 // ── Self-reported config ────────────────────────────────────────
 
 /// Render backends back to the `Name=url;flags` form used in gateway.toml.
@@ -1042,6 +1068,33 @@ mod remote_config_tests {
             server_url: Some("https://console.example.com".into()),
             quic_port: 7893,
         }
+    }
+
+    #[test]
+    fn redacts_tokens_from_tunnel_paths() {
+        let path = "/ws/ssh?host=TideStun&port=22&token=eyJhbGciOiJFZERTQSJ9.payload.sig&serverId=X";
+        let out = redact_query_secrets(path);
+
+        assert!(!out.contains("eyJhbGciOiJFZERTQSJ9"), "token still present: {out}");
+        assert!(out.contains("token=<redacted>"));
+        // The parts that make the line worth logging survive.
+        assert!(out.contains("host=TideStun"));
+        assert!(out.contains("port=22"));
+        assert!(out.contains("serverId=X"));
+    }
+
+    #[test]
+    fn redaction_covers_every_secret_parameter_and_ignores_case() {
+        let out = redact_query_secrets("/p?api_secret=s1&PASSWORD=s2&Access_Token=s3&secret=s4");
+        for leaked in ["s1", "s2", "s3", "s4"] {
+            assert!(!out.contains(leaked), "{leaked} leaked: {out}");
+        }
+    }
+
+    #[test]
+    fn redaction_leaves_clean_urls_untouched() {
+        assert_eq!(redact_query_secrets("/ws/ssh"), "/ws/ssh");
+        assert_eq!(redact_query_secrets("/ws/ssh?host=x&port=22"), "/ws/ssh?host=x&port=22");
     }
 
     #[test]

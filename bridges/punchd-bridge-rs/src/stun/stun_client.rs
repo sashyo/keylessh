@@ -26,6 +26,16 @@ const MAX_RESPONSE_SIZE: usize = 50 * 1024 * 1024; // 50MB
 const MAX_SINGLE_WS: usize = 512 * 1024; // 512KB
 const CHUNK_SIZE: usize = 256 * 1024; // 256KB
 const PING_INTERVAL: Duration = Duration::from_secs(15);
+/// No frame of any kind for this long means the connection is dead.
+///
+/// Both ends ping every PING_INTERVAL, so silence for three intervals cannot
+/// happen on a healthy link. Without this the gateway can wait forever on a
+/// half-open socket — if the signal server disappears without a clean close
+/// reaching us, `next()` never returns, the reconnect loop is never re-entered,
+/// and the gateway stays silently unregistered until someone restarts it.
+const LIVENESS_TIMEOUT: Duration = Duration::from_secs(45);
+/// How often to test that deadline.
+const LIVENESS_CHECK: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct StunRegistrationOptions {
@@ -426,9 +436,23 @@ async fn connect_and_run(
     });
 
     // Main message loop (QUIC endpoint + accept loop are managed by register())
+    let mut last_frame_at = tokio::time::Instant::now();
+    let mut liveness = tokio::time::interval(LIVENESS_CHECK);
+    liveness.tick().await; // the first tick completes immediately
+
     let result = loop {
         tokio::select! {
+            _ = liveness.tick() => {
+                if last_frame_at.elapsed() > LIVENESS_TIMEOUT {
+                    break ConnectionResult::Error(format!(
+                        "no traffic for {}s — treating the connection as dead",
+                        LIVENESS_TIMEOUT.as_secs()
+                    ));
+                }
+            }
             ws_msg = ws_stream.next() => {
+                // Any frame proves the link is alive, pings and pongs included.
+                last_frame_at = tokio::time::Instant::now();
                 match ws_msg {
                     Some(Ok(Message::Text(text))) => {
                         let parsed: serde_json::Value = match serde_json::from_str(&text) {

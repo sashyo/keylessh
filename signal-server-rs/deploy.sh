@@ -174,8 +174,31 @@ if [ -n "${TIDECLOAK_CONFIG_B64:-}" ]; then
   export TIDECLOAK_CONFIG_B64
 fi
 
-nohup "$SIGNAL_BIN" > /tmp/signal-server-rs.log 2>&1 &
-echo $! > "$SIGNAL_PID_FILE"
+# Prefer systemd so the server comes back after a reboot or a crash. A bare
+# nohup process does not, and its absence shows up in the console as a
+# permissions error rather than an outage.
+UNIT_SRC="$(dirname "$0")/pkg/signal-server-rs.service"
+if command -v systemctl >/dev/null 2>&1 && [ -f "$UNIT_SRC" ]; then
+  echo "[Deploy] Installing systemd unit..."
+  sudo cp "$UNIT_SRC" /etc/systemd/system/signal-server-rs.service
+  sudo systemctl daemon-reload
+  sudo systemctl enable signal-server-rs >/dev/null 2>&1 || true
+
+  # Stop any nohup instance from an earlier deploy before systemd binds the port.
+  if [ -f "$SIGNAL_PID_FILE" ]; then
+    kill "$(cat "$SIGNAL_PID_FILE")" 2>/dev/null || true
+    rm -f "$SIGNAL_PID_FILE"
+  fi
+  pkill -f "release/signal-server-rs" 2>/dev/null || true
+
+  sudo systemctl restart signal-server-rs
+  USING_SYSTEMD=1
+else
+  echo "[Deploy] systemd unavailable — falling back to nohup (will not survive a reboot)"
+  nohup "$SIGNAL_BIN" > /tmp/signal-server-rs.log 2>&1 &
+  echo $! > "$SIGNAL_PID_FILE"
+  USING_SYSTEMD=0
+fi
 
 echo "[Deploy] Waiting for server to start..."
 sleep 3
@@ -191,7 +214,16 @@ else
   FAILED=1
 fi
 
-if kill -0 "$(cat "$SIGNAL_PID_FILE" 2>/dev/null)" 2>/dev/null; then
+if [ "${USING_SYSTEMD:-0}" = "1" ]; then
+  if systemctl is-active --quiet signal-server-rs; then
+    echo "[Deploy] signal-server-rs: running under systemd (restarts automatically)"
+    sudo journalctl -u signal-server-rs -n 5 --no-pager
+  else
+    echo "[Deploy] ERROR: signal-server-rs failed to start"
+    sudo journalctl -u signal-server-rs -n 20 --no-pager
+    FAILED=1
+  fi
+elif kill -0 "$(cat "$SIGNAL_PID_FILE" 2>/dev/null)" 2>/dev/null; then
   echo "[Deploy] signal-server-rs: running (PID $(cat "$SIGNAL_PID_FILE"))"
   tail -5 /tmp/signal-server-rs.log
 else

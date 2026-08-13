@@ -1188,7 +1188,7 @@ async fn handle_ws_open(
         }
     }
 
-    tracing::info!("[WebRTC] WS tunnel opened: {} (id: {})", ws_path, ws_id);
+    tracing::info!("[WebRTC] WS tunnel opened: {} (id: {})", crate::config::redact_query_secrets(&ws_path), ws_id);
 
     let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel::<Vec<u8>>();
 
