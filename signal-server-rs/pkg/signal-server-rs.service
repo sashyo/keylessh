@@ -4,15 +4,22 @@ Documentation=https://github.com/sashyo/keylessh/blob/main/docs/SIGNAL-SERVER.md
 # coturn runs as a container and the server reads TURN settings at startup.
 After=network-online.target docker.service
 Wants=network-online.target
+# Keep retrying indefinitely — a signal server that stays down is worse than
+# one that keeps trying, and its absence shows up as a permissions error.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-User=azureuser
-# Secrets live in the env file, so it is read by systemd rather than being
-# baked into this unit. Root-owned and unreadable by the service user is fine —
-# systemd reads it before dropping privileges.
+# Runs as root, as the previous nohup deployment did: the TLS material it reads
+# lives under /root/certs.
+User=root
+
+# Two files, and both are needed. The first holds the long-lived secrets. The
+# second is written by deploy.sh and carries everything it computes at run time
+# — TLS paths, ICE/TURN, relay host. Without it the server starts on plain HTTP
+# with no TURN, and every wss:// client fails.
 EnvironmentFile=/home/azureuser/keylessh/signal-server/.env
-Environment=PORT=9090
+EnvironmentFile=/etc/signal-server-rs.env
 ExecStart=/home/azureuser/keylessh/signal-server-rs/target/release/signal-server-rs
 
 # The whole point of this unit: a bare nohup process died on every reboot and
@@ -20,9 +27,6 @@ ExecStart=/home/azureuser/keylessh/signal-server-rs/target/release/signal-server
 # administrator to get server access".
 Restart=always
 RestartSec=5
-# Do not give up after repeated quick failures — a signal server that stays
-# down is worse than one that keeps retrying.
-StartLimitIntervalSec=0
 
 StandardOutput=journal
 StandardError=journal
@@ -33,7 +37,6 @@ SyslogIdentifier=signal-server-rs
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=full
-ProtectHome=read-only
 ReadWritePaths=/tmp
 
 [Install]
