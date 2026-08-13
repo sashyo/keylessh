@@ -53,7 +53,6 @@ arc-swap = "1"
 ipnet = "2"
 wry = { version = "0.55", optional = true }
 tao = { version = "0.35", optional = true }
-openssl = { version = "0.10.81", features = ["vendored"] }
 
 [features]
 default = []
@@ -61,6 +60,11 @@ webview = ["wry", "tao"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 tun = { version = "0.7", features = ["async"] }
+# Not used directly — forces native-tls to vendor OpenSSL so the Linux builds
+# are static and the .deb needs no system libssl. Linux only: native-tls uses
+# SChannel on Windows and Security.framework on macOS, so pulling openssl in
+# there only triggers a from-source build that fails under MinGW.
+openssl = { version = "0.10.81", features = ["vendored"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 tun = { version = "0.7", features = ["async"] }
