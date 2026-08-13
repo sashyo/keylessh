@@ -77,11 +77,9 @@ server** — the gateway *is* the VPN server.
 
 ### Ports
 
-| Where | Port | Purpose |
-|-------|------|---------|
-| Gateway | `7893` UDP | QUIC (P2P + VPN transport) — env/toml `QUIC_PORT`/`quic_port`, default 7893 |
-| Signal server | `9090` | Signaling (only for remote/NAT traversal) |
-| coturn | `3478` UDP+TCP + `49152-65535` UDP | STUN + TURN relay fallback |
+The VPN rides on the gateway's QUIC port, `7893/UDP` (`quic_port` /
+`QUIC_PORT`). Remote access additionally needs the signal server and coturn
+ports — see [SIGNAL-SERVER.md](SIGNAL-SERVER.md) section 6.
 
 ---
 
@@ -240,6 +238,7 @@ for the rest of the gateway config.
 | Remote client never connects (strict NAT) | P2P couldn't form. Ensure `--stun-server` points at a live signal server and TURN is configured (`--turn-server` + `--turn-secret` matching the signal server), with `3478` + `49152-65535/udp` open. |
 | Same-network client fails via signal server | Try direct mode: omit `--stun-server` and connect to a reachable gateway directly (offline mode, per DEPLOYMENT.md section 4). |
 | Login window never appears (desktop) | WebView2 (Windows) not available — reinstall the MSI; or use the CLI `--standalone` / `--token` path. |
+| Starts then quits without prompting, or won't reconnect and never asks for credentials | Build predating the stale-token fix: it reused the previous session's expired token and hid the login window. Upgrade; quitting from the tray was the old workaround. |
 
 ---
 
