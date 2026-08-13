@@ -76,10 +76,9 @@ curl https://YOUR_SIGNAL_SERVER:9090/health
 # {"status":"ok","gateways":1,"clients":0}   <- gateways went from 0 to 1
 ```
 
-> **Trust model:** the signal server is a "dumb relay" — it never authenticates
-> end users. All user auth (TideCloak JWT + DPoP, roles like `ssh:<user>`)
-> happens **at the gateway**. The signal server only gatekeeps gateway
-> registration with `API_SECRET`.
+> **Trust model:** the signal server never authenticates end users — it only
+> gatekeeps gateway registration and config pushes with `API_SECRET`. User auth
+> happens at the gateway; see [PUNCHD-GATEWAY.md](PUNCHD-GATEWAY.md) section 4.
 
 ---
 
@@ -202,6 +201,58 @@ Verified against `signal-server-rs/src/config.rs`.
 | `TLS_KEY_PATH` | unset | TLS private key |
 | `RELAY_HOST` | `punchd.keylessh.com` | Hostname advertised for the relay. The deploy script overrides this to your domain or `EXTERNAL_IP`. |
 | `TIDECLOAK_URL` | unset | TideCloak base URL |
+| `ALLOWED_ORIGINS` | `""` (empty = any) | Comma-separated origin allowlist for browser connections |
+| `TRUSTED_PROXIES` | `""` | Comma-separated proxy IPs whose forwarded-for header is believed when determining a client's real address. Leave empty unless the signal server sits behind a load balancer. |
+
+Two limits are compiled in rather than configurable: **20 connections per IP**
+and **100 messages per second** per connection.
+
+---
+
+## 5a. HTTP API
+
+Everything here is on the same port as the signaling WebSocket (`PORT`, default
+`9090`).
+
+| Endpoint | Auth | Purpose |
+|----------|------|---------|
+| `GET /health` | none | `{"status":"ok","gateways":N,"clients":N}` — the quickest check that a gateway registered |
+| `GET /webrtc-config` | none | ICE/TURN details and short-lived TURN credentials for browsers |
+| `GET /api/gateways` | none | Registered gateways, their backends, and the TideCloak issuer each one trusts |
+| `POST /api/gateways/{id}/config` | `x-api-secret` | Push config to a running gateway |
+
+### Filtering gateways by tenant
+
+When one signal server is shared by two KeyleSSH deployments (demo and devops,
+say), each console should see only its own gateways — the others could never
+connect anyway, since a gateway on another realm can't verify its tokens.
+Gateways advertise the issuer they trust, so:
+
+```bash
+curl "https://YOUR_SIGNAL_SERVER:9090/api/gateways?issuer=https://tc.example.com/realms/demo"
+```
+
+KeyleSSH passes its own issuer automatically. Gateways predating the field don't
+advertise one and are always returned, so a staggered upgrade won't blank a list.
+
+### Pushing config to a gateway
+
+`POST /api/gateways/{id}/config` forwards config down the gateway's existing
+WebSocket, so backends can be edited from the console instead of on the box.
+Authenticated with `API_SECRET` via an `x-api-secret` header.
+
+| Response | Meaning |
+|----------|---------|
+| `200`, `delivered: true` | Applied; `applied` and `rejected` list which fields |
+| `202`, `pending: true` | Gateway offline — held until it next registers (newest push wins) |
+| `401` | Wrong or missing `x-api-secret` |
+| `504` | Delivered, but no confirmation within 15s |
+
+The gateway refuses anything that would change which TideCloak it trusts
+(`tidecloak_config_*`, `auth_server_public_url`, `tc_internal_url`) or its own
+identity (`gateway_id`, `stun_server_url`, `api_secret`). Since `API_SECRET` is
+one shared value, a pushable trust anchor would let anyone holding it repoint a
+gateway at their own IdP.
 
 ---
 

@@ -91,16 +91,16 @@ Two programs make up the punchd system. You may need one or both.
 the same network (local/offline mode). You only need the signal server for
 NAT traversal across the internet.
 
-### Ports at a glance
+### Gateway ports
 
-| Component | Port | Purpose |
-|-----------|------|---------|
-| Gateway | `7891` | Proxy (`/ws/ssh`, HTTP, RDP) — env `LISTEN_PORT` |
-| Gateway | `7892` | Health + logs — env `HEALTH_PORT` |
-| Gateway | `7893` | QUIC (P2P + VPN, UDP) — env `QUIC_PORT` |
-| Signal server | `9090` | Signaling WebSocket + HTTP relay — env `PORT` |
-| coturn (STUN/TURN) | `3478` UDP+TCP | Hole-punch + relay |
-| coturn relay range | `49152-65535` UDP | TURN media relay |
+| Port | Purpose | Env |
+|------|---------|-----|
+| `7891` | Proxy (`/ws/ssh`, HTTP, RDP) | `LISTEN_PORT` |
+| `7892` | Health + logs | `HEALTH_PORT` |
+| `7893` UDP | QUIC (P2P + VPN) | `QUIC_PORT` |
+
+Signal server and coturn ports are in
+[SIGNAL-SERVER.md](SIGNAL-SERVER.md) section 6.
 
 ---
 
@@ -264,6 +264,12 @@ key has a matching UPPER_CASE env var. Verified against
 `bridges/punchd-bridge-rs/src/config.rs`. Full table (RDP/VPN/TLS extras) is in
 [DEPLOYMENT.md](DEPLOYMENT.md) section 3.
 
+> **After the first install you rarely edit this file.** Saving under **Punchd →
+> Gateways** pushes the change to the running gateway, which rewrites its own
+> `gateway.toml` and reloads (rewritten from scratch, so comments don't survive).
+> Doesn't apply to offline gateways, or to the TideCloak and identity settings —
+> see [SIGNAL-SERVER.md](SIGNAL-SERVER.md) section 5a.
+
 | `gateway.toml` key | Env var | Default | Meaning |
 |--------------------|---------|---------|---------|
 | `gateway_id` | `GATEWAY_ID` | auto `gateway-<hex>` | Unique id for this gateway |
@@ -280,13 +286,9 @@ key has a matching UPPER_CASE env var. Verified against
 | `turn_server` | `TURN_SERVER` | — | TURN fallback, e.g. `turn:host:3478` |
 | `turn_secret` | `TURN_SECRET` | — | Must match the signal server's `TURN_SECRET` |
 
-**Backend string flags** (append to a backend URL):
-
-| Flag | Effect |
-|------|--------|
-| `;noauth` | Gateway skips JWT check for this backend (the backend does its own auth) |
-| `;stripauth` | Gateway validates the JWT but strips the `Authorization` header before proxying (HTTP) |
-| `;eddsa` | RDP only: passwordless auth via TideSSP |
+Backends take flags — `;noauth`, `;stripauth`, `;eddsa` — appended to the URL;
+[DEPLOYMENT.md](DEPLOYMENT.md) section 3 explains each. The console's gateway
+editor exposes them as checkboxes.
 
 KeyleSSH-server side, `BRIDGE_URL` (in `.env`) is unrelated to punchd — it's the
 fallback **external TCP bridge**, used only when a server has no `bridgeId` and

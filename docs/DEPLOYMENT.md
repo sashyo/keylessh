@@ -134,6 +134,11 @@ The gateway runs on your private network and connects outbound to the signal ser
 
 The gateway is `bridges/punchd-bridge-rs` (Rust).
 
+> The values below are the initial bootstrap. Once a gateway has registered,
+> editing it under **Punchd → Gateways** pushes changes down and it reloads
+> itself — see [SIGNAL-SERVER.md](SIGNAL-SERVER.md) section 5a for what is and
+> isn't pushable.
+
 ### Deploy (Docker)
 
 ```bash

@@ -304,7 +304,9 @@ BRIDGE_URL=ws://localhost:8080 npm run dev
 
 ## TideCloak Notes
 
-- Client adapter config lives in `client/src/tidecloakAdapter.json`.
+- The adapter config lives server-side at `data/tidecloak.json` (or the
+  `TIDECLOAK_CONFIG` env var). The client fetches it at startup from
+  `GET /api/auth/config` — it isn't bundled into the frontend.
 - Admin capability is derived from TideCloak roles (app normalizes this into `user.role = "admin"` in the backend).
 
 ## Deployment
