@@ -22,6 +22,10 @@ pub struct GatewayMetadata {
     pub issuer: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
+    /// The gateway's current editable settings, as it reported them. Relayed
+    /// verbatim so a console can list a self-registered gateway accurately.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub public_url: Option<String>,
 }
@@ -244,6 +248,7 @@ mod tests {
             realm: None,
             issuer: None,
             client_id: None,
+            config: None,
             public_url: None,
         }
     }
@@ -266,6 +271,7 @@ mod tests {
             realm: Some("keylessh".into()),
             issuer: Some("https://tc.example.com/realms/keylessh".into()),
             client_id: Some("punchd".into()),
+            config: None,
             public_url: None,
         };
         r.register_gateway("gw-1".into(), vec!["1.2.3.4:443".into()], sender(), m, None);

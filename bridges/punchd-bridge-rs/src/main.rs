@@ -170,6 +170,9 @@ async fn run_gateway() {
             // affects HTTP relay routing. Lets consoles filter to their own tenant.
             meta["issuer"] = serde_json::json!(tc_config.issuer());
             meta["clientId"] = serde_json::json!(tc_config.resource);
+            // Current settings, so a console can list a self-registered gateway
+            // accurately and seed a config record without guessing.
+            meta["config"] = config::reported_config(&config);
             if let Ok(public_url) = std::env::var("PUBLIC_URL") {
                 meta["publicUrl"] = serde_json::json!(public_url);
             }
@@ -223,6 +226,7 @@ async fn run_gateway() {
             }
             meta["issuer"] = serde_json::json!(new_tc_config.issuer());
             meta["clientId"] = serde_json::json!(new_tc_config.resource);
+            meta["config"] = config::reported_config(&new_config);
             stun_reg.update_metadata(meta);
         });
     }

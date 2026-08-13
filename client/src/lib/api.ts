@@ -545,7 +545,8 @@ export const api = {
         }),
     },
     gatewayConfigs: {
-      list: () => apiRequest<GatewayConfigSummary[]>("/api/admin/gateway-configs"),
+      // Includes self-registered gateways that have no record yet.
+      list: () => apiRequest<ListedGateway[]>("/api/admin/gateway-configs"),
       get: (id: string) => apiRequest<GatewayConfigSummary>(`/api/admin/gateway-configs/${id}`),
       create: (data: any) => apiRequest<GatewayConfigSummary>("/api/admin/gateway-configs", { method: "POST", body: JSON.stringify(data) }),
       // Saving also pushes to the running gateway; `push` reports how that went.
@@ -568,6 +569,33 @@ export interface GatewayPushResult {
   changed: boolean;
   error?: string | null;
   message?: string;
+}
+
+// A gateway that self-registered but has no config record yet. It becomes a
+// normal GatewayConfigSummary the first time it is edited (adopted).
+export interface DiscoveredGateway {
+  id: string;
+  gatewayId: string;
+  displayName: string | null;
+  discovered: true;
+  online: boolean;
+  signalServerName: string | null;
+  stunServerUrl: string | null;
+  issuer: string | null;
+  backends: string | null;
+  listenPort: number | null;
+  healthPort: number | null;
+  https: boolean | null;
+  tlsHostname: string | null;
+  serverUrl: string | null;
+  iceServers: string | null;
+  turnServer: string | null;
+}
+
+export type ListedGateway = GatewayConfigSummary | DiscoveredGateway;
+
+export function isDiscovered(g: ListedGateway): g is DiscoveredGateway {
+  return (g as DiscoveredGateway).discovered === true;
 }
 
 // Gateway config (managed from admin UI)

@@ -1,6 +1,6 @@
 import express, { type Express } from "express";
 import type { Server } from "http";
-import { storage, approvalStorage, policyStorage, pendingPolicyStorage, templateStorage, subscriptionStorage, recordingStorage, fileOperationStorage, bridgeStorage, signalServerStorage, gatewayConfigStorage, type ApprovalType } from "./storage";
+import { storage, approvalStorage, policyStorage, pendingPolicyStorage, templateStorage, subscriptionStorage, recordingStorage, fileOperationStorage, bridgeStorage, signalServerStorage, gatewayConfigStorage, type ApprovalType, type GatewayConfig } from "./storage";
 import { subscriptionTiers, type SubscriptionTier } from "@shared/schema";
 import * as stripeLib from "./lib/stripe";
 import { log, logForseti, logError } from "./logger";
@@ -140,6 +140,13 @@ import { getAllowedSshUsersFromToken } from "./lib/auth/sshUsers";
 import { parseDestRolesFromToken, hasDestAccess } from "./lib/auth/destRoles";
 import { verifyTideCloakToken } from "./lib/auth/tideJWT";
 import { pushGatewayConfig, matchSignalServer } from "./lib/gatewayPush";
+import {
+  mergeDiscovered,
+  adoptionRecord,
+  isDiscoveredId,
+  gatewayIdFromDiscoveredId,
+  type LiveGateway,
+} from "./lib/gatewayDiscovery";
 
 // SSH connections are handled via WebSocket TCP bridge
 // The browser runs SSH client (using @microsoft/dev-tunnels-ssh)
@@ -1557,10 +1564,45 @@ export async function registerRoutes(
   // ============================================
 
   // GET /api/admin/gateway-configs - List all gateway configs
+  // Live gateways as the enabled signal servers report them, limited to this
+  // deployment's TideCloak issuer. Shared with the discovery listing below so
+  // self-registered gateways show up without anyone adding them by hand.
+  async function fetchLiveGateways(): Promise<LiveGateway[]> {
+    const ownIssuer = `${getAuthServerUrl().replace(/\/+$/, "")}/realms/${getRealm()}`;
+    const enabled = await signalServerStorage.getEnabledSignalServers();
+    const results: LiveGateway[] = [];
+
+    await Promise.all(
+      enabled.map(async (ss) => {
+        try {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 5000);
+          const url = ss.url.replace(/\/$/, "") + "/api/gateways?issuer=" + encodeURIComponent(ownIssuer);
+          const resp = await fetch(url, { signal: controller.signal });
+          clearTimeout(timeout);
+          if (!resp.ok) return;
+          const data = (await resp.json()) as { gateways?: LiveGateway[] };
+          for (const gw of data.gateways ?? []) {
+            const issuer = gw.issuer;
+            // Same tolerance as the dashboard: a gateway too old to report an
+            // issuer is shown rather than hidden mid-rollout.
+            if (issuer && issuer.replace(/\/+$/, "").toLowerCase() !== ownIssuer.toLowerCase()) continue;
+            results.push({ ...gw, signalServerId: ss.id, signalServerName: ss.name, signalServerUrl: ss.url });
+          }
+        } catch {
+          // Signal server unreachable — its gateways simply aren't listed.
+          log(`[gateway-discovery] signal server ${ss.name} unreachable`);
+        }
+      })
+    );
+    return results;
+  }
+
   app.get("/api/admin/gateway-configs", authenticate, requireAdminOrConfigDownload, async (_req: AuthenticatedRequest, res) => {
     try {
       const configs = await gatewayConfigStorage.list();
-      res.json(configs);
+      const live = await fetchLiveGateways();
+      res.json(mergeDiscovered(configs, live));
     } catch (error) {
       log(`Failed to list gateway configs: ${error}`);
       res.status(500).json({ message: "Failed to list gateway configs" });
@@ -1596,7 +1638,31 @@ export async function registerRoutes(
   // still saves — the push result rides along in the response for the console.
   app.put("/api/admin/gateway-configs/:id", authenticate, requireAdminOrConfigDownload, async (req: AuthenticatedRequest, res) => {
     try {
-      const config = await gatewayConfigStorage.update(req.params.id, req.body);
+      let config: GatewayConfig | undefined | null;
+
+      if (isDiscoveredId(req.params.id)) {
+        // Adoption: a self-registered gateway has no record until someone edits
+        // it. Seed from what the gateway reported, then apply the edit on top,
+        // so untouched settings keep the gateway's real values instead of blanks.
+        const gatewayId = gatewayIdFromDiscoveredId(req.params.id);
+        const live = (await fetchLiveGateways()).find(
+          (g) => g.id.toLowerCase() === gatewayId.toLowerCase()
+        );
+        if (!live) {
+          return res.status(404).json({ message: "Gateway is no longer registered" });
+        }
+        // Guard against two admins adopting the same gateway at once.
+        const existing = (await gatewayConfigStorage.list()).find(
+          (c) => c.gatewayId.toLowerCase() === gatewayId.toLowerCase()
+        );
+        config = existing
+          ? await gatewayConfigStorage.update(existing.id, req.body)
+          : await gatewayConfigStorage.create({ ...adoptionRecord(live), ...req.body });
+        log(`[gateway-discovery] adopted ${gatewayId}`);
+      } else {
+        config = await gatewayConfigStorage.update(req.params.id, req.body);
+      }
+
       if (!config) return res.status(404).json({ message: "Gateway config not found" });
 
       const signalServers = await signalServerStorage.getSignalServers();

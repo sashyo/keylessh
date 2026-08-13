@@ -19,7 +19,7 @@ import {
 } from "@/components/ui/table";
 import { useToast } from "@/hooks/use-toast";
 import { queryClient } from "@/lib/queryClient";
-import { api, type GatewayConfigSummary, type GatewayPushResult } from "@/lib/api";
+import { api, isDiscovered, type GatewayConfigSummary, type GatewayPushResult, type ListedGateway } from "@/lib/api";
 import {
   parseBackends,
   serializeBackends,
@@ -33,7 +33,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Router, Plus, Pencil, Trash2, Download, Wifi, Copy, Check, KeyRound, FileDown, Shield, Settings, UploadCloud, Loader2 } from "lucide-react";
+import { Router, Plus, Pencil, Trash2, Download, Wifi, Copy, Check, KeyRound, FileDown, Shield, Settings, UploadCloud, Loader2, Radar } from "lucide-react";
 import type { SignalServer } from "@shared/schema";
 import { useAuth, useAuthConfig } from "@/contexts/AuthContext";
 import { useMemo } from "react";
@@ -219,7 +219,7 @@ const defaultForm: Partial<GatewayConfigSummary> = {
 export default function AdminGateways() {
   const { toast } = useToast();
   const authConfig = useAuthConfig();
-  const [editing, setEditing] = useState<GatewayConfigSummary | null>(null);
+  const [editing, setEditing] = useState<ListedGateway | null>(null);
   const [creating, setCreating] = useState(false);
   const [deleting, setDeleting] = useState<GatewayConfigSummary | null>(null);
   const [form, setForm] = useState<Partial<GatewayConfigSummary>>(defaultForm);
@@ -290,8 +290,8 @@ export default function AdminGateways() {
     setCreating(true);
   };
 
-  const handleEdit = (config: GatewayConfigSummary) => {
-    setForm({ ...config });
+  const handleEdit = (config: ListedGateway) => {
+    setForm({ ...(config as Partial<GatewayConfigSummary>) });
     setEditing(config);
   };
 
@@ -482,10 +482,21 @@ export default function AdminGateways() {
                 </TableHeader>
                 <TableBody>
                   {(configs || []).map((config) => (
-                    <TableRow key={config.id}>
+                    <TableRow key={config.id} className={isDiscovered(config) ? "bg-muted/30" : undefined}>
                       <TableCell>
                         <div>
-                          <p className="font-medium">{config.displayName || config.gatewayId}</p>
+                          <p className="font-medium flex items-center gap-2">
+                            {config.displayName || config.gatewayId}
+                            {isDiscovered(config) && (
+                              <Badge
+                                variant="outline"
+                                className="gap-1 text-[10px] font-normal"
+                                title="This gateway registered itself. Edit it to start managing its config from here."
+                              >
+                                <Radar className="h-3 w-3" /> Self-registered
+                              </Badge>
+                            )}
+                          </p>
                           <p className="text-xs text-muted-foreground font-mono flex items-center gap-1">
                             {config.gatewayId}
                             <button onClick={() => handleCopyId(config.gatewayId)} className="hover:text-foreground">
@@ -501,7 +512,11 @@ export default function AdminGateways() {
                         <p className="text-xs text-muted-foreground truncate max-w-[200px]">{config.backends || "—"}</p>
                       </TableCell>
                       <TableCell>
-                        {config.vpnEnabled ? (
+                        {isDiscovered(config) ? (
+                          <Badge variant="outline" className="text-muted-foreground">
+                            {config.online ? "Online" : "Offline"}
+                          </Badge>
+                        ) : config.vpnEnabled ? (
                           <Badge variant="outline" className="gap-1 bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950/30 dark:text-blue-400">
                             <Wifi className="h-3 w-3" /> On
                           </Badge>
@@ -511,6 +526,12 @@ export default function AdminGateways() {
                       </TableCell>
                       <TableCell className="text-right">
                         <div className="flex items-center justify-end gap-1">
+                          {isDiscovered(config) ? (
+                            <Button size="sm" variant="outline" className="gap-1.5" onClick={() => handleEdit(config)}>
+                              <Pencil className="h-3.5 w-3.5" /> Manage
+                            </Button>
+                          ) : (
+                          <>
                           <Button
                             size="icon"
                             variant="ghost"
@@ -536,6 +557,8 @@ export default function AdminGateways() {
                           <Button size="icon" variant="ghost" onClick={() => setDeleting(config)}>
                             <Trash2 className="h-4 w-4" />
                           </Button>
+                          </>
+                          )}
                         </div>
                       </TableCell>
                     </TableRow>
@@ -554,7 +577,10 @@ export default function AdminGateways() {
         </TabsContent>
 
         <TabsContent value="configs">
-          {(!configs || configs.length === 0) ? (
+          {(() => {
+          // Only adopted gateways have a stored record to generate files from.
+          const managed = (configs || []).filter((c) => !isDiscovered(c)) as GatewayConfigSummary[];
+          return (!managed || managed.length === 0) ? (
             <Card>
               <CardContent className="py-8 text-center text-muted-foreground">
                 No gateway configs. Create a gateway first to download configuration files.
@@ -562,7 +588,7 @@ export default function AdminGateways() {
             </Card>
           ) : (
             <div className="space-y-4">
-              {(configs || []).map((config) => (
+              {managed.map((config) => (
                 <Card key={config.id}>
                   <CardContent className="p-4 sm:p-6">
                     <div className="flex items-center gap-3 mb-4">
@@ -639,7 +665,8 @@ export default function AdminGateways() {
                 </Card>
               ))}
             </div>
-          )}
+          );
+          })()}
         </TabsContent>
       </Tabs>
 

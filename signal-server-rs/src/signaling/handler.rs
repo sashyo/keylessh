@@ -102,6 +102,7 @@ async fn handle_signaling(socket: WebSocket, client_ip: String, state: AppState)
                                 realm: parsed["metadata"]["realm"].as_str().map(|s| s.to_string()),
                                 issuer: parsed["metadata"]["issuer"].as_str().map(|s| s.trim_end_matches('/').to_string()),
                                 client_id: parsed["metadata"]["clientId"].as_str().map(|s| s.to_string()),
+                                config: parsed["metadata"].get("config").filter(|v| v.is_object()).cloned(),
                                 public_url: parsed["metadata"]["publicUrl"].as_str().map(|s| s.to_string()),
                             };
 
@@ -433,6 +434,7 @@ mod tests {
             realm: None,
             issuer: None,
             client_id: None,
+            config: None,
             public_url: None,
         }
     }

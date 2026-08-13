@@ -91,6 +91,7 @@ pub async fn gateways(
                     "online": true,
                     "issuer": gw.metadata.issuer,
                     "clientId": gw.metadata.client_id,
+                    "config": gw.metadata.config,
                 }))
             })
         })
@@ -232,6 +233,7 @@ mod tests {
             realm: None,
             issuer: issuer.map(|s| s.to_string()),
             client_id: None,
+            config: None,
             public_url: None,
         };
         st.registry.register_gateway(id.into(), vec![], tx, meta, None);
@@ -258,6 +260,7 @@ mod tests {
             realm: None,
             issuer: None,
             client_id: None,
+            config: None,
             public_url: None,
         };
         st.registry.register_gateway(id.into(), vec![], tx, meta, None);

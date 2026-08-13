@@ -294,6 +294,64 @@ pub fn config_file_path() -> PathBuf {
     dir.join("gateway.toml")
 }
 
+// ── Self-reported config ────────────────────────────────────────
+
+/// Render backends back to the `Name=url;flags` form used in gateway.toml.
+pub fn backends_to_string(backends: &[BackendEntry]) -> String {
+    backends
+        .iter()
+        .map(|b| {
+            let mut entry = format!("{}={}", b.name, b.url);
+            if b.no_auth {
+                entry.push_str(";noauth");
+            }
+            if b.strip_auth {
+                entry.push_str(";stripauth");
+            }
+            if b.auth == BackendAuth::EdDSA {
+                entry.push_str(";eddsa");
+            }
+            entry
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The gateway's current settings, advertised at registration so a console can
+/// show a self-registered gateway accurately and seed a config record from it.
+///
+/// Deliberately limited to the fields a console is allowed to push back, so what
+/// an admin sees is exactly what they can edit. Secrets — `api_secret`,
+/// `turn_secret` — and the TideCloak config are never reported: they are not
+/// pushable, and the signal server relaying this has no business holding them.
+pub fn reported_config(config: &ServerConfig) -> serde_json::Value {
+    let mut reported = serde_json::json!({
+        "backends": backends_to_string(&config.backends),
+        "listen_port": config.listen_port,
+        "health_port": config.health_port,
+        "quic_port": config.quic_port,
+        "https": config.https,
+        "tls_hostname": config.tls_hostname,
+    });
+
+    if let Some(ref name) = config.display_name {
+        reported["display_name"] = serde_json::json!(name);
+    }
+    if let Some(ref desc) = config.description {
+        reported["description"] = serde_json::json!(desc);
+    }
+    if let Some(ref url) = config.server_url {
+        reported["server_url"] = serde_json::json!(url);
+    }
+    if !config.ice_servers.is_empty() {
+        reported["ice_servers"] = serde_json::json!(config.ice_servers.join(","));
+    }
+    if let Some(ref turn) = config.turn_server {
+        reported["turn_server"] = serde_json::json!(turn);
+    }
+    reported
+}
+
 // ── Remote config push ──────────────────────────────────────────
 
 /// Fields that may never be set from a remote push.
@@ -960,6 +1018,92 @@ mod remote_config_tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("scratch dir");
         dir
+    }
+
+    fn server_config() -> ServerConfig {
+        ServerConfig {
+            listen_port: 7891,
+            health_port: 7892,
+            backend_url: String::new(),
+            backends: parse_backends_str("App=http://10.0.0.5:8080, Desk=rdp://10.0.0.9:3389;eddsa"),
+            stun_server_url: "wss://signal.example.com".into(),
+            gateway_id: "gw-1".into(),
+            strip_auth_header: false,
+            auth_server_public_url: Some("https://tc.example.com".into()),
+            ice_servers: vec!["stun:1.2.3.4:3478".into()],
+            turn_server: Some("turn:1.2.3.4:3478".into()),
+            turn_secret: "turn-secret".into(),
+            api_secret: "shared-secret".into(),
+            display_name: Some("Demo Gateway".into()),
+            description: None,
+            https: true,
+            tls_hostname: "gw.example.com".into(),
+            tc_internal_url: None,
+            server_url: Some("https://console.example.com".into()),
+            quic_port: 7893,
+        }
+    }
+
+    #[test]
+    fn backends_round_trip_through_the_string_form() {
+        let original = "App=http://10.0.0.5:8080, Desk=rdp://10.0.0.9:3389;eddsa, Shell=ssh://h:22;noauth";
+        assert_eq!(backends_to_string(&parse_backends_str(original)), original);
+    }
+
+    #[test]
+    fn reports_the_editable_settings() {
+        let reported = reported_config(&server_config());
+
+        assert_eq!(reported["backends"].as_str(), Some("App=http://10.0.0.5:8080, Desk=rdp://10.0.0.9:3389;eddsa"));
+        assert_eq!(reported["listen_port"].as_u64(), Some(7891));
+        assert_eq!(reported["health_port"].as_u64(), Some(7892));
+        assert_eq!(reported["quic_port"].as_u64(), Some(7893));
+        assert_eq!(reported["https"].as_bool(), Some(true));
+        assert_eq!(reported["tls_hostname"].as_str(), Some("gw.example.com"));
+        assert_eq!(reported["display_name"].as_str(), Some("Demo Gateway"));
+        assert_eq!(reported["server_url"].as_str(), Some("https://console.example.com"));
+        assert_eq!(reported["ice_servers"].as_str(), Some("stun:1.2.3.4:3478"));
+        assert_eq!(reported["turn_server"].as_str(), Some("turn:1.2.3.4:3478"));
+    }
+
+    #[test]
+    fn never_reports_secrets_or_the_trust_anchor() {
+        let reported = reported_config(&server_config());
+        let serialized = reported.to_string();
+
+        for secret in ["shared-secret", "turn-secret"] {
+            assert!(!serialized.contains(secret), "reported config leaked {secret}: {serialized}");
+        }
+        for field in ["api_secret", "turn_secret", "tidecloak_config_b64", "auth_server_public_url", "tc_internal_url"] {
+            assert!(reported.get(field).is_none(), "reported config must not include {field}");
+        }
+    }
+
+    #[test]
+    fn every_reported_field_is_one_the_console_may_push_back() {
+        // What an admin sees must be exactly what they can edit, or the console
+        // would show settings that silently ignore any change.
+        let reported = reported_config(&server_config());
+        for field in reported.as_object().unwrap().keys() {
+            assert!(
+                !PROTECTED_FIELDS.contains(&field.as_str()),
+                "{field} is reported but refused on push"
+            );
+        }
+    }
+
+    #[test]
+    fn omits_settings_that_are_not_configured() {
+        let mut config = server_config();
+        config.turn_server = None;
+        config.server_url = None;
+        config.ice_servers.clear();
+        config.display_name = None;
+
+        let reported = reported_config(&config);
+        for field in ["turn_server", "server_url", "ice_servers", "display_name", "description"] {
+            assert!(reported.get(field).is_none(), "{field} should be omitted when unset");
+        }
     }
 
     #[test]
