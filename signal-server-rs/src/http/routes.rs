@@ -476,3 +476,26 @@ mod tests {
         assert!(st.pending_config_acks.is_empty(), "the ack slot must be cleaned up");
     }
 }
+
+#[cfg(test)]
+mod router_tests {
+    use super::*;
+    use crate::config::Config;
+    use axum::routing::{get, post};
+    use axum::Router;
+
+    /// Router construction panics on a malformed path (axum 0.8 requires `{id}`,
+    /// not the old `:id`). The handler tests call functions directly and would
+    /// not catch that, so build the real routes here — a panic means the binary
+    /// dies at startup and never binds its port.
+    #[test]
+    fn routes_build_without_panicking() {
+        let state = AppState::new(Config::from_env());
+        let _app: Router = Router::new()
+            .route("/health", get(health))
+            .route("/webrtc-config", get(webrtc_config))
+            .route("/api/gateways", get(gateways))
+            .route("/api/gateways/{id}/config", post(push_gateway_config))
+            .with_state(state);
+    }
+}
