@@ -473,7 +473,10 @@ fn changed_fields(a: &GatewayToml, b: &GatewayToml) -> Vec<String> {
 /// Write gateway.toml atomically so a crash mid-write cannot truncate the config
 /// the gateway needs to restart.
 fn write_toml(config: &GatewayToml) -> Result<(), String> {
-    let path = config_file_path();
+    write_toml_to(&config_file_path(), config)
+}
+
+fn write_toml_to(path: &std::path::Path, config: &GatewayToml) -> Result<(), String> {
     let body = toml::to_string_pretty(config).map_err(|e| format!("serialize config: {e}"))?;
     let contents = format!(
         "# Punchd Gateway Configuration\n\
@@ -481,10 +484,33 @@ fn write_toml(config: &GatewayToml) -> Result<(), String> {
          # TideCloak settings and signal server identity are local-only and never pushed.\n\n{body}"
     );
 
+    // Preferred: write beside the target and rename, so a crash mid-write cannot
+    // leave a truncated config.
     let tmp = path.with_extension("toml.tmp");
-    fs::write(&tmp, contents).map_err(|e| format!("write {}: {e}", tmp.display()))?;
-    fs::rename(&tmp, &path).map_err(|e| format!("replace {}: {e}", path.display()))?;
-    Ok(())
+    let atomic = fs::write(&tmp, &contents)
+        .map_err(|e| format!("write {}: {e}", tmp.display()))
+        .and_then(|_| {
+            fs::rename(&tmp, path).map_err(|e| format!("replace {}: {e}", path.display()))
+        });
+
+    match atomic {
+        Ok(()) => Ok(()),
+        Err(rename_err) => {
+            // A single-file bind mount (`-v host.toml:/app/gateway.toml`, the
+            // documented container setup) is a mount point: renaming over it
+            // fails with EBUSY no matter the permissions. Fall back to writing
+            // through the mount, which is the only thing that works there.
+            let _ = fs::remove_file(&tmp);
+            fs::write(path, &contents).map_err(|e| {
+                format!("{rename_err}; writing in place also failed: {e}")
+            })?;
+            tracing::debug!(
+                "[Config] Replaced {} in place — atomic rename unavailable ({rename_err})",
+                path.display()
+            );
+            Ok(())
+        }
+    }
 }
 
 fn load_toml() -> GatewayToml {
@@ -917,6 +943,63 @@ mod remote_config_tests {
 
         assert!(outcome.changed);
         assert_eq!(updated.turn_server, None);
+    }
+
+    fn scratch_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("punchd-config-test-{name}"));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    #[test]
+    fn writes_a_config_that_reads_back() {
+        let dir = scratch_dir("write-new");
+        let path = dir.join("gateway.toml");
+
+        write_toml_to(&path, &base()).expect("writes");
+
+        let written = fs::read_to_string(&path).expect("readable");
+        assert!(written.starts_with("# Punchd Gateway Configuration"));
+        let reparsed: GatewayToml = toml::from_str(&written).expect("parses");
+        assert_eq!(reparsed.gateway_id.as_deref(), Some("gw-1"));
+        assert_eq!(reparsed.listen_port, Some(7891));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn overwrites_an_existing_config_and_leaves_no_temp_file() {
+        let dir = scratch_dir("overwrite");
+        let path = dir.join("gateway.toml");
+        fs::write(&path, "backends = \"Old=http://old:80\"\n").expect("seed");
+
+        let (updated, _) = merge_remote_config(&base(), &patch(json!({ "backends": "New=http://new:80" })));
+        write_toml_to(&path, &updated).expect("writes");
+
+        let written = fs::read_to_string(&path).expect("readable");
+        assert!(written.contains("New=http://new:80"));
+        assert!(!written.contains("Old=http://old:80"));
+        assert!(!dir.join("gateway.toml.tmp").exists(), "temp file must not be left behind");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn falls_back_to_in_place_write_when_rename_is_impossible() {
+        // Stands in for a single-file bind mount (`-v host.toml:/app/gateway.toml`),
+        // where renaming over the target fails with EBUSY. Here the temp path is
+        // occupied by a directory, so the rename cannot succeed either way, and
+        // only the in-place fallback can complete the write.
+        let dir = scratch_dir("no-rename");
+        let path = dir.join("gateway.toml");
+        fs::write(&path, "backends = \"Old=http://old:80\"\n").expect("seed");
+        fs::create_dir_all(path.with_extension("toml.tmp")).expect("block the temp path");
+
+        write_toml_to(&path, &base()).expect("falls back rather than failing");
+
+        let written = fs::read_to_string(&path).expect("readable");
+        assert!(written.contains("gateway_id = \"gw-1\""));
+        assert!(!written.contains("Old=http://old:80"));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
