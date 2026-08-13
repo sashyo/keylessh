@@ -145,6 +145,7 @@ import {
   adoptionRecord,
   isDiscoveredId,
   gatewayIdFromDiscoveredId,
+  belongsToTenant,
   type LiveGateway,
 } from "./lib/gatewayDiscovery";
 
@@ -1583,10 +1584,7 @@ export async function registerRoutes(
           if (!resp.ok) return;
           const data = (await resp.json()) as { gateways?: LiveGateway[] };
           for (const gw of data.gateways ?? []) {
-            const issuer = gw.issuer;
-            // Same tolerance as the dashboard: a gateway too old to report an
-            // issuer is shown rather than hidden mid-rollout.
-            if (issuer && issuer.replace(/\/+$/, "").toLowerCase() !== ownIssuer.toLowerCase()) continue;
+            if (!belongsToTenant(gw.issuer, ownIssuer)) continue;
             results.push({ ...gw, signalServerId: ss.id, signalServerName: ss.name, signalServerUrl: ss.url });
           }
         } catch {
@@ -1813,10 +1811,7 @@ export async function registerRoutes(
         // devops), so only list gateways that trust this instance's TideCloak
         // realm — gateways on another realm could never verify our tokens.
         const ownIssuer = `${getAuthServerUrl().replace(/\/+$/, "")}/realms/${getRealm()}`;
-        const sameTenant = (issuer?: string | null) =>
-          // Gateways predating issuer advertisement report nothing — keep them
-          // visible so an in-progress rollout doesn't blank the list.
-          !issuer || issuer.replace(/\/+$/, "").toLowerCase() === ownIssuer.toLowerCase();
+        const sameTenant = (issuer?: string | null) => belongsToTenant(issuer, ownIssuer);
 
         // Fetch gateways from each signal server in parallel (with timeout)
         const fetches = enabledServers.map(async (ss) => {

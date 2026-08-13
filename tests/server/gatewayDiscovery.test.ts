@@ -14,6 +14,7 @@ import {
   isDiscoveredId,
   gatewayIdFromDiscoveredId,
   signalServerFor,
+  belongsToTenant,
   DISCOVERED_PREFIX,
   type LiveGateway,
 } from "../../server/lib/gatewayDiscovery";
@@ -240,5 +241,34 @@ describe("signalServerFor", () => {
 
   it("returns undefined when nothing matches", () => {
     expect(signalServerFor(live({ signalServerId: "other", signalServerUrl: "https://other" }), [ss])).toBeUndefined();
+  });
+});
+
+describe("belongsToTenant", () => {
+  const own = "https://login.dauth.me/realms/keylessh-devops";
+
+  it("accepts an exact match", () => {
+    expect(belongsToTenant(own, own)).toBe(true);
+  });
+
+  it("rejects another realm on the same host", () => {
+    expect(belongsToTenant("https://login.dauth.me/realms/keylessh-demo", own)).toBe(false);
+  });
+
+  it("rejects the same realm name on another host", () => {
+    expect(belongsToTenant("https://staging.dauth.me/realms/keylessh-devops", own)).toBe(false);
+  });
+
+  it("ignores a trailing slash and case", () => {
+    expect(belongsToTenant(own + "/", own)).toBe(true);
+    expect(belongsToTenant("https://LOGIN.dauth.me/realms/keylessh-devops", own)).toBe(true);
+  });
+
+  it("rejects a gateway that reports no issuer", () => {
+    // Strict: reporting nothing used to mean "show everywhere", which is the
+    // cross-tenant leakage the issuer exists to prevent.
+    expect(belongsToTenant(null, own)).toBe(false);
+    expect(belongsToTenant(undefined, own)).toBe(false);
+    expect(belongsToTenant("", own)).toBe(false);
   });
 });

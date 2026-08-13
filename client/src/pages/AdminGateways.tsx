@@ -369,6 +369,21 @@ export default function AdminGateways() {
         onChange={(backends) => setForm({ ...form, backends })}
       />
 
+      {editing && isDiscovered(editing) && editing.issuer && (
+        <div className="rounded-md border border-border bg-muted/40 p-3 space-y-1">
+          <p className="text-xs font-medium flex items-center gap-1.5">
+            <Shield className="h-3.5 w-3.5 text-[hsl(var(--neon-cyan))]" />
+            This gateway trusts
+          </p>
+          <p className="text-[11px] font-mono break-all">{editing.issuer}</p>
+          <p className="text-[10px] text-muted-foreground">
+            Reported by the gateway. The tidecloak.json itself is never sent over the
+            wire and is not pushable — paste it below to let the console generate that
+            file for this gateway.
+          </p>
+        </div>
+      )}
+
       <div className="space-y-1">
         <Label className="text-xs">Punchd Client TideCloak Config</Label>
         <Textarea
