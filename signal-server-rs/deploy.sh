@@ -180,6 +180,21 @@ fi
 UNIT_SRC="$(dirname "$0")/pkg/signal-server-rs.service"
 if command -v systemctl >/dev/null 2>&1 && [ -f "$UNIT_SRC" ]; then
   echo "[Deploy] Installing systemd unit..."
+
+  # systemd does not inherit this script's exports, so everything computed
+  # above has to be handed over in a file. Miss this and the server comes up on
+  # plain HTTP with no TURN.
+  RUNTIME_ENV=/etc/signal-server-rs.env
+  {
+    echo "PORT=${SIGNAL_PORT}"
+    echo "RELAY_PORT=${RELAY_PORT}"
+    echo "ICE_SERVERS=stun:${EXTERNAL_IP}:3478"
+    echo "TURN_SERVER=turn:${EXTERNAL_IP}:3478"
+    echo "RELAY_HOST=${DOMAIN:-${EXTERNAL_IP}}"
+    [ -n "$TLS_CERT" ] && echo "TLS_CERT_PATH=${TLS_CERT}"
+    [ -n "$TLS_KEY" ] && echo "TLS_KEY_PATH=${TLS_KEY}"
+  } | sudo tee "$RUNTIME_ENV" >/dev/null
+  sudo chmod 600 "$RUNTIME_ENV"
   sudo cp "$UNIT_SRC" /etc/systemd/system/signal-server-rs.service
   sudo systemctl daemon-reload
   sudo systemctl enable signal-server-rs >/dev/null 2>&1 || true
