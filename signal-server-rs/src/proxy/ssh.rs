@@ -64,7 +64,7 @@ async fn handle_ssh_proxy(
     }
 
     let gw_ws_url = format!("ws://{}:{}/ws/ssh?{}", gw_ip, gw_port, query_string);
-    tracing::info!("[SSH-Proxy] Connecting to gateway: {gw_ws_url}");
+    tracing::info!("[SSH-Proxy] Connecting to gateway: {}", redact_query_secrets(&gw_ws_url));
 
     // Connect to gateway's /ws/ssh endpoint
     let gw_stream = match tokio_tungstenite::connect_async(&gw_ws_url).await {
@@ -113,4 +113,74 @@ async fn handle_ssh_proxy(
     }
 
     tracing::info!("[SSH-Proxy] Session ended for gateway {gw_id}");
+}
+
+/// Strip credential-bearing query parameters before a URL reaches the logs.
+///
+/// SSH tunnel URLs carry the user's access token. Logged verbatim it lands in a
+/// world-readable log file, decodable, complete with the user's roles and email.
+pub fn redact_query_secrets(url: &str) -> String {
+    const SECRET_PARAMS: &[&str] = &["token", "access_token", "secret", "api_secret", "password"];
+
+    let Some((base, query)) = url.split_once('?') else {
+        return url.to_string();
+    };
+
+    let redacted: Vec<String> = query
+        .split('&')
+        .map(|pair| match pair.split_once('=') {
+            Some((key, _)) if SECRET_PARAMS.contains(&key.to_ascii_lowercase().as_str()) => {
+                format!("{key}=<redacted>")
+            }
+            _ => pair.to_string(),
+        })
+        .collect();
+
+    format!("{base}?{}", redacted.join("&"))
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::redact_query_secrets;
+
+    #[test]
+    fn redacts_the_access_token() {
+        let url = "ws://gw:7891/ws/ssh?token=eyJhbGciOiJFZERTQSJ9.payload.sig&host=TideStun&port=22";
+        let out = redact_query_secrets(url);
+        assert!(!out.contains("eyJhbGciOiJFZERTQSJ9"), "token still present: {out}");
+        assert_eq!(out, "ws://gw:7891/ws/ssh?token=<redacted>&host=TideStun&port=22");
+    }
+
+    #[test]
+    fn keeps_the_parts_that_make_a_log_line_useful() {
+        let out = redact_query_secrets("ws://gw:7891/ws/ssh?token=abc&host=TideStun&port=22&serverId=X");
+        assert!(out.contains("host=TideStun"));
+        assert!(out.contains("port=22"));
+        assert!(out.contains("serverId=X"));
+    }
+
+    #[test]
+    fn redacts_every_known_secret_parameter() {
+        let out = redact_query_secrets("ws://h/p?api_secret=s1&password=s2&access_token=s3&secret=s4");
+        for leaked in ["s1", "s2", "s3", "s4"] {
+            assert!(!out.contains(leaked), "{leaked} leaked: {out}");
+        }
+    }
+
+    #[test]
+    fn is_case_insensitive_on_parameter_names() {
+        assert!(!redact_query_secrets("ws://h/p?TOKEN=secret").contains("secret"));
+    }
+
+    #[test]
+    fn leaves_urls_without_secrets_alone() {
+        assert_eq!(redact_query_secrets("ws://h/p"), "ws://h/p");
+        assert_eq!(redact_query_secrets("ws://h/p?host=x&port=22"), "ws://h/p?host=x&port=22");
+    }
+
+    #[test]
+    fn handles_malformed_query_pairs() {
+        let out = redact_query_secrets("ws://h/p?token&host=x&=y");
+        assert!(out.contains("host=x"));
+    }
 }
