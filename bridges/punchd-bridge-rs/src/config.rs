@@ -484,6 +484,16 @@ fn write_toml_to(path: &std::path::Path, config: &GatewayToml) -> Result<(), Str
          # TideCloak settings and signal server identity are local-only and never pushed.\n\n{body}"
     );
 
+    // A gateway configured purely by environment variables has no config file
+    // and no config directory — the container images are set up this way — so
+    // the first push has to create it.
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("create {}: {e}", parent.display()))?;
+        }
+    }
+
     // Preferred: write beside the target and rename, so a crash mid-write cannot
     // leave a truncated config.
     let tmp = path.with_extension("toml.tmp");
@@ -980,6 +990,22 @@ mod remote_config_tests {
         assert!(written.contains("New=http://new:80"));
         assert!(!written.contains("Old=http://old:80"));
         assert!(!dir.join("gateway.toml.tmp").exists(), "temp file must not be left behind");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn creates_the_config_directory_when_it_does_not_exist() {
+        // Gateways configured only by environment variables (the container
+        // images) have no config dir at all until the first push.
+        let dir = scratch_dir("no-parent");
+        let path = dir.join("nested").join("deeper").join("gateway.toml");
+        assert!(!path.parent().unwrap().exists());
+
+        write_toml_to(&path, &base()).expect("creates the directory and writes");
+
+        let reparsed: GatewayToml =
+            toml::from_str(&fs::read_to_string(&path).expect("readable")).expect("parses");
+        assert_eq!(reparsed.gateway_id.as_deref(), Some("gw-1"));
         let _ = fs::remove_dir_all(&dir);
     }
 
