@@ -30,7 +30,7 @@ export interface LiveGateway {
 }
 
 /** A stored config, or a live gateway that has no record yet. */
-export type ListedGateway = (GatewayConfig & { discovered?: false }) | DiscoveredGateway;
+export type ListedGateway = (GatewayConfig & { discovered?: false; online?: boolean }) | DiscoveredGateway;
 
 export interface DiscoveredGateway {
   /** Synthetic id — no database row exists yet. */
@@ -129,6 +129,7 @@ export function mergeDiscovered(
   live: LiveGateway[]
 ): ListedGateway[] {
   const known = new Set(stored.map((c) => c.gatewayId.toLowerCase()));
+  const liveIds = new Set(live.filter((g) => g.online !== false).map((g) => g.id.toLowerCase()));
   const seen = new Set<string>();
   const discovered: DiscoveredGateway[] = [];
 
@@ -140,7 +141,11 @@ export function mergeDiscovered(
     discovered.push(toDiscovered(gw));
   }
 
-  return [...stored, ...discovered];
+  // A stored record says a gateway is configured, not that it is connected.
+  // Whether it is currently registered is what an admin actually wants to see.
+  const annotated = stored.map((c) => ({ ...c, online: liveIds.has(c.gatewayId.toLowerCase()) }));
+
+  return [...annotated, ...discovered];
 }
 
 /**

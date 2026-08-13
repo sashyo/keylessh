@@ -491,7 +491,8 @@ export default function AdminGateways() {
                     <TableHead>Gateway</TableHead>
                     <TableHead className="hidden md:table-cell">STUN Server</TableHead>
                     <TableHead className="hidden lg:table-cell">Backends</TableHead>
-                    <TableHead>VPN</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead className="hidden sm:table-cell">VPN</TableHead>
                     <TableHead className="text-right">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -527,10 +528,18 @@ export default function AdminGateways() {
                         <p className="text-xs text-muted-foreground truncate max-w-[200px]">{config.backends || "—"}</p>
                       </TableCell>
                       <TableCell>
-                        {isDiscovered(config) ? (
-                          <Badge variant="outline" className="text-muted-foreground">
-                            {config.online ? "Online" : "Offline"}
+                        {config.online ? (
+                          <Badge variant="outline" className="gap-1 bg-green-50 text-green-700 border-green-200 dark:bg-green-950/30 dark:text-green-400">
+                            <span className="h-1.5 w-1.5 rounded-full bg-current" /> Online
                           </Badge>
+                        ) : (
+                          <Badge variant="outline" className="text-muted-foreground">Offline</Badge>
+                        )}
+                      </TableCell>
+                      <TableCell className="hidden sm:table-cell">
+                        {isDiscovered(config) ? (
+                          // Not reported by the gateway, so it is unknown rather than off.
+                          <span className="text-xs text-muted-foreground">—</span>
                         ) : config.vpnEnabled ? (
                           <Badge variant="outline" className="gap-1 bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950/30 dark:text-blue-400">
                             <Wifi className="h-3 w-3" /> On
@@ -580,7 +589,7 @@ export default function AdminGateways() {
                   ))}
                   {(!configs || configs.length === 0) && !isLoading && (
                     <TableRow>
-                      <TableCell colSpan={5} className="text-center text-muted-foreground py-8">
+                      <TableCell colSpan={6} className="text-center text-muted-foreground py-8">
                         No gateway configs. Click "Add Gateway" to create one.
                       </TableCell>
                     </TableRow>

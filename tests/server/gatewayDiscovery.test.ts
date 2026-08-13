@@ -103,8 +103,28 @@ describe("mergeDiscovered", () => {
     expect(listed).toHaveLength(1);
   });
 
-  it("returns stored configs unchanged when nothing is live", () => {
-    expect(mergeDiscovered([stored()], [])).toEqual([stored()]);
+  it("marks a stored gateway online when it is registered", () => {
+    // A record means configured; whether it is connected is a separate fact,
+    // and previously the two were conflated in the UI.
+    const listed = mergeDiscovered([stored({ gatewayId: "Self-GW" })], [live()]);
+
+    expect((listed[0] as any).online).toBe(true);
+  });
+
+  it("marks a stored gateway offline when it is not registered", () => {
+    const listed = mergeDiscovered([stored({ gatewayId: "Absent-GW" })], [live()]);
+
+    expect((listed[0] as any).online).toBe(false);
+  });
+
+  it("treats an explicitly offline live gateway as not registered", () => {
+    const listed = mergeDiscovered([stored({ gatewayId: "Self-GW" })], [live({ online: false })]);
+
+    expect((listed[0] as any).online).toBe(false);
+  });
+
+  it("returns stored configs when nothing is live, marked offline", () => {
+    expect(mergeDiscovered([stored()], [])).toEqual([{ ...stored(), online: false }]);
   });
 
   it("returns nothing when there is neither", () => {
