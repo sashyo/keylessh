@@ -17,6 +17,15 @@
 
     <Property Id="REINSTALLMODE" Value="amus" Secure="yes" />
 
+    <!-- Config files chosen in the wizard. Both optional: an admin without them
+         yet can install now and drop them in later. Settable on the command line
+         for unattended installs:
+           msiexec /i PunchdGateway.msi /qn ^
+             GATEWAY_TOML_FILE="C:\path\gateway.toml" ^
+             TIDECLOAK_JSON_FILE="C:\path\tidecloak.json" -->
+    <Property Id="GATEWAY_TOML_FILE" Secure="yes" />
+    <Property Id="TIDECLOAK_JSON_FILE" Secure="yes" />
+
     <!-- ═══════════ Directory layout ═══════════ -->
 
     <!-- Punchd Gateway → Program Files\PunchdGateway -->
@@ -67,17 +76,94 @@
       <ComponentRef Id="GatewayConfigDirectory" />
     </Feature>
 
+    <!-- ═══════════ Custom actions: pick and place the config files ═══════════ -->
+
+    <Binary Id="GatewayCA" SourceFile="!(bindpath.CaDir)\GatewayCA.dll" />
+
+    <CustomAction Id="BrowseGatewayToml" BinaryRef="GatewayCA"
+                  DllEntry="BrowseGatewayToml" Execute="immediate" Return="ignore" />
+    <CustomAction Id="BrowseTidecloakJson" BinaryRef="GatewayCA"
+                  DllEntry="BrowseTidecloakJson" Execute="immediate" Return="ignore" />
+
+    <!-- Deferred actions run without access to properties, so both paths are
+         handed over through CustomActionData as "<toml>|<json>". -->
+    <CustomAction Id="SetCopyGatewayConfigData" Property="CopyGatewayConfig"
+                  Value="[GATEWAY_TOML_FILE]|[TIDECLOAK_JSON_FILE]" Execute="immediate" />
+    <CustomAction Id="CopyGatewayConfig" BinaryRef="GatewayCA"
+                  DllEntry="CopyGatewayConfig" Execute="deferred"
+                  Impersonate="no" Return="check" />
+    <CustomAction Id="RemoveGatewayConfig" BinaryRef="GatewayCA"
+                  DllEntry="RemoveGatewayConfig" Execute="deferred"
+                  Impersonate="no" Return="ignore" />
+
+    <InstallExecuteSequence>
+      <!-- Place config before the service starts, so the gateway's first start
+           already sees its configuration. InstallServices runs inside
+           InstallFinalize, so scheduling before that is sufficient. -->
+      <Custom Action="SetCopyGatewayConfigData" Before="CopyGatewayConfig"
+              Condition="NOT REMOVE" />
+      <Custom Action="CopyGatewayConfig" Before="InstallFinalize"
+              Condition="NOT REMOVE" />
+      <Custom Action="RemoveGatewayConfig" After="InstallInitialize"
+              Condition="REMOVE~=&quot;ALL&quot;" />
+      <ScheduleReboot After="InstallFinalize" Condition="0" />
+    </InstallExecuteSequence>
+
     <!-- ═══════════ Installer UI ═══════════ -->
     <UI>
       <TextStyle Id="TitleFont" FaceName="Tahoma" Size="10" Bold="yes" />
       <TextStyle Id="BodyFont" FaceName="Tahoma" Size="8" />
+      <TextStyle Id="PathFont" FaceName="Tahoma" Size="8" />
 
       <Dialog Id="WelcomeDlg" Width="370" Height="270" Title="Punchd Gateway Setup">
         <Control Id="Title" Type="Text" X="20" Y="20" Width="330" Height="20"
                  Text="{\TitleFont}Welcome to Punchd Gateway Setup" />
-        <Control Id="Desc" Type="Text" X="20" Y="50" Width="330" Height="60"
-                 Text="{\BodyFont}This will install the Punchd Gateway as a Windows service. The gateway provides NAT-traversing reverse proxy with QUIC VPN, WebRTC, and TideCloak OIDC authentication. Place your gateway.toml and tidecloak.json in ProgramData\punchd-gateway after installation." />
+        <Control Id="Desc" Type="Text" X="20" Y="50" Width="330" Height="70"
+                 Text="{\BodyFont}This installs the Punchd Gateway as a Windows service — a NAT-traversing reverse proxy with QUIC VPN, WebRTC and TideCloak authentication.&#10;&#10;Next you can select your configuration files, or skip and add them later." />
         <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17"
+                 Default="yes" Text="Next">
+          <Publish Event="NewDialog" Value="ConfigDlg" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17"
+                 Cancel="yes" Text="Cancel">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+      </Dialog>
+
+      <Dialog Id="ConfigDlg" Width="370" Height="270" Title="Punchd Gateway Setup">
+        <Control Id="Title" Type="Text" X="20" Y="15" Width="330" Height="20"
+                 Text="{\TitleFont}Configuration files" />
+        <Control Id="Desc" Type="Text" X="20" Y="38" Width="330" Height="34"
+                 Text="{\BodyFont}Both are optional. Leave them blank to install now and copy them into C:\ProgramData\punchd-gateway later." />
+
+        <!-- gateway.toml -->
+        <Control Id="TomlLabel" Type="Text" X="20" Y="82" Width="330" Height="10"
+                 Text="{\BodyFont}gateway.toml — gateway ID, signal server and backends" />
+        <Control Id="TomlPath" Type="Text" X="20" Y="96" Width="245" Height="14"
+                 Property="GATEWAY_TOML_FILE" Text="{\PathFont}[GATEWAY_TOML_FILE]" />
+        <Control Id="TomlBrowse" Type="PushButton" X="272" Y="94" Width="78" Height="17"
+                 Text="Browse...">
+          <Publish Event="DoAction" Value="BrowseGatewayToml" />
+        </Control>
+
+        <!-- tidecloak.json -->
+        <Control Id="JsonLabel" Type="Text" X="20" Y="126" Width="330" Height="10"
+                 Text="{\BodyFont}tidecloak.json — the TideCloak adapter config used to verify logins" />
+        <Control Id="JsonPath" Type="Text" X="20" Y="140" Width="245" Height="14"
+                 Property="TIDECLOAK_JSON_FILE" Text="{\PathFont}[TIDECLOAK_JSON_FILE]" />
+        <Control Id="JsonBrowse" Type="PushButton" X="272" Y="138" Width="78" Height="17"
+                 Text="Browse...">
+          <Publish Event="DoAction" Value="BrowseTidecloakJson" />
+        </Control>
+
+        <Control Id="Hint" Type="Text" X="20" Y="172" Width="330" Height="30"
+                 Text="{\BodyFont}Both files are downloadable from KeyleSSH under Punchd &#8594; Gateways. Selecting a file replaces any copy already present." />
+
+        <Control Id="Back" Type="PushButton" X="168" Y="243" Width="56" Height="17"
+                 Text="Back">
+          <Publish Event="NewDialog" Value="WelcomeDlg" />
+        </Control>
+        <Control Id="Install" Type="PushButton" X="236" Y="243" Width="56" Height="17"
                  Default="yes" Text="Install">
           <Publish Event="EndDialog" Value="Return" />
         </Control>
@@ -103,8 +189,8 @@
       <Dialog Id="ExitDlg" Width="370" Height="270" Title="Punchd Gateway Setup Complete">
         <Control Id="Title" Type="Text" X="20" Y="20" Width="330" Height="20"
                  Text="{\TitleFont}Installation Complete" />
-        <Control Id="Desc" Type="Text" X="20" Y="50" Width="330" Height="70"
-                 Text="{\BodyFont}Punchd Gateway has been installed as a Windows service. Copy your gateway.toml and tidecloak.json to C:\ProgramData\punchd-gateway\ then restart the service." />
+        <Control Id="Desc" Type="Text" X="20" Y="50" Width="330" Height="80"
+                 Text="{\BodyFont}Punchd Gateway is installed and running as a Windows service.&#10;&#10;Any configuration files you selected are in C:\ProgramData\punchd-gateway. To change them later, edit that folder and restart the PunchdGateway service — or manage the gateway from the KeyleSSH console." />
         <Control Id="Finish" Type="PushButton" X="304" Y="243" Width="56" Height="17"
                  Default="yes" Cancel="yes" Text="Finish">
           <Publish Event="EndDialog" Value="Return" />
@@ -116,10 +202,6 @@
         <Show Dialog="ExitDlg" After="ExecuteAction" />
       </InstallUISequence>
     </UI>
-
-    <InstallExecuteSequence>
-      <ScheduleReboot After="InstallFinalize" Condition="0" />
-    </InstallExecuteSequence>
 
   </Package>
 </Wix>

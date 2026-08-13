@@ -1,0 +1,6 @@
+LIBRARY GatewayCA
+EXPORTS
+    BrowseGatewayToml
+    BrowseTidecloakJson
+    CopyGatewayConfig
+    RemoveGatewayConfig
