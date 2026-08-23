@@ -1,6 +1,6 @@
 import express, { type Express } from "express";
 import type { Server } from "http";
-import { storage, approvalStorage, policyStorage, pendingPolicyStorage, templateStorage, subscriptionStorage, recordingStorage, fileOperationStorage, bridgeStorage, signalServerStorage, gatewayConfigStorage, type ApprovalType, type GatewayConfig } from "./storage";
+import { storage, approvalStorage, policyStorage, pendingPolicyStorage, templateStorage, subscriptionStorage, recordingStorage, fileOperationStorage, bridgeStorage, signalServerStorage, gatewayConfigStorage, hostKeyStorage, type ApprovalType, type GatewayConfig } from "./storage";
 import { subscriptionTiers, type SubscriptionTier } from "@shared/schema";
 import * as stripeLib from "./lib/stripe";
 import { log, logForseti, logError } from "./logger";
@@ -1786,6 +1786,81 @@ export async function registerRoutes(
   // ============================================
   // Gateway Endpoints (user-facing aggregation from signal servers)
   // ============================================
+
+  // ============================================
+  // SSH host keys (trust on first use)
+  // ============================================
+
+  // GET /api/host-keys/:target - what is pinned for this target, if anything
+  app.get("/api/host-keys/:target", authenticate, async (req: AuthenticatedRequest, res) => {
+    try {
+      const pinned = await hostKeyStorage.get(decodeURIComponent(req.params.target));
+      // Absent is a normal answer — it means first contact — so this is a 200
+      // with null rather than a 404 the client would have to special-case.
+      res.json(pinned);
+    } catch (error) {
+      log(`Failed to read host key: ${error}`);
+      res.status(500).json({ message: "Failed to read host key" });
+    }
+  });
+
+  // POST /api/host-keys - pin a key for a target that has none
+  app.post("/api/host-keys", authenticate, async (req: AuthenticatedRequest, res) => {
+    try {
+      const { target, algorithm, publicKey, fingerprint, host, port } = req.body ?? {};
+      if (!target || !algorithm || !publicKey || !fingerprint) {
+        return res.status(400).json({ message: "target, algorithm, publicKey and fingerprint are required" });
+      }
+
+      const existing = await hostKeyStorage.get(target);
+      if (existing) {
+        // Never overwrite. A key changing is exactly what pinning exists to
+        // catch, so replacing one is a deliberate act through the admin route.
+        if (existing.publicKey === publicKey && existing.algorithm === algorithm) {
+          return res.json(existing);
+        }
+        log(`[host-key] REJECTED changed key for ${target} presented by ${req.user?.username}`);
+        return res.status(409).json({
+          message: "A different host key is already pinned for this target",
+          pinned: existing,
+        });
+      }
+
+      const { pinned } = await hostKeyStorage.pin({
+        target, algorithm, publicKey, fingerprint,
+        host: host ?? null,
+        port: typeof port === "number" ? port : null,
+        pinnedBy: req.user?.username ?? null,
+      });
+      log(`[host-key] pinned ${fingerprint} for ${target} by ${req.user?.username}`);
+      res.status(201).json(pinned);
+    } catch (error) {
+      log(`Failed to pin host key: ${error}`);
+      res.status(500).json({ message: "Failed to pin host key" });
+    }
+  });
+
+  // GET /api/admin/host-keys - review what is trusted
+  app.get("/api/admin/host-keys", authenticate, requireAdmin, async (_req: AuthenticatedRequest, res) => {
+    try {
+      res.json(await hostKeyStorage.list());
+    } catch (error) {
+      res.status(500).json({ message: "Failed to list host keys" });
+    }
+  });
+
+  // DELETE /api/admin/host-keys/:target - forget a pin so trust is re-established
+  app.delete("/api/admin/host-keys/:target", authenticate, requireAdmin, async (req: AuthenticatedRequest, res) => {
+    try {
+      const target = decodeURIComponent(req.params.target);
+      const removed = await hostKeyStorage.forget(target);
+      if (!removed) return res.status(404).json({ message: "No host key pinned for that target" });
+      log(`[host-key] forgotten for ${target} by ${req.user?.username}`);
+      res.status(204).send();
+    } catch (error) {
+      res.status(500).json({ message: "Failed to forget host key" });
+    }
+  });
 
   // GET /api/gateway-endpoints - Aggregate gateways from all enabled signal servers
   app.get(

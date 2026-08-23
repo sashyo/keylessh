@@ -4,6 +4,7 @@ import {
   SshChannel,
   WebSocketStream,
   SshAuthenticatingEventArgs,
+  SshAuthenticationType,
   SshDataWriter,
   PublicKeyAlgorithm,
 } from "@microsoft/dev-tunnels-ssh";
@@ -15,6 +16,15 @@ import { IAMService } from "@tidecloak/js";
 import { appFetch } from "./appFetch";
 import { SftpClient } from "./sftp";
 import { ScpClient } from "./scp";
+import {
+  sshFingerprint,
+  verifyHostKey,
+  hostKeyTarget,
+  toBase64,
+  type PinnedHostKey,
+  type HostKeyPrompt,
+} from "./hostKey";
+
 
 function toAbsoluteUrl(path: string): string {
   if (path.startsWith("http://") || path.startsWith("https://")) return path;
@@ -322,6 +332,12 @@ export interface SSHClientOptions {
   host: string;
   port: number;
   serverId: string;
+  /**
+   * Asked to confirm a host key the first time a target is seen. Returning
+   * false aborts the connection. When omitted, an unknown host is refused
+   * rather than trusted — a caller that cannot ask cannot consent.
+   */
+  onHostKeyPrompt?: (prompt: HostKeyPrompt) => Promise<boolean>;
   username: string;
   onData: (data: Uint8Array) => void;
   onStatusChange: (status: SSHConnectionStatus) => void;
@@ -574,10 +590,15 @@ export class BrowserSSHClient {
       // Create client session
       this.session = new SshClientSession(config);
 
-      // Handle server authentication (accept any server for now)
+      // Verify the server's host key. Resolving a non-null principal accepts;
+      // null rejects and the session fails to connect.
       this.session.onAuthenticating((e: SshAuthenticatingEventArgs) => {
-        // For server authentication, just accept
-        // In production, you'd verify the host key
+        if (e.authenticationType === SshAuthenticationType.serverPublicKey) {
+          e.authenticationPromise = this.verifyHostKey(e);
+          return;
+        }
+        // Any other authentication type here is the server asking about the
+        // client, which this session does not handle.
         e.authenticationPromise = Promise.resolve({});
       });
 
@@ -610,6 +631,116 @@ export class BrowserSSHClient {
       this.cleanup();
       throw error;
     }
+  }
+
+  /**
+   * Decide whether to trust the server's host key.
+   *
+   * Trust on first use: an unseen target is pinned once the operator confirms
+   * the fingerprint, and every later connection must present the same key. A
+   * changed key aborts the connection rather than prompting — being asked to
+   * re-approve is how people are trained to click through the one prompt that
+   * matters.
+   */
+  private async verifyHostKey(e: SshAuthenticatingEventArgs): Promise<object | null> {
+    const fail = (reason: string) => {
+      this.options.onError(reason);
+      return null;
+    };
+
+    try {
+      const keyPair = e.publicKey;
+      if (!keyPair) return fail("Server presented no host key — refusing to connect.");
+
+      const blob = await keyPair.getPublicKeyBytes();
+      if (!blob) return fail("Server host key could not be read — refusing to connect.");
+
+      const presented = {
+        algorithm: keyPair.keyAlgorithmName,
+        publicKey: toBase64(new Uint8Array(blob)),
+      };
+      const fingerprint = await sshFingerprint(new Uint8Array(blob));
+      const target = hostKeyTarget({
+        serverId: this.options.serverId,
+        host: this.options.host,
+        port: this.options.port,
+      });
+
+      const pinned = await this.fetchPinnedHostKey(target);
+      const status = verifyHostKey(presented, pinned);
+
+      if (status === "match") return {};
+
+      if (status === "mismatch") {
+        // Loud on purpose. Either the host was rebuilt or something is
+        // impersonating it, and the two are indistinguishable from here.
+        return fail(
+          `HOST KEY CHANGED for ${this.options.host}. Expected ${pinned!.fingerprint}, got ${fingerprint}. ` +
+            `This may be a rebuilt host, or someone impersonating it. Connection refused — ` +
+            `an administrator must clear the pinned key if the change is expected.`,
+        );
+      }
+
+      // Unknown: first contact.
+      if (!this.options.onHostKeyPrompt) {
+        return fail(`Unknown host key for ${this.options.host} (${fingerprint}) and no way to confirm it.`);
+      }
+
+      const accepted = await this.options.onHostKeyPrompt({
+        host: this.options.host,
+        port: this.options.port,
+        algorithm: presented.algorithm,
+        fingerprint,
+        publicKey: presented.publicKey,
+      });
+      if (!accepted) return fail("Host key rejected — connection cancelled.");
+
+      const stored = await this.pinHostKey({ target, fingerprint, ...presented });
+      // Another connection may have pinned a different key in the meantime;
+      // trusting ours anyway would defeat the pin.
+      if (stored && stored.publicKey !== presented.publicKey) {
+        return fail(
+          `Host key for ${this.options.host} was pinned as ${stored.fingerprint} by another session. Connection refused.`,
+        );
+      }
+      return {};
+    } catch (err) {
+      // Any failure to establish trust is a failure to connect. Falling through
+      // to "accept" on an error is how verification quietly stops happening.
+      return fail(`Host key verification failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  private async fetchPinnedHostKey(target: string): Promise<PinnedHostKey | null> {
+    const token = await IAMService.getToken();
+    const resp = await fetch(`/api/host-keys/${encodeURIComponent(target)}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!resp.ok) throw new Error(`Could not read the pinned host key (HTTP ${resp.status})`);
+    return (await resp.json()) as PinnedHostKey | null;
+  }
+
+  private async pinHostKey(data: {
+    target: string;
+    algorithm: string;
+    publicKey: string;
+    fingerprint: string;
+  }): Promise<PinnedHostKey | null> {
+    const token = await IAMService.getToken();
+    const resp = await fetch("/api/host-keys", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({ ...data, host: this.options.host, port: this.options.port }),
+    });
+    if (resp.status === 409) {
+      const body = await resp.json().catch(() => ({}));
+      return (body.pinned ?? null) as PinnedHostKey | null;
+    }
+    if (!resp.ok) throw new Error(`Could not pin the host key (HTTP ${resp.status})`);
+    return (await resp.json()) as PinnedHostKey;
   }
 
   private buildWebSocketUrl(): string {

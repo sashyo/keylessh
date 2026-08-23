@@ -327,6 +327,22 @@ sqlite.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_signal_servers_enabled ON signal_servers(enabled);
 
+  -- Pinned SSH host keys. Without these the browser client accepted whatever
+  -- host key was presented, so anything in the relay path could impersonate a
+  -- target host. Pins are deployment-wide rather than per-user: one operator
+  -- accepting a key protects everyone, and a man-in-the-middle cannot work
+  -- through users one at a time.
+  CREATE TABLE IF NOT EXISTS host_keys (
+    target TEXT PRIMARY KEY,
+    algorithm TEXT NOT NULL,
+    public_key TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    host TEXT,
+    port INTEGER,
+    first_seen_at INTEGER NOT NULL,
+    pinned_by TEXT
+  );
+
   -- Gateway configuration table (managed from UI, pushed to bridges)
   CREATE TABLE IF NOT EXISTS gateway_configs (
     id TEXT PRIMARY KEY,
@@ -3060,3 +3076,85 @@ export const fileOperationStorage = new FileOperationStorage();
 export const bridgeStorage = new BridgeStorage();
 export const signalServerStorage = new SignalServerStorage();
 export const gatewayConfigStorage = new GatewayConfigStorage();
+
+export interface HostKey {
+  target: string;
+  algorithm: string;
+  publicKey: string;
+  fingerprint: string;
+  host: string | null;
+  port: number | null;
+  firstSeenAt: number;
+  pinnedBy: string | null;
+}
+
+/**
+ * Pinned SSH host keys.
+ *
+ * Trust-on-first-use: the first connection to a target records its key, and
+ * every later one must match. A pin is never silently replaced — a changed key
+ * has to be cleared deliberately, because the whole point is that a key
+ * changing underneath you is the thing worth noticing.
+ */
+export class HostKeyStorage {
+  async get(target: string): Promise<HostKey | null> {
+    const row: any = sqlite.prepare(`SELECT * FROM host_keys WHERE target = ?`).get(target);
+    return row ? this.mapRow(row) : null;
+  }
+
+  async list(): Promise<HostKey[]> {
+    const rows: any[] = sqlite.prepare(`SELECT * FROM host_keys ORDER BY first_seen_at DESC`).all();
+    return rows.map((r) => this.mapRow(r));
+  }
+
+  /**
+   * Record a pin for a target that has none.
+   *
+   * Returns the existing pin unchanged if one is already present, so a race
+   * between two first connections cannot let the second overwrite the first.
+   */
+  async pin(data: Omit<HostKey, "firstSeenAt">): Promise<{ pinned: HostKey; created: boolean }> {
+    const existing = await this.get(data.target);
+    if (existing) return { pinned: existing, created: false };
+
+    const now = Math.floor(Date.now() / 1000);
+    sqlite.prepare(`
+      INSERT OR IGNORE INTO host_keys (target, algorithm, public_key, fingerprint, host, port, first_seen_at, pinned_by)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      data.target,
+      data.algorithm,
+      data.publicKey,
+      data.fingerprint,
+      data.host ?? null,
+      data.port ?? null,
+      now,
+      data.pinnedBy ?? null,
+    );
+
+    // Re-read rather than trusting the insert: another request may have won.
+    const stored = await this.get(data.target);
+    if (!stored) throw new Error("Failed to pin host key");
+    return { pinned: stored, created: stored.firstSeenAt === now && stored.publicKey === data.publicKey };
+  }
+
+  /** Forget a pin, so the next connection re-establishes trust. */
+  async forget(target: string): Promise<boolean> {
+    return sqlite.prepare(`DELETE FROM host_keys WHERE target = ?`).run(target).changes > 0;
+  }
+
+  private mapRow(row: any): HostKey {
+    return {
+      target: row.target,
+      algorithm: row.algorithm,
+      publicKey: row.public_key,
+      fingerprint: row.fingerprint,
+      host: row.host ?? null,
+      port: row.port ?? null,
+      firstSeenAt: row.first_seen_at,
+      pinnedBy: row.pinned_by ?? null,
+    };
+  }
+}
+
+export const hostKeyStorage = new HostKeyStorage();
