@@ -48,6 +48,7 @@ import {
 import { FileBrowser } from "@/components/sftp";
 import type { ServerWithAccess } from "@shared/schema";
 import type { SSHConnectionStatus } from "@/lib/sshClient";
+import { HostKeyPromptDialog } from "@/components/HostKeyPromptDialog";
 
 const statusConfig: Record<
   SSHConnectionStatus,
@@ -112,7 +113,7 @@ export function TerminalSession({
 
   const serverIsDisabled = isGatewayMode ? false : (server ? !server.enabled : false);
   const serverIsOffline = isGatewayMode ? false : (server ? server.status === "offline" : false);
-  const { connect, disconnect, send, resize, setDimensions, status, error, openSftp, closeSftp, sftpClient, openScp, closeScp, scpClient, getSession, sendFileOpEvent } = useSSHSession({
+  const { connect, disconnect, send, resize, setDimensions, status, error, openSftp, closeSftp, sftpClient, openScp, closeScp, scpClient, getSession, sendFileOpEvent, hostKeyPrompt, resolveHostKeyPrompt } = useSSHSession({
     host: isGatewayMode ? serverId : (server?.host || ""),
     port: isGatewayMode ? 22 : (server?.port || 22),
     serverId,
@@ -538,6 +539,7 @@ export function TerminalSession({
 
   return (
     <div className="flex flex-col gap-2 sm:gap-4 h-full">
+      <HostKeyPromptDialog prompt={hostKeyPrompt} onDecision={resolveHostKeyPrompt} />
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2 min-w-0 flex-1">
           <Badge variant="outline" className="gap-1.5 shrink-0">

@@ -3,6 +3,7 @@ import { BrowserSSHClient, SSHConnectionStatus, type SSHSigner, type SSHAuth } f
 import type { SftpClient } from "@/lib/sftp";
 import type { ScpClient } from "@/lib/scp";
 import type { SshClientSession } from "@microsoft/dev-tunnels-ssh";
+import type { HostKeyPrompt } from "@/lib/hostKey";
 
 interface UseSSHSessionOptions {
   host: string;
@@ -28,6 +29,10 @@ export type FileOpEvent = {
 };
 
 interface UseSSHSessionReturn {
+  /** Set while a host key is awaiting the operator's confirmation. */
+  hostKeyPrompt: HostKeyPrompt | null;
+  /** Answer that confirmation; false aborts the connection. */
+  resolveHostKeyPrompt: (accepted: boolean) => void;
   connect: (auth: SSHAuth, signerOverride?: SSHSigner) => Promise<void>;
   disconnect: () => void;
   send: (data: string) => void;
@@ -60,6 +65,11 @@ export function useSSHSession({
   gatewayId,
 }: UseSSHSessionOptions): UseSSHSessionReturn {
   const [status, setStatus] = useState<SSHConnectionStatus>("disconnected");
+
+  // Pending host key confirmation. The connection blocks on the operator's
+  // answer, so the promise resolver is held until they decide.
+  const [hostKeyPrompt, setHostKeyPrompt] = useState<HostKeyPrompt | null>(null);
+  const hostKeyDecisionRef = useRef<((accepted: boolean) => void) | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sftpClient, setSftpClient] = useState<SftpClient | null>(null);
   const [scpClient, setScpClient] = useState<ScpClient | null>(null);
@@ -135,6 +145,11 @@ export function useSSHSession({
         onClose: () => {
           setStatus("disconnected");
         },
+        onHostKeyPrompt: (prompt) =>
+          new Promise<boolean>((resolve) => {
+            hostKeyDecisionRef.current = resolve;
+            setHostKeyPrompt(prompt);
+          }),
       });
 
       clientRef.current = client;
@@ -223,7 +238,17 @@ export function useSSHSession({
     }
   }, []);
 
+  /** Answer a pending host key confirmation, releasing the blocked connection. */
+  const resolveHostKeyPrompt = useCallback((accepted: boolean) => {
+    const decide = hostKeyDecisionRef.current;
+    hostKeyDecisionRef.current = null;
+    setHostKeyPrompt(null);
+    decide?.(accepted);
+  }, []);
+
   return {
+    hostKeyPrompt,
+    resolveHostKeyPrompt,
     connect,
     disconnect,
     send,
