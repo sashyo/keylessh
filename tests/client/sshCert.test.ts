@@ -1,0 +1,393 @@
+/**
+ * @fileoverview Tests for OpenSSH host certificate parsing and verification.
+ *
+ * Certificates are built here in real wire format and signed with real Ed25519
+ * keys, so the parser is exercised against bytes an sshd would actually send
+ * rather than against a fixture shaped to match the parser.
+ */
+
+import { describe, it, expect, beforeAll } from "vitest";
+import {
+  parseCertificate,
+  verifyCertificate,
+  readEd25519PublicKey,
+  ED25519_CERT_ALGORITHM,
+  CERT_TYPE_HOST,
+  CERT_TYPE_USER,
+  buildHostCertificate,
+  certificateFileContents,
+} from "../../client/src/lib/sshCert";
+
+// ── Wire format helpers, the mirror of the parser ──────────────────
+
+function u32(n: number): Uint8Array {
+  const b = new Uint8Array(4);
+  new DataView(b.buffer).setUint32(0, n, false);
+  return b;
+}
+function u64(n: bigint): Uint8Array {
+  const b = new Uint8Array(8);
+  new DataView(b.buffer).setBigUint64(0, n, false);
+  return b;
+}
+function str(v: string | Uint8Array): Uint8Array {
+  const bytes = typeof v === "string" ? new TextEncoder().encode(v) : v;
+  return concat(u32(bytes.length), bytes);
+}
+function concat(...parts: Uint8Array[]): Uint8Array {
+  const total = parts.reduce((n, p) => n + p.length, 0);
+  const out = new Uint8Array(total);
+  let o = 0;
+  for (const p of parts) { out.set(p, o); o += p.length; }
+  return out;
+}
+function stringList(items: string[]): Uint8Array {
+  return str(concat(...items.map((i) => str(i))));
+}
+function ed25519KeyBlob(raw: Uint8Array): Uint8Array {
+  return concat(str("ssh-ed25519"), str(raw));
+}
+
+interface CertFields {
+  publicKey: Uint8Array;
+  type?: number;
+  keyId?: string;
+  principals?: string[];
+  validAfter?: bigint;
+  validBefore?: bigint;
+  criticalOptions?: Uint8Array;
+  caPublicKey: Uint8Array;
+  algorithm?: string;
+  signatureAlgorithm?: string;
+}
+
+/** Build a certificate and sign it with the CA private key. */
+async function buildCert(fields: CertFields, caPrivate: CryptoKey, tamper?: (signed: Uint8Array) => Uint8Array) {
+  const body = concat(
+    str(fields.algorithm ?? ED25519_CERT_ALGORITHM),
+    str(new Uint8Array([1, 2, 3, 4])), // nonce
+    str(fields.publicKey),
+    u64(42n), // serial
+    u32(fields.type ?? CERT_TYPE_HOST),
+    str(fields.keyId ?? "host-cert"),
+    stringList(fields.principals ?? []),
+    u64(fields.validAfter ?? 0n),
+    u64(fields.validBefore ?? 0xffffffffffffffffn),
+    str(fields.criticalOptions ?? new Uint8Array()), // critical options
+    str(new Uint8Array()), // extensions
+    str(new Uint8Array()), // reserved
+    str(ed25519KeyBlob(fields.caPublicKey)),
+  );
+
+  const signedBytes = tamper ? tamper(body) : body;
+  const sig = new Uint8Array(
+    await crypto.subtle.sign({ name: "Ed25519" }, caPrivate, signedBytes as BufferSource),
+  );
+  return concat(signedBytes, str(concat(str(fields.signatureAlgorithm ?? "ssh-ed25519"), str(sig))));
+}
+
+// ── Fixtures ───────────────────────────────────────────────────────
+
+let ca: CryptoKeyPair, caRaw: Uint8Array;
+let host: CryptoKeyPair, hostRaw: Uint8Array;
+let other: CryptoKeyPair, otherRaw: Uint8Array;
+
+async function rawPublic(pair: CryptoKeyPair): Promise<Uint8Array> {
+  return new Uint8Array(await crypto.subtle.exportKey("raw", pair.publicKey));
+}
+
+beforeAll(async () => {
+  const gen = () => crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]) as Promise<CryptoKeyPair>;
+  [ca, host, other] = await Promise.all([gen(), gen(), gen()]);
+  [caRaw, hostRaw, otherRaw] = await Promise.all([rawPublic(ca), rawPublic(host), rawPublic(other)]);
+});
+
+const policy = (over: Partial<{ caPublicKey: Uint8Array; host: string; now: number }> = {}) => ({
+  caPublicKey: caRaw,
+  host: "10.0.0.5",
+  now: 1_800_000_000,
+  ...over,
+});
+
+describe("parseCertificate", () => {
+  it("reads every field of a real certificate", async () => {
+    const blob = await buildCert(
+      { publicKey: hostRaw, caPublicKey: caRaw, keyId: "web-01", principals: ["10.0.0.5", "web-01"] },
+      ca.privateKey,
+    );
+    const cert = parseCertificate(blob);
+
+    expect(cert.algorithm).toBe(ED25519_CERT_ALGORITHM);
+    expect(cert.publicKey).toEqual(hostRaw);
+    expect(cert.type).toBe(CERT_TYPE_HOST);
+    expect(cert.keyId).toBe("web-01");
+    expect(cert.principals).toEqual(["10.0.0.5", "web-01"]);
+    expect(cert.serial).toBe(42n);
+    expect(cert.signatureAlgorithm).toBe("ssh-ed25519");
+    expect(cert.signature).toHaveLength(64);
+    expect(readEd25519PublicKey(cert.signatureKey)).toEqual(caRaw);
+  });
+
+  it("handles an empty principal list", async () => {
+    const blob = await buildCert({ publicKey: hostRaw, caPublicKey: caRaw, principals: [] }, ca.privateKey);
+    expect(parseCertificate(blob).principals).toEqual([]);
+  });
+
+  it("rejects a different algorithm", async () => {
+    const blob = await buildCert(
+      { publicKey: hostRaw, caPublicKey: caRaw, algorithm: "ssh-rsa-cert-v01@openssh.com" },
+      ca.privateKey,
+    );
+    expect(() => parseCertificate(blob)).toThrow(/Unsupported certificate algorithm/);
+  });
+
+  it("rejects a truncated blob rather than reading past the end", async () => {
+    const blob = await buildCert({ publicKey: hostRaw, caPublicKey: caRaw }, ca.privateKey);
+    expect(() => parseCertificate(blob.subarray(0, blob.length - 10))).toThrow(/Malformed certificate/);
+    expect(() => parseCertificate(new Uint8Array([0, 0, 0, 5]))).toThrow(/Malformed certificate/);
+    expect(() => parseCertificate(new Uint8Array())).toThrow(/Malformed certificate/);
+  });
+
+  it("rejects a length prefix that overruns the buffer", () => {
+    // A hostile length field must not be trusted.
+    const evil = concat(str(ED25519_CERT_ALGORITHM), u32(0xfffffff0));
+    expect(() => parseCertificate(evil)).toThrow(/Malformed certificate/);
+  });
+});
+
+describe("verifyCertificate", () => {
+  it("accepts a well-formed certificate from the trusted CA", async () => {
+    const blob = await buildCert(
+      { publicKey: hostRaw, caPublicKey: caRaw, principals: ["10.0.0.5"] },
+      ca.privateKey,
+    );
+    const verdict = await verifyCertificate(parseCertificate(blob), policy());
+
+    expect(verdict.valid).toBe(true);
+  });
+
+  it("rejects one signed by a different authority", async () => {
+    // Signed by `other`, and claiming to be — the check that matters most.
+    const blob = await buildCert({ publicKey: hostRaw, caPublicKey: otherRaw, principals: ["10.0.0.5"] }, other.privateKey);
+    const verdict = await verifyCertificate(parseCertificate(blob), policy());
+
+    expect(verdict).toMatchObject({ valid: false, reason: expect.stringMatching(/unknown authority/i) });
+  });
+
+  it("rejects one claiming our CA but signed by another key", async () => {
+    // Names the real CA, signed by an impostor. Catching this is the whole point.
+    const blob = await buildCert({ publicKey: hostRaw, caPublicKey: caRaw, principals: ["10.0.0.5"] }, other.privateKey);
+    const verdict = await verifyCertificate(parseCertificate(blob), policy());
+
+    expect(verdict).toMatchObject({ valid: false, reason: expect.stringMatching(/signature is invalid/i) });
+  });
+
+  it("rejects a certificate edited after signing", async () => {
+    const blob = await buildCert(
+      { publicKey: hostRaw, caPublicKey: caRaw, keyId: "web-01", principals: ["10.0.0.5"] },
+      ca.privateKey,
+    );
+    // Flip a byte inside the signed region.
+    const tampered = new Uint8Array(blob);
+    tampered[40] ^= 0xff;
+    const verdict = await verifyCertificate(parseCertificate(tampered), policy());
+
+    expect(verdict).toMatchObject({ valid: false, reason: expect.stringMatching(/signature is invalid/i) });
+  });
+
+  it("rejects a user certificate presented as a host key", async () => {
+    const blob = await buildCert(
+      { publicKey: hostRaw, caPublicKey: caRaw, type: CERT_TYPE_USER, principals: ["10.0.0.5"] },
+      ca.privateKey,
+    );
+    const verdict = await verifyCertificate(parseCertificate(blob), policy());
+
+    expect(verdict).toMatchObject({ valid: false, reason: expect.stringMatching(/Not a host certificate/i) });
+  });
+
+  it("rejects one that is not valid yet", async () => {
+    const blob = await buildCert(
+      { publicKey: hostRaw, caPublicKey: caRaw, validAfter: 2_000_000_000n, principals: ["10.0.0.5"] },
+      ca.privateKey,
+    );
+    const verdict = await verifyCertificate(parseCertificate(blob), policy({ now: 1_800_000_000 }));
+
+    expect(verdict).toMatchObject({ valid: false, reason: expect.stringMatching(/not valid until/i) });
+  });
+
+  it("rejects an expired one", async () => {
+    const blob = await buildCert(
+      { publicKey: hostRaw, caPublicKey: caRaw, validBefore: 1_700_000_000n, principals: ["10.0.0.5"] },
+      ca.privateKey,
+    );
+    const verdict = await verifyCertificate(parseCertificate(blob), policy({ now: 1_800_000_000 }));
+
+    expect(verdict).toMatchObject({ valid: false, reason: expect.stringMatching(/expired/i) });
+  });
+
+  it("treats validBefore as exclusive, as OpenSSH does", async () => {
+    const blob = await buildCert(
+      { publicKey: hostRaw, caPublicKey: caRaw, validBefore: 1_800_000_000n, principals: ["10.0.0.5"] },
+      ca.privateKey,
+    );
+    const atBoundary = await verifyCertificate(parseCertificate(blob), policy({ now: 1_800_000_000 }));
+    const justBefore = await verifyCertificate(parseCertificate(blob), policy({ now: 1_799_999_999 }));
+
+    expect(atBoundary.valid).toBe(false);
+    expect(justBefore.valid).toBe(true);
+  });
+
+  it("rejects a host it was not issued for", async () => {
+    const blob = await buildCert(
+      { publicKey: hostRaw, caPublicKey: caRaw, principals: ["10.0.0.9", "db-01"] },
+      ca.privateKey,
+    );
+    const verdict = await verifyCertificate(parseCertificate(blob), policy({ host: "10.0.0.5" }));
+
+    expect(verdict).toMatchObject({ valid: false, reason: expect.stringMatching(/not valid for 10\.0\.0\.5/) });
+  });
+
+  it("matches principals case-insensitively", async () => {
+    const blob = await buildCert(
+      { publicKey: hostRaw, caPublicKey: caRaw, principals: ["Web-01.Example.COM"] },
+      ca.privateKey,
+    );
+    const verdict = await verifyCertificate(parseCertificate(blob), policy({ host: "web-01.example.com" }));
+
+    expect(verdict.valid).toBe(true);
+  });
+
+  it("rejects an empty principal list", async () => {
+    // OpenSSH reads empty as "valid for any host". Too permissive here: one
+    // certificate would then authenticate every server.
+    const blob = await buildCert({ publicKey: hostRaw, caPublicKey: caRaw, principals: [] }, ca.privateKey);
+    const verdict = await verifyCertificate(parseCertificate(blob), policy({ host: "anything" }));
+
+    expect(verdict).toMatchObject({ valid: false, reason: expect.stringMatching(/names no principals/i) });
+  });
+
+  it("rejects critical options it does not implement", async () => {
+    // "Critical" means refuse what you do not understand.
+    const blob = await buildCert(
+      { publicKey: hostRaw, caPublicKey: caRaw, principals: ["10.0.0.5"], criticalOptions: str("force-command") },
+      ca.privateKey,
+    );
+    const verdict = await verifyCertificate(parseCertificate(blob), policy());
+
+    expect(verdict).toMatchObject({ valid: false, reason: expect.stringMatching(/critical options/i) });
+  });
+
+  it("rejects a revoked serial even when otherwise valid", async () => {
+    const blob = await buildCert(
+      { publicKey: hostRaw, caPublicKey: caRaw, principals: ["10.0.0.5"] },
+      ca.privateKey,
+    );
+    const verdict = await verifyCertificate(
+      parseCertificate(blob),
+      { ...policy(), revokedSerials: new Set([42n]) },
+    );
+
+    expect(verdict).toMatchObject({ valid: false, reason: expect.stringMatching(/revoked/i) });
+  });
+
+  it("keeps a full uint64 serial exact", async () => {
+    // Read as a JS number this would lose precision well before 2^64.
+    const blob = await buildCert({ publicKey: hostRaw, caPublicKey: caRaw }, ca.privateKey);
+    expect(parseCertificate(blob).serial).toBe(42n);
+  });
+
+  it("rejects an unsupported CA signature algorithm", async () => {
+    const blob = await buildCert(
+      { publicKey: hostRaw, caPublicKey: caRaw, signatureAlgorithm: "ssh-rsa", principals: ["10.0.0.5"] },
+      ca.privateKey,
+    );
+    const verdict = await verifyCertificate(parseCertificate(blob), policy());
+
+    expect(verdict).toMatchObject({ valid: false, reason: expect.stringMatching(/Unsupported CA signature/i) });
+  });
+});
+
+describe("buildHostCertificate", () => {
+  const request = (over: Partial<Parameters<typeof buildHostCertificate>[0]> = {}) => ({
+    hostPublicKey: hostRaw,
+    caPublicKey: caRaw,
+    principals: ["10.0.0.5", "web-01"],
+    keyId: "web-01",
+    serial: 7n,
+    validAfter: 1_700_000_000,
+    validBefore: 1_900_000_000,
+    nonce: new Uint8Array(32).fill(9),
+    ...over,
+  });
+
+  it("produces a certificate this client accepts end to end", async () => {
+    // The strongest check available: issue, sign with the CA, then run the
+    // result through the same parser and verifier a real handshake uses.
+    const unsigned = buildHostCertificate(request());
+    const sig = new Uint8Array(
+      await crypto.subtle.sign({ name: "Ed25519" }, ca.privateKey, unsigned.signedBytes as BufferSource),
+    );
+    const blob = unsigned.assemble(sig);
+
+    const verdict = await verifyCertificate(parseCertificate(blob), policy({ now: 1_800_000_000 }));
+    expect(verdict.valid).toBe(true);
+  });
+
+  it("round-trips every field through the parser", async () => {
+    const unsigned = buildHostCertificate(request({ keyId: "db-01", serial: 12345678901234567890n }));
+    const sig = new Uint8Array(
+      await crypto.subtle.sign({ name: "Ed25519" }, ca.privateKey, unsigned.signedBytes as BufferSource),
+    );
+    const cert = parseCertificate(unsigned.assemble(sig));
+
+    expect(cert.keyId).toBe("db-01");
+    expect(cert.serial).toBe(12345678901234567890n); // beyond 2^53, must stay exact
+    expect(cert.principals).toEqual(["10.0.0.5", "web-01"]);
+    expect(cert.publicKey).toEqual(hostRaw);
+    expect(cert.type).toBe(CERT_TYPE_HOST);
+    expect(cert.validAfter).toBe(1_700_000_000n);
+    expect(cert.validBefore).toBe(1_900_000_000n);
+  });
+
+  it("is rejected if signed by the wrong authority", async () => {
+    const unsigned = buildHostCertificate(request());
+    const sig = new Uint8Array(
+      await crypto.subtle.sign({ name: "Ed25519" }, other.privateKey, unsigned.signedBytes as BufferSource),
+    );
+    const verdict = await verifyCertificate(parseCertificate(unsigned.assemble(sig)), policy());
+
+    expect(verdict).toMatchObject({ valid: false, reason: expect.stringMatching(/signature is invalid/i) });
+  });
+
+  it("refuses to issue one that names no principals", () => {
+    expect(() => buildHostCertificate(request({ principals: [] }))).toThrow(/at least one principal/i);
+  });
+
+  it("refuses an empty validity window", () => {
+    expect(() => buildHostCertificate(request({ validAfter: 100, validBefore: 100 }))).toThrow(/validity window/i);
+  });
+
+  it("refuses keys that are not ed25519 sized", () => {
+    expect(() => buildHostCertificate(request({ hostPublicKey: new Uint8Array(16) }))).toThrow(/32 bytes/);
+    expect(() => buildHostCertificate(request({ caPublicKey: new Uint8Array(64) }))).toThrow(/32 bytes/);
+  });
+
+  it("refuses a signature of the wrong length", () => {
+    const unsigned = buildHostCertificate(request());
+    expect(() => unsigned.assemble(new Uint8Array(32))).toThrow(/64-byte/);
+  });
+
+  it("renders a -cert.pub line sshd can read", async () => {
+    const unsigned = buildHostCertificate(request());
+    const sig = new Uint8Array(
+      await crypto.subtle.sign({ name: "Ed25519" }, ca.privateKey, unsigned.signedBytes as BufferSource),
+    );
+    const line = certificateFileContents(unsigned.assemble(sig), "web-01");
+
+    expect(line).toMatch(/^ssh-ed25519-cert-v01@openssh\.com [A-Za-z0-9+/=]+ web-01\n$/);
+    // The base64 in the file must be exactly the certificate bytes.
+    const b64 = line.split(" ")[1];
+    const decoded = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    expect(parseCertificate(decoded).keyId).toBe("web-01");
+  });
+});
