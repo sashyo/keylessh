@@ -61,7 +61,7 @@ export interface SshCertificate {
 }
 
 /** Reader for the SSH wire format, which is length-prefixed big-endian. */
-class SshReader {
+export class SshBlobReader {
   private offset = 0;
   constructor(private readonly buf: Uint8Array) {}
 
@@ -105,7 +105,7 @@ class SshReader {
 
   /** A list of strings, itself wrapped in a length-prefixed field. */
   readStringList(): string[] {
-    const inner = new SshReader(this.readBytes());
+    const inner = new SshBlobReader(this.readBytes());
     const out: string[] = [];
     while (inner.remaining() > 0) out.push(inner.readString());
     return out;
@@ -118,7 +118,7 @@ class SshReader {
 
 /** Parse a host certificate blob. Throws on anything malformed. */
 export function parseCertificate(blob: Uint8Array): SshCertificate {
-  const r = new SshReader(blob);
+  const r = new SshBlobReader(blob);
 
   const algorithm = r.readString();
   if (algorithm !== ED25519_CERT_ALGORITHM) {
@@ -142,7 +142,7 @@ export function parseCertificate(blob: Uint8Array): SshCertificate {
   const signedBytes = blob.subarray(0, r.position);
 
   const signatureBlob = r.readBytes();
-  const sr = new SshReader(signatureBlob);
+  const sr = new SshBlobReader(signatureBlob);
   const signatureAlgorithm = sr.readString();
   const signature = sr.readBytes();
 
@@ -170,7 +170,7 @@ export function parseCertificate(blob: Uint8Array): SshCertificate {
 
 /** Extract the raw ed25519 key from an `ssh-ed25519` public key blob. */
 export function readEd25519PublicKey(blob: Uint8Array): Uint8Array {
-  const r = new SshReader(blob);
+  const r = new SshBlobReader(blob);
   const alg = r.readString();
   if (alg !== "ssh-ed25519") throw new Error(`Expected an ssh-ed25519 key, got ${alg}`);
   const key = r.readBytes();
@@ -194,6 +194,8 @@ export interface CertificatePolicy {
   host: string;
   /** Seconds since the epoch. Injected so validity is testable. */
   now: number;
+  /** Serials to refuse regardless of validity. */
+  revokedSerials?: Set<bigint>;
 }
 
 export type CertificateVerdict =
@@ -248,17 +250,30 @@ export async function verifyCertificate(
     return { valid: false, reason: `Certificate expired at ${cert.validBefore}` };
   }
 
-  // An empty principal list means "valid for any host" in OpenSSH. That is a
-  // deliberate choice by whoever signed it, so it is honoured rather than
-  // treated as an error.
-  if (cert.principals.length > 0) {
-    const host = policy.host.toLowerCase();
-    if (!cert.principals.some((p) => p.toLowerCase() === host)) {
-      return {
-        valid: false,
-        reason: `Certificate is not valid for ${policy.host} (valid for: ${cert.principals.join(", ")})`,
-      };
-    }
+  // OpenSSH treats an empty principal list as "valid for any host". That is too
+  // permissive here: a certificate issued for one server would authenticate
+  // every other, so every certificate must name what it is for.
+  if (cert.principals.length === 0) {
+    return { valid: false, reason: "Certificate names no principals, so it is valid for nothing" };
+  }
+
+  const host = policy.host.toLowerCase();
+  if (!cert.principals.some((p) => p.toLowerCase() === host)) {
+    return {
+      valid: false,
+      reason: `Certificate is not valid for ${policy.host} (valid for: ${cert.principals.join(", ")})`,
+    };
+  }
+
+  // Critical options must be understood or the certificate refused — that is
+  // what makes them critical. None are supported for host certificates, so any
+  // at all is a refusal rather than something to ignore.
+  if (cert.criticalOptions.length > 0) {
+    return { valid: false, reason: "Certificate carries critical options this client does not implement" };
+  }
+
+  if (policy.revokedSerials?.has(cert.serial)) {
+    return { valid: false, reason: `Certificate serial ${cert.serial} is revoked` };
   }
 
   let signatureOk: boolean;

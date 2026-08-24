@@ -53,6 +53,7 @@ interface CertFields {
   principals?: string[];
   validAfter?: bigint;
   validBefore?: bigint;
+  criticalOptions?: Uint8Array;
   caPublicKey: Uint8Array;
   algorithm?: string;
   signatureAlgorithm?: string;
@@ -70,7 +71,7 @@ async function buildCert(fields: CertFields, caPrivate: CryptoKey, tamper?: (sig
     stringList(fields.principals ?? []),
     u64(fields.validAfter ?? 0n),
     u64(fields.validBefore ?? 0xffffffffffffffffn),
-    str(new Uint8Array()), // critical options
+    str(fields.criticalOptions ?? new Uint8Array()), // critical options
     str(new Uint8Array()), // extensions
     str(new Uint8Array()), // reserved
     str(ed25519KeyBlob(fields.caPublicKey)),
@@ -165,7 +166,7 @@ describe("verifyCertificate", () => {
 
   it("rejects one signed by a different authority", async () => {
     // Signed by `other`, and claiming to be — the check that matters most.
-    const blob = await buildCert({ publicKey: hostRaw, caPublicKey: otherRaw }, other.privateKey);
+    const blob = await buildCert({ publicKey: hostRaw, caPublicKey: otherRaw, principals: ["10.0.0.5"] }, other.privateKey);
     const verdict = await verifyCertificate(parseCertificate(blob), policy());
 
     expect(verdict).toMatchObject({ valid: false, reason: expect.stringMatching(/unknown authority/i) });
@@ -173,7 +174,7 @@ describe("verifyCertificate", () => {
 
   it("rejects one claiming our CA but signed by another key", async () => {
     // Names the real CA, signed by an impostor. Catching this is the whole point.
-    const blob = await buildCert({ publicKey: hostRaw, caPublicKey: caRaw }, other.privateKey);
+    const blob = await buildCert({ publicKey: hostRaw, caPublicKey: caRaw, principals: ["10.0.0.5"] }, other.privateKey);
     const verdict = await verifyCertificate(parseCertificate(blob), policy());
 
     expect(verdict).toMatchObject({ valid: false, reason: expect.stringMatching(/signature is invalid/i) });
@@ -181,7 +182,7 @@ describe("verifyCertificate", () => {
 
   it("rejects a certificate edited after signing", async () => {
     const blob = await buildCert(
-      { publicKey: hostRaw, caPublicKey: caRaw, keyId: "web-01" },
+      { publicKey: hostRaw, caPublicKey: caRaw, keyId: "web-01", principals: ["10.0.0.5"] },
       ca.privateKey,
     );
     // Flip a byte inside the signed region.
@@ -194,7 +195,7 @@ describe("verifyCertificate", () => {
 
   it("rejects a user certificate presented as a host key", async () => {
     const blob = await buildCert(
-      { publicKey: hostRaw, caPublicKey: caRaw, type: CERT_TYPE_USER },
+      { publicKey: hostRaw, caPublicKey: caRaw, type: CERT_TYPE_USER, principals: ["10.0.0.5"] },
       ca.privateKey,
     );
     const verdict = await verifyCertificate(parseCertificate(blob), policy());
@@ -204,7 +205,7 @@ describe("verifyCertificate", () => {
 
   it("rejects one that is not valid yet", async () => {
     const blob = await buildCert(
-      { publicKey: hostRaw, caPublicKey: caRaw, validAfter: 2_000_000_000n },
+      { publicKey: hostRaw, caPublicKey: caRaw, validAfter: 2_000_000_000n, principals: ["10.0.0.5"] },
       ca.privateKey,
     );
     const verdict = await verifyCertificate(parseCertificate(blob), policy({ now: 1_800_000_000 }));
@@ -214,7 +215,7 @@ describe("verifyCertificate", () => {
 
   it("rejects an expired one", async () => {
     const blob = await buildCert(
-      { publicKey: hostRaw, caPublicKey: caRaw, validBefore: 1_700_000_000n },
+      { publicKey: hostRaw, caPublicKey: caRaw, validBefore: 1_700_000_000n, principals: ["10.0.0.5"] },
       ca.privateKey,
     );
     const verdict = await verifyCertificate(parseCertificate(blob), policy({ now: 1_800_000_000 }));
@@ -224,7 +225,7 @@ describe("verifyCertificate", () => {
 
   it("treats validBefore as exclusive, as OpenSSH does", async () => {
     const blob = await buildCert(
-      { publicKey: hostRaw, caPublicKey: caRaw, validBefore: 1_800_000_000n },
+      { publicKey: hostRaw, caPublicKey: caRaw, validBefore: 1_800_000_000n, principals: ["10.0.0.5"] },
       ca.privateKey,
     );
     const atBoundary = await verifyCertificate(parseCertificate(blob), policy({ now: 1_800_000_000 }));
@@ -254,18 +255,48 @@ describe("verifyCertificate", () => {
     expect(verdict.valid).toBe(true);
   });
 
-  it("accepts an empty principal list as valid for any host", async () => {
-    // OpenSSH's own semantics: empty means unrestricted, and that is the
-    // signer's deliberate choice rather than a parse failure.
+  it("rejects an empty principal list", async () => {
+    // OpenSSH reads empty as "valid for any host". Too permissive here: one
+    // certificate would then authenticate every server.
     const blob = await buildCert({ publicKey: hostRaw, caPublicKey: caRaw, principals: [] }, ca.privateKey);
     const verdict = await verifyCertificate(parseCertificate(blob), policy({ host: "anything" }));
 
-    expect(verdict.valid).toBe(true);
+    expect(verdict).toMatchObject({ valid: false, reason: expect.stringMatching(/names no principals/i) });
+  });
+
+  it("rejects critical options it does not implement", async () => {
+    // "Critical" means refuse what you do not understand.
+    const blob = await buildCert(
+      { publicKey: hostRaw, caPublicKey: caRaw, principals: ["10.0.0.5"], criticalOptions: str("force-command") },
+      ca.privateKey,
+    );
+    const verdict = await verifyCertificate(parseCertificate(blob), policy());
+
+    expect(verdict).toMatchObject({ valid: false, reason: expect.stringMatching(/critical options/i) });
+  });
+
+  it("rejects a revoked serial even when otherwise valid", async () => {
+    const blob = await buildCert(
+      { publicKey: hostRaw, caPublicKey: caRaw, principals: ["10.0.0.5"] },
+      ca.privateKey,
+    );
+    const verdict = await verifyCertificate(
+      parseCertificate(blob),
+      { ...policy(), revokedSerials: new Set([42n]) },
+    );
+
+    expect(verdict).toMatchObject({ valid: false, reason: expect.stringMatching(/revoked/i) });
+  });
+
+  it("keeps a full uint64 serial exact", async () => {
+    // Read as a JS number this would lose precision well before 2^64.
+    const blob = await buildCert({ publicKey: hostRaw, caPublicKey: caRaw }, ca.privateKey);
+    expect(parseCertificate(blob).serial).toBe(42n);
   });
 
   it("rejects an unsupported CA signature algorithm", async () => {
     const blob = await buildCert(
-      { publicKey: hostRaw, caPublicKey: caRaw, signatureAlgorithm: "ssh-rsa" },
+      { publicKey: hostRaw, caPublicKey: caRaw, signatureAlgorithm: "ssh-rsa", principals: ["10.0.0.5"] },
       ca.privateKey,
     );
     const verdict = await verifyCertificate(parseCertificate(blob), policy());
