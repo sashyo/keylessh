@@ -288,3 +288,137 @@ export async function verifyCertificate(
 
   return { valid: true, certificate: cert };
 }
+
+// ── Issuing ────────────────────────────────────────────────────────
+
+/** Writer for the SSH wire format, the mirror of SshBlobReader. */
+class SshBlobWriter {
+  private parts: Uint8Array[] = [];
+
+  uint32(n: number): this {
+    const b = new Uint8Array(4);
+    new DataView(b.buffer).setUint32(0, n, false);
+    this.parts.push(b);
+    return this;
+  }
+
+  uint64(n: bigint): this {
+    const b = new Uint8Array(8);
+    new DataView(b.buffer).setBigUint64(0, n, false);
+    this.parts.push(b);
+    return this;
+  }
+
+  bytes(v: Uint8Array): this {
+    return this.uint32(v.length).raw(v);
+  }
+
+  string(v: string): this {
+    return this.bytes(new TextEncoder().encode(v));
+  }
+
+  /** A list of strings inside a single length-prefixed field. */
+  stringList(items: string[]): this {
+    const inner = new SshBlobWriter();
+    for (const i of items) inner.string(i);
+    return this.bytes(inner.build());
+  }
+
+  raw(v: Uint8Array): this {
+    this.parts.push(v);
+    return this;
+  }
+
+  build(): Uint8Array {
+    const total = this.parts.reduce((n, p) => n + p.length, 0);
+    const out = new Uint8Array(total);
+    let o = 0;
+    for (const p of this.parts) {
+      out.set(p, o);
+      o += p.length;
+    }
+    return out;
+  }
+}
+
+export interface CertificateRequest {
+  /** Raw 32-byte ed25519 key of the host being certified. */
+  hostPublicKey: Uint8Array;
+  /** Raw 32-byte ed25519 key of the authority that will sign — the VVK. */
+  caPublicKey: Uint8Array;
+  /** Names the certificate is valid for. Must not be empty. */
+  principals: string[];
+  /** Identifier shown in sshd logs. */
+  keyId: string;
+  serial: bigint;
+  validAfter: number;
+  validBefore: number;
+  /** Random 32 bytes. Injected so issuance is reproducible in tests. */
+  nonce: Uint8Array;
+}
+
+export interface UnsignedCertificate {
+  /** Exactly the bytes the authority must sign. */
+  signedBytes: Uint8Array;
+  /** Combine those bytes with the authority's signature into a certificate. */
+  assemble(signature: Uint8Array): Uint8Array;
+}
+
+/**
+ * Build a host certificate ready for signing.
+ *
+ * Deliberately split in two: the caller gets the exact bytes to sign, hands them
+ * to the authority, and returns with a signature. Nothing here needs a private
+ * key, so issuance works with a signer that lives elsewhere — for KeyleSSH, a
+ * quorum that never exposes one.
+ */
+export function buildHostCertificate(req: CertificateRequest): UnsignedCertificate {
+  if (req.hostPublicKey.length !== 32) {
+    throw new Error(`Host key must be 32 bytes, got ${req.hostPublicKey.length}`);
+  }
+  if (req.caPublicKey.length !== 32) {
+    throw new Error(`CA key must be 32 bytes, got ${req.caPublicKey.length}`);
+  }
+  if (req.principals.length === 0) {
+    // A certificate naming nothing is valid for nothing here, so refuse to
+    // issue one rather than leave it to be rejected at connection time.
+    throw new Error("A certificate must name at least one principal");
+  }
+  if (req.validBefore <= req.validAfter) {
+    throw new Error("Certificate validity window is empty");
+  }
+
+  const signedBytes = new SshBlobWriter()
+    .string(ED25519_CERT_ALGORITHM)
+    .bytes(req.nonce)
+    .bytes(req.hostPublicKey)
+    .uint64(req.serial)
+    .uint32(CERT_TYPE_HOST)
+    .string(req.keyId)
+    .stringList(req.principals)
+    .uint64(BigInt(req.validAfter))
+    .uint64(BigInt(req.validBefore))
+    .bytes(new Uint8Array()) // critical options: none, and the client refuses any
+    .bytes(new Uint8Array()) // extensions
+    .bytes(new Uint8Array()) // reserved
+    .bytes(new SshBlobWriter().string("ssh-ed25519").bytes(req.caPublicKey).build())
+    .build();
+
+  return {
+    signedBytes,
+    assemble(signature: Uint8Array): Uint8Array {
+      if (signature.length !== 64) {
+        throw new Error(`Expected a 64-byte ed25519 signature, got ${signature.length}`);
+      }
+      const sigBlob = new SshBlobWriter().string("ssh-ed25519").bytes(signature).build();
+      return new SshBlobWriter().raw(signedBytes).bytes(sigBlob).build();
+    },
+  };
+}
+
+/** Render a certificate as the single line sshd expects in a -cert.pub file. */
+export function certificateFileContents(blob: Uint8Array, comment: string): string {
+  let binary = "";
+  for (let i = 0; i < blob.length; i++) binary += String.fromCharCode(blob[i]);
+  return `${ED25519_CERT_ALGORITHM} ${btoa(binary)} ${comment}\n`;
+}

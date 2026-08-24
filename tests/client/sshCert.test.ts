@@ -14,6 +14,8 @@ import {
   ED25519_CERT_ALGORITHM,
   CERT_TYPE_HOST,
   CERT_TYPE_USER,
+  buildHostCertificate,
+  certificateFileContents,
 } from "../../client/src/lib/sshCert";
 
 // ── Wire format helpers, the mirror of the parser ──────────────────
@@ -302,5 +304,90 @@ describe("verifyCertificate", () => {
     const verdict = await verifyCertificate(parseCertificate(blob), policy());
 
     expect(verdict).toMatchObject({ valid: false, reason: expect.stringMatching(/Unsupported CA signature/i) });
+  });
+});
+
+describe("buildHostCertificate", () => {
+  const request = (over: Partial<Parameters<typeof buildHostCertificate>[0]> = {}) => ({
+    hostPublicKey: hostRaw,
+    caPublicKey: caRaw,
+    principals: ["10.0.0.5", "web-01"],
+    keyId: "web-01",
+    serial: 7n,
+    validAfter: 1_700_000_000,
+    validBefore: 1_900_000_000,
+    nonce: new Uint8Array(32).fill(9),
+    ...over,
+  });
+
+  it("produces a certificate this client accepts end to end", async () => {
+    // The strongest check available: issue, sign with the CA, then run the
+    // result through the same parser and verifier a real handshake uses.
+    const unsigned = buildHostCertificate(request());
+    const sig = new Uint8Array(
+      await crypto.subtle.sign({ name: "Ed25519" }, ca.privateKey, unsigned.signedBytes as BufferSource),
+    );
+    const blob = unsigned.assemble(sig);
+
+    const verdict = await verifyCertificate(parseCertificate(blob), policy({ now: 1_800_000_000 }));
+    expect(verdict.valid).toBe(true);
+  });
+
+  it("round-trips every field through the parser", async () => {
+    const unsigned = buildHostCertificate(request({ keyId: "db-01", serial: 12345678901234567890n }));
+    const sig = new Uint8Array(
+      await crypto.subtle.sign({ name: "Ed25519" }, ca.privateKey, unsigned.signedBytes as BufferSource),
+    );
+    const cert = parseCertificate(unsigned.assemble(sig));
+
+    expect(cert.keyId).toBe("db-01");
+    expect(cert.serial).toBe(12345678901234567890n); // beyond 2^53, must stay exact
+    expect(cert.principals).toEqual(["10.0.0.5", "web-01"]);
+    expect(cert.publicKey).toEqual(hostRaw);
+    expect(cert.type).toBe(CERT_TYPE_HOST);
+    expect(cert.validAfter).toBe(1_700_000_000n);
+    expect(cert.validBefore).toBe(1_900_000_000n);
+  });
+
+  it("is rejected if signed by the wrong authority", async () => {
+    const unsigned = buildHostCertificate(request());
+    const sig = new Uint8Array(
+      await crypto.subtle.sign({ name: "Ed25519" }, other.privateKey, unsigned.signedBytes as BufferSource),
+    );
+    const verdict = await verifyCertificate(parseCertificate(unsigned.assemble(sig)), policy());
+
+    expect(verdict).toMatchObject({ valid: false, reason: expect.stringMatching(/signature is invalid/i) });
+  });
+
+  it("refuses to issue one that names no principals", () => {
+    expect(() => buildHostCertificate(request({ principals: [] }))).toThrow(/at least one principal/i);
+  });
+
+  it("refuses an empty validity window", () => {
+    expect(() => buildHostCertificate(request({ validAfter: 100, validBefore: 100 }))).toThrow(/validity window/i);
+  });
+
+  it("refuses keys that are not ed25519 sized", () => {
+    expect(() => buildHostCertificate(request({ hostPublicKey: new Uint8Array(16) }))).toThrow(/32 bytes/);
+    expect(() => buildHostCertificate(request({ caPublicKey: new Uint8Array(64) }))).toThrow(/32 bytes/);
+  });
+
+  it("refuses a signature of the wrong length", () => {
+    const unsigned = buildHostCertificate(request());
+    expect(() => unsigned.assemble(new Uint8Array(32))).toThrow(/64-byte/);
+  });
+
+  it("renders a -cert.pub line sshd can read", async () => {
+    const unsigned = buildHostCertificate(request());
+    const sig = new Uint8Array(
+      await crypto.subtle.sign({ name: "Ed25519" }, ca.privateKey, unsigned.signedBytes as BufferSource),
+    );
+    const line = certificateFileContents(unsigned.assemble(sig), "web-01");
+
+    expect(line).toMatch(/^ssh-ed25519-cert-v01@openssh\.com [A-Za-z0-9+/=]+ web-01\n$/);
+    // The base64 in the file must be exactly the certificate bytes.
+    const b64 = line.split(" ")[1];
+    const decoded = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    expect(parseCertificate(decoded).keyId).toBe("web-01");
   });
 });
