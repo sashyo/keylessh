@@ -10,7 +10,6 @@ import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { AppLayout } from "@/components/layout/AppLayout";
 import Login from "@/pages/Login";
 import AuthRedirect from "@/pages/AuthRedirect";
-import AllowPopups from "@/pages/AllowPopups";
 import Dashboard from "@/pages/Dashboard";
 import ConsoleWorkspace from "@/pages/ConsoleWorkspace";
 import AdminDashboard from "@/pages/AdminDashboard";
@@ -198,7 +197,6 @@ function Router() {
     <Switch>
       <Route path="/login" component={Login} />
       <Route path="/auth/redirect" component={AuthRedirect} />
-      <Route path="/allow-popups" component={AllowPopups} />
       {/* All other routes require authentication */}
       <Route>
         <AuthenticatedApp />

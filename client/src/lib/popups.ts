@@ -1,8 +1,18 @@
 // Popup support detection. Tide approvals run in a popup window (the approval
 // enclave), so a browser that blocks popups breaks them.
 
-/** Where the "allow pop-ups" instructions live. Public, no login required. */
-export const POPUP_HELP_URL = "/allow-popups";
+/**
+ * The standalone "allow pop-ups" instructions page (client/public/allow-popups.html).
+ * Set VITE_POPUP_HELP_URL to host it on another domain. It's told which site
+ * to name, since on another domain it can't infer that from its own address.
+ */
+export function popupHelpUrl(): string {
+  const base = (import.meta.env.VITE_POPUP_HELP_URL as string | undefined) || "/allow-popups.html";
+  const url = new URL(base, window.location.origin);
+  url.searchParams.set("site", window.location.host);
+  url.searchParams.set("return", window.location.href);
+  return url.toString();
+}
 
 // Remembers a passed check so the test window doesn't flash on every reload.
 const POPUP_OK_KEY = "keylessh:popup-ok";
@@ -79,25 +89,3 @@ export function watchUntilPopupsAllowed(onAllowed: () => void, intervalMs = 3000
   }, intervalMs);
   return () => window.clearInterval(id);
 }
-
-export type Browser = "chrome" | "edge" | "brave" | "firefox" | "safari" | "other";
-
-export function detectBrowser(): Browser {
-  // Brave reports a Chrome user agent; it exposes navigator.brave instead.
-  if ((navigator as Navigator & { brave?: unknown }).brave) return "brave";
-  const ua = navigator.userAgent;
-  if (/Edg\//.test(ua)) return "edge";
-  if (/Firefox\//.test(ua)) return "firefox";
-  if (/Chrome\/|Chromium\/|CriOS\//.test(ua)) return "chrome";
-  if (/Safari\//.test(ua)) return "safari";
-  return "other";
-}
-
-export const BROWSER_NAME: Record<Browser, string> = {
-  chrome: "Chrome",
-  edge: "Edge",
-  brave: "Brave",
-  firefox: "Firefox",
-  safari: "Safari",
-  other: "Other",
-};

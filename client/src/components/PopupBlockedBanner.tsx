@@ -1,8 +1,22 @@
 import { useEffect, useState } from "react";
-import { AlertTriangle, CheckCircle2, X } from "lucide-react";
-import { POPUP_HELP_URL, popupsAllowed, popupsKnownOk, rememberPopupsOk, watchUntilPopupsAllowed } from "@/lib/popups";
+import { CheckCircle2, X } from "lucide-react";
+import { BlockedPopupIcon } from "@/components/BlockedPopupIcon";
+import { popupHelpUrl, popupsAllowed, popupsKnownOk, rememberPopupsOk, watchUntilPopupsAllowed } from "@/lib/popups";
 
 type Status = "checking" | "blocked" | "allowed" | "hidden";
+
+// Open the help page in a new tab; if the browser refuses even that, use this tab.
+function openHelp(e: React.MouseEvent<HTMLAnchorElement>) {
+  if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return; // let the browser handle it
+  e.preventDefault();
+  const url = popupHelpUrl();
+  const w = window.open(url, "_blank");
+  if (w) {
+    w.opener = null;
+  } else {
+    window.location.assign(url);
+  }
+}
 
 /** One-line notice shown after login when the browser blocks popups. */
 export function PopupBlockedBanner() {
@@ -56,13 +70,14 @@ export function PopupBlockedBanner() {
       className="flex items-center gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100"
       data-testid="popup-blocked-banner"
     >
-      <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+      <BlockedPopupIcon className="h-4 w-4 shrink-0 text-red-600 dark:text-red-400" />
       <p className="min-w-0 flex-1">
         Pop-ups are currently blocked. For{" "}
         <a
-          href={POPUP_HELP_URL}
+          href={popupHelpUrl()}
           target="_blank"
           rel="noopener"
+          onClick={openHelp}
           className="font-medium underline underline-offset-2 hover:text-amber-700 dark:hover:text-amber-300"
         >
           advanced security features
