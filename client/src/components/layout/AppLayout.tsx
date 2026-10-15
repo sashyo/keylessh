@@ -1,6 +1,5 @@
 import { Link, useLocation } from "wouter";
 import { useAuth } from "@/contexts/AuthContext";
-import { PopupBlockedBanner } from "@/components/PopupBlockedBanner";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -412,8 +411,6 @@ export function AppLayout({ children }: AppLayoutProps) {
         </Sidebar>
 
         <div className="flex flex-1 flex-col overflow-hidden">
-          <PopupBlockedBanner />
-
           <header className="flex h-14 items-center justify-between gap-2 sm:gap-4 border-b border-border bg-background px-2 sm:px-4">
             <div className="flex items-center gap-2 sm:gap-4 min-w-0">
               <SidebarTrigger data-testid="sidebar-trigger" className="h-10 w-10 shrink-0" />
