@@ -166,7 +166,9 @@ export function createTideSshSigner(): SSHSigner {
 
     console.log(`[TideSsh] Executing sign request...`);
     console.log(initializedRequestBytes)
-    const sigs: Uint8Array[] = await tc.executeSignRequest(initializedRequestBytes, true);
+    // waitForAll=false: resolve as soon as the ORK threshold has responded,
+    // instead of blocking on every ORK (one slow/offline ORK would stall login).
+    const sigs: Uint8Array[] = await tc.executeSignRequest(initializedRequestBytes, false);
 
     const sig = sigs?.[0];
     if (!(sig instanceof Uint8Array)) {
@@ -259,7 +261,8 @@ export function createDynamicTideSshSigner(): SSHSigner {
     }
 
     const initializedRequestBytes = await tc.createTideRequest(tideRequest.encode());
-    const sigs: Uint8Array[] = await tc.executeSignRequest(initializedRequestBytes, true);
+    // waitForAll=false: resolve once the ORK threshold has responded.
+    const sigs: Uint8Array[] = await tc.executeSignRequest(initializedRequestBytes, false);
 
     const sig = sigs?.[0];
     if (!(sig instanceof Uint8Array)) {
